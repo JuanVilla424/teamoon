@@ -1,0 +1,129 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
+
+	"github.com/JuanVilla424/teamoon/internal/config"
+	"github.com/JuanVilla424/teamoon/internal/dashboard"
+	"github.com/JuanVilla424/teamoon/internal/engine"
+	"github.com/JuanVilla424/teamoon/internal/logs"
+	"github.com/JuanVilla424/teamoon/internal/queue"
+	"github.com/JuanVilla424/teamoon/internal/web"
+)
+
+var (
+	version  = "1.1.0"
+	buildNum = "0"
+)
+
+func main() {
+	dashboard.Version = version
+	dashboard.BuildNum = buildNum
+	web.Version = version
+	web.BuildNum = buildNum
+
+	rootCmd := &cobra.Command{
+		Use:     "teamoon",
+		Short:   "Cloud development dashboard",
+		Version: version,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+
+			engineMgr := engine.NewManager()
+			logBuf := logs.NewRingBuffer(100)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if cfg.WebEnabled {
+				srv := web.NewServer(cfg, engineMgr, logBuf)
+				go srv.Start(ctx)
+			}
+
+			m := dashboard.NewModel(cfg, engineMgr, logBuf)
+			p := tea.NewProgram(m, tea.WithAltScreen())
+			if _, err := p.Run(); err != nil {
+				return err
+			}
+
+			cancel()
+			return nil
+		},
+	}
+
+	taskCmd := &cobra.Command{
+		Use:   "task",
+		Short: "Manage pending tasks",
+	}
+
+	var taskProject string
+	var taskPriority string
+
+	taskAddCmd := &cobra.Command{
+		Use:   "add [description]",
+		Short: "Add a new task",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			desc := args[0]
+			t, err := queue.Add(taskProject, desc, taskPriority)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Task #%d added: [%s] %s — %s\n", t.ID, t.Priority, t.Project, t.Description)
+			return nil
+		},
+	}
+	taskAddCmd.Flags().StringVarP(&taskProject, "project", "p", "", "Project name")
+	taskAddCmd.Flags().StringVarP(&taskPriority, "priority", "r", "med", "Priority: high, med, low")
+
+	taskDoneCmd := &cobra.Command{
+		Use:   "done [id]",
+		Short: "Mark a task as done",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var id int
+			if _, err := fmt.Sscanf(args[0], "%d", &id); err != nil {
+				return fmt.Errorf("invalid task ID: %s", args[0])
+			}
+			if err := queue.MarkDone(id); err != nil {
+				return err
+			}
+			fmt.Printf("Task #%d marked as done\n", id)
+			return nil
+		},
+	}
+
+	taskListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List pending tasks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tasks, err := queue.ListPending()
+			if err != nil {
+				return err
+			}
+			if len(tasks) == 0 {
+				fmt.Println("No pending tasks")
+				return nil
+			}
+			for _, t := range tasks {
+				fmt.Printf("#%-3d [%-4s] %-20s %s\n", t.ID, t.Priority, t.Project, t.Description)
+			}
+			return nil
+		},
+	}
+
+	taskCmd.AddCommand(taskAddCmd, taskDoneCmd, taskListCmd)
+	rootCmd.AddCommand(taskCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}

@@ -1,0 +1,206 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/JuanVilla424/teamoon/internal/config"
+	"github.com/JuanVilla424/teamoon/internal/engine"
+	"github.com/JuanVilla424/teamoon/internal/logs"
+)
+
+type sseClient chan []byte
+
+type Hub struct {
+	mu      sync.Mutex
+	clients map[sseClient]struct{}
+}
+
+func newHub() *Hub {
+	return &Hub{clients: make(map[sseClient]struct{})}
+}
+
+func (h *Hub) register(c sseClient) {
+	h.mu.Lock()
+	h.clients[c] = struct{}{}
+	h.mu.Unlock()
+}
+
+func (h *Hub) unregister(c sseClient) {
+	h.mu.Lock()
+	delete(h.clients, c)
+	h.mu.Unlock()
+}
+
+func (h *Hub) broadcast(data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		select {
+		case c <- data:
+		default:
+		}
+	}
+}
+
+type Server struct {
+	cfg   config.Config
+	store *Store
+	hub   *Hub
+}
+
+func NewServer(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *Server {
+	store := NewStore(cfg, mgr, logBuf)
+	hub := newHub()
+	return &Server{cfg: cfg, store: store, hub: hub}
+}
+
+func (s *Server) Start(ctx context.Context) {
+	s.store.Refresh()
+
+	go func() {
+		interval := time.Duration(s.cfg.RefreshIntervalSec) * time.Second
+		if interval < 5*time.Second {
+			interval = 5 * time.Second
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.store.Refresh()
+				snap := s.store.Get()
+				data, err := json.Marshal(snap)
+				if err == nil {
+					s.hub.broadcast(data)
+				}
+			}
+		}
+	}()
+
+	mux := http.NewServeMux()
+
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(staticFS())))
+
+	mux.HandleFunc("/", s.authWrap(s.handleIndex))
+	mux.HandleFunc("/api/data", s.authWrap(s.handleData))
+	mux.HandleFunc("/api/sse", s.authWrap(s.handleSSE))
+	mux.HandleFunc("/api/tasks/add", s.authWrap(s.handleTaskAdd))
+	mux.HandleFunc("/api/tasks/done", s.authWrap(s.handleTaskDone))
+	mux.HandleFunc("/api/tasks/archive", s.authWrap(s.handleTaskArchive))
+	mux.HandleFunc("/api/tasks/replan", s.authWrap(s.handleTaskReplan))
+	mux.HandleFunc("/api/tasks/autopilot", s.authWrap(s.handleTaskAutopilot))
+	mux.HandleFunc("/api/tasks/stop", s.authWrap(s.handleTaskStop))
+	mux.HandleFunc("/api/tasks/plan", s.authWrap(s.handleTaskPlan))
+	mux.HandleFunc("/api/tasks/detail", s.authWrap(s.handleTaskDetail))
+	mux.HandleFunc("/api/projects/prs", s.authWrap(s.handleProjectPRs))
+	mux.HandleFunc("/api/projects/merge-dependabot", s.authWrap(s.handleMergeDependabot))
+	mux.HandleFunc("/api/projects/pull", s.authWrap(s.handleProjectPull))
+	mux.HandleFunc("/api/projects/git-init", s.authWrap(s.handleProjectGitInit))
+	mux.HandleFunc("/api/templates/list", s.authWrap(s.handleTemplateList))
+	mux.HandleFunc("/api/templates/add", s.authWrap(s.handleTemplateAdd))
+	mux.HandleFunc("/api/templates/delete", s.authWrap(s.handleTemplateDelete))
+	mux.HandleFunc("/api/tasks/assignee", s.authWrap(s.handleTaskAssignee))
+	mux.HandleFunc("/api/chat/send", s.authWrap(s.handleChatSend))
+	mux.HandleFunc("/api/chat/history", s.authWrap(s.handleChatHistory))
+	mux.HandleFunc("/api/chat/clear", s.authWrap(s.handleChatClear))
+	mux.HandleFunc("/api/projects/init", s.authWrap(s.handleProjectInit))
+
+	addr := fmt.Sprintf(":%d", s.cfg.WebPort)
+	srv := &http.Server{Addr: addr, Handler: mux}
+
+	go func() {
+		<-ctx.Done()
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutCancel()
+		srv.Shutdown(shutCtx)
+	}()
+
+	log.Printf("[web] listening on http://localhost%s", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("[web] server error: %v", err)
+	}
+}
+
+func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.WebPassword != "" {
+			_, pass, ok := r.BasicAuth()
+			if !ok || pass != s.cfg.WebPassword {
+				w.Header().Set("WWW-Authenticate", `Basic realm="teamoon"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	content, err := staticContent("index.html")
+	if err != nil {
+		http.Error(w, "index.html not found", http.StatusInternalServerError)
+		return
+	}
+	w.Write(content)
+}
+
+func (s *Server) handleData(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	snap := s.store.Get()
+	json.NewEncoder(w).Encode(snap)
+}
+
+func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	client := make(sseClient, 8)
+	s.hub.register(client)
+	defer s.hub.unregister(client)
+
+	snap := s.store.Get()
+	if data, err := json.Marshal(snap); err == nil {
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data := <-client:
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) refreshAndBroadcast() {
+	s.store.Refresh()
+	snap := s.store.Get()
+	data, err := json.Marshal(snap)
+	if err == nil {
+		s.hub.broadcast(data)
+	}
+}

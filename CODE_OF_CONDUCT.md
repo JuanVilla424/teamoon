@@ -4,7 +4,7 @@ Take Note About This... **Take Note...**
 
 ## 🤝 Our Commitment
 
-We are committed to fostering an open and welcoming environment for all contributors. As such, everyone who participates in **GitHub CICD Template** is expected to adhere to the following code of conduct.
+We are committed to fostering an open and welcoming environment for all contributors. As such, everyone who participates in **teamoon** is expected to adhere to the following code of conduct.
 
 ## 🌟 Expected Behavior
 
@@ -37,4 +37,4 @@ This code of conduct is adapted from the [Contributor Covenant, version 2.0](htt
 
 ## 📜 License
 
-2025 - This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+2026 - This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
