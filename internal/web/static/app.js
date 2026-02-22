@@ -2944,7 +2944,7 @@ window.submitProjectInit = submitProjectInit;
 /* ── Setup View (Ubuntu Installer) ── */
 
 var SETUP_STEPS = [
-  {id:1, name:"Prerequisites", desc:"Check that required tools are installed on this system."},
+  {id:1, name:"Prerequisites", desc:"Check and install required development tools (system packages, Go, Node.js, Python, Rust, GitHub CLI, Claude Code)."},
   {id:2, name:"Configuration", desc:"Set up projects directory, web port, and authentication."},
   {id:3, name:"Skills", desc:"Install Claude Code skills for enhanced capabilities (21 skills)."},
   {id:4, name:"BMAD", desc:"Install BMAD commands for project management workflows."},
@@ -3058,20 +3058,31 @@ function streamStep(url, body, progressEl, renderEvent, onDone){
   });
 }
 
+var prereqsMissing = [];
+
 function renderSetupPrereqs(content){
   var prog = div("setup-progress");
+  var actions = div("setup-prereqs-actions");
+
   var btn = el("button","btn btn-primary",[setupStepDone[1] ? "Re-check" : "Check Prerequisites"]);
   btn.onclick = function(){
     prog.textContent = "";
+    actions.textContent = "";
+    prereqsMissing = [];
     var restore = btnLoading(btn, "Checking\u2026");
     streamStep("/api/onboarding/prereqs", null, prog, function(p, evt){
+      if(evt.type !== "tool") return;
       var ok = evt.found;
       var cls = "setup-progress-item " + (ok ? "ok" : (evt.required ? "error" : "skip"));
       var item = div(cls);
+      item.id = "setup-prereq-" + evt.id;
       item.appendChild(span("icon", ok ? "\u2713" : (evt.required ? "\u2717" : "~")));
       item.appendChild(span("label", evt.name));
-      item.appendChild(span("version", evt.version || (evt.required ? "not found" : "optional")));
+      var verText = evt.version || (ok ? "OK" : (evt.required ? "not found" : "optional, not found"));
+      item.appendChild(span("version", verText));
+      if(!ok && evt.installable) item.appendChild(span("tag-installable", "installable"));
       p.appendChild(item);
+      if(!ok) prereqsMissing.push(evt);
     }, function(status, msg){
       if(restore) restore();
       if(status === "success"){
@@ -3080,13 +3091,85 @@ function renderSetupPrereqs(content){
         prog.appendChild(div("setup-status ok",["All required tools found"]));
       } else {
         setupStepError[1] = true;
+        var installable = prereqsMissing.filter(function(m){ return m.installable; });
+        if(installable.length > 0){
+          var installBtn = el("button","btn btn-success",["Install Missing (" + installable.length + ")"]);
+          installBtn.onclick = function(){ runPrereqsInstall(prog, actions); };
+          actions.appendChild(installBtn);
+        }
         prog.appendChild(div("setup-status err",[msg || "Missing required tools"]));
       }
       render();
     });
   };
   content.appendChild(btn);
+  content.appendChild(actions);
   content.appendChild(prog);
+}
+
+function runPrereqsInstall(prog, actions){
+  actions.textContent = "";
+  var installProg = div("setup-progress");
+  installProg.style.marginTop = "16px";
+  installProg.appendChild(el("div","setup-progress-header",["Installing missing tools..."]));
+  prog.parentNode.appendChild(installProg);
+
+  var installBtn = actions.querySelector && actions.querySelector("button");
+  setupRunning = true;
+
+  streamStep("/api/onboarding/prereqs/install", null, installProg, function(p, evt){
+    if(evt.type === "detail"){
+      var detail = div("setup-progress-item running");
+      detail.appendChild(span("icon","\u2022"));
+      detail.appendChild(span("label", evt.message));
+      p.appendChild(detail);
+      return;
+    }
+    if(evt.type !== "install") return;
+
+    var existing = document.getElementById("setup-install-" + evt.id);
+    if(existing){
+      var ic = existing.querySelector(".icon");
+      var lb = existing.querySelector(".label");
+      if(evt.status === "done"){ ic.textContent = "\u2713"; existing.className = "setup-progress-item ok"; }
+      else if(evt.status === "error"){ ic.textContent = "\u2717"; existing.className = "setup-progress-item error"; if(evt.message && lb) lb.textContent = evt.name + " — " + evt.message; }
+      else if(evt.status === "skipped"){ ic.textContent = "~"; existing.className = "setup-progress-item skip"; }
+      // Also update the check result row
+      var checkRow = document.getElementById("setup-prereq-" + evt.id);
+      if(checkRow && evt.status === "done"){
+        checkRow.className = "setup-progress-item ok";
+        var cIcon = checkRow.querySelector(".icon");
+        if(cIcon) cIcon.textContent = "\u2713";
+        var cVer = checkRow.querySelector(".version");
+        if(cVer) cVer.textContent = "installed";
+        var cTag = checkRow.querySelector(".tag-installable");
+        if(cTag) cTag.remove();
+      }
+      return;
+    }
+
+    var cls = "setup-progress-item";
+    var iconText = "\u2022";
+    if(evt.status === "done"){ cls += " ok"; iconText = "\u2713"; }
+    else if(evt.status === "skipped"){ cls += " skip"; iconText = "~"; }
+    else if(evt.status === "error"){ cls += " error"; iconText = "\u2717"; }
+    else { cls += " running"; }
+    var item = div(cls);
+    item.id = "setup-install-" + evt.id;
+    item.appendChild(span("icon", iconText));
+    item.appendChild(span("label", evt.name + (evt.message && evt.status === "error" ? " — " + evt.message : "")));
+    p.appendChild(item);
+  }, function(status, msg){
+    setupRunning = false;
+    if(status === "success"){
+      setupStepDone[1] = true;
+      delete setupStepError[1];
+      installProg.appendChild(div("setup-status ok",["All tools installed successfully"]));
+    } else {
+      installProg.appendChild(div("setup-status err",[msg || "Some tools failed to install"]));
+    }
+    render();
+  });
 }
 
 function renderSetupConfig(content){
