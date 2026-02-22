@@ -265,10 +265,14 @@ func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, re
 		limit int
 	}{
 		{"CLAUDE.md", "Project Guidelines (from CLAUDE.md)", 2000},
+		{"README.md", "Project README (from README.md)", 1000},
+		{"INSTALL.md", "Project Install Guide (from INSTALL.md)", 800},
 		{"MEMORY.md", "Project Memory (from MEMORY.md)", 1500},
 		{"CONTEXT.md", "Project Context (from CONTEXT.md)", 1500},
 		{"AGENTS.md", "Project Agents (from AGENTS.md)", 1000},
 		{"CHANGELOG.md", "Recent Changes (from CHANGELOG.md)", 800},
+		{"VERSIONING.md", "Versioning Strategy (from VERSIONING.md)", 800},
+		{"CONTRIBUTING.md", "Contributing Guidelines (from CONTRIBUTING.md)", 800},
 	} {
 		cfPath := filepath.Join(projectPath, cf.file)
 		if data, err := os.ReadFile(cfPath); err == nil {
@@ -308,6 +312,7 @@ func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, re
 	sb.WriteString("\n6. NEVER invoke /bmad:core:workflows:party-mode or any /bmad slash command. You are already running inside the autopilot system. Invoking skills or workflows will break execution.")
 	sb.WriteString("\n7. NEVER use EnterPlanMode or create plan files. You ARE the plan execution. Just do the work.")
 	sb.WriteString("\n8. Be concise. Do not narrate what you are about to do. Just do it.")
+	sb.WriteString("\n9. ALWAYS work on the dev branch. If not on dev, run: git checkout dev")
 	return sb.String()
 }
 

@@ -137,6 +137,11 @@ $RECYCLE.BIN/
 CLAUDE.md
 MEMORY.md
 CONTEXT.md
+.claude/
+
+# Compiled binaries
+/install-hooks
+/install-skills
 
 # Secrets
 .env.local

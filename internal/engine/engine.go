@@ -36,13 +36,23 @@ type Runner struct {
 	done   chan struct{}
 }
 
+type ProjectLoop struct {
+	project string
+	cancel  context.CancelFunc
+	done    chan struct{}
+}
+
 type Manager struct {
-	mu      sync.Mutex
-	runners map[int]*Runner
+	mu           sync.Mutex
+	runners      map[int]*Runner
+	projectLoops map[string]*ProjectLoop
 }
 
 func NewManager() *Manager {
-	return &Manager{runners: make(map[int]*Runner)}
+	return &Manager{
+		runners:      make(map[int]*Runner),
+		projectLoops: make(map[string]*ProjectLoop),
+	}
 }
 
 func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg)) {
@@ -117,4 +127,70 @@ func (m *Manager) StopAll() {
 		r.cancel()
 		<-r.done
 	}
+}
+
+// StartProject launches an autopilot loop for the given project.
+// runLoop is called in a goroutine with the loop context.
+// Returns false if already running or max_concurrent reached.
+func (m *Manager) StartProject(project string, maxConcurrent int, runLoop func(ctx context.Context)) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.projectLoops[project]; exists {
+		return false
+	}
+	if maxConcurrent > 0 && len(m.projectLoops) >= maxConcurrent {
+		return false
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pl := &ProjectLoop{
+		project: project,
+		cancel:  cancel,
+		done:    make(chan struct{}),
+	}
+	m.projectLoops[project] = pl
+
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.projectLoops, project)
+			m.mu.Unlock()
+			close(pl.done)
+		}()
+		runLoop(ctx)
+	}()
+
+	return true
+}
+
+// StopProject cancels the project autopilot loop and waits for it to finish.
+func (m *Manager) StopProject(project string) {
+	m.mu.Lock()
+	pl, exists := m.projectLoops[project]
+	m.mu.Unlock()
+	if !exists {
+		return
+	}
+	pl.cancel()
+	<-pl.done
+}
+
+// IsProjectRunning returns true if a project autopilot loop is active.
+func (m *Manager) IsProjectRunning(project string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, exists := m.projectLoops[project]
+	return exists
+}
+
+// ActiveProjectLoops returns the names of all currently running project loops.
+func (m *Manager) ActiveProjectLoops() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	names := make([]string, 0, len(m.projectLoops))
+	for name := range m.projectLoops {
+		names = append(names, name)
+	}
+	return names
 }
