@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "teamoon"
-version = "1.0.6"
+version = "1.0.7"
 description = "Open-source Clawdbot alternative — TUI + Web dashboard and autopilot engine for Claude Code with token tracking, usage metrics, task queue, project monitoring, and automated task execution"
 authors = ["B <g46327wsj1.marbling129@passinbox.com>"]
 license = "GPL-3.0"
