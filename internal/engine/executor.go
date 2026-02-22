@@ -346,6 +346,16 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 		projectPath = home
 	}
 
+	// Apply step timeout if configured
+	spawnCtx := ctx
+	var cancelTimeout context.CancelFunc
+	if cfg.Spawn.StepTimeoutMin > 0 {
+		spawnCtx, cancelTimeout = context.WithTimeout(ctx, time.Duration(cfg.Spawn.StepTimeoutMin)*time.Minute)
+	}
+	if cancelTimeout != nil {
+		defer cancelTimeout()
+	}
+
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 
 	// Satirical git identity for autopilot commits
@@ -363,7 +373,7 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 		defer cleanup()
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := exec.CommandContext(spawnCtx, "claude", args...)
 	cmd.Env = env
 	cmd.Dir = projectPath
 
@@ -451,6 +461,18 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 	err = cmd.Wait()
 	exitCode := 0
 	if err != nil {
+		// Detect step timeout (spawnCtx expired but parent ctx still alive)
+		if spawnCtx.Err() != nil && ctx.Err() == nil {
+			send(LogMsg{Entry: logs.LogEntry{
+				Time:    time.Now(),
+				TaskID:  taskID,
+				Project: project,
+				Message: fmt.Sprintf("Step timed out after %d min", cfg.Spawn.StepTimeoutMin),
+				Level:   logs.LevelError,
+				Agent:   agent,
+			}})
+			return spawnResult{ExitCode: 124, Output: fullOutput.String()}, fmt.Errorf("step timeout after %d min", cfg.Spawn.StepTimeoutMin)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
