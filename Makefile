@@ -20,8 +20,6 @@ sync-bmad:
 		cp -r $(BMAD_SRC)/* $$DST/; \
 		echo "{\"latest\":\"$$BMAD_VER\",\"supported\":[\"$$BMAD_VER\"]}" > $(BMAD_ASSETS)/versions.json; \
 		echo "Synced BMAD $$BMAD_VER"; \
-	else \
-		echo "BMAD source not found, using existing assets"; \
 	fi
 
 build: sync-bmad
