@@ -13,9 +13,10 @@ type MCPServer struct {
 }
 
 type SpawnConfig struct {
-	Model    string `json:"model"`
-	Effort   string `json:"effort"`
-	MaxTurns int    `json:"max_turns"`
+	Model          string `json:"model"`
+	Effort         string `json:"effort"`
+	MaxTurns       int    `json:"max_turns"`
+	StepTimeoutMin int    `json:"step_timeout_min"`
 }
 
 type SkeletonConfig struct {
@@ -78,7 +79,7 @@ func DefaultConfig() Config {
 		WebEnabled:         false,
 		WebPort:            7777,
 		WebPassword:        "",
-		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 25},
+		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 25, StepTimeoutMin: 5},
 		Skeleton:           DefaultSkeleton(),
 		MaxConcurrent:      3,
 		MCPServers:         nil,

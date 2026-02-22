@@ -1,7 +1,7 @@
 # 🌙 teamoon
 
 [![Go](https://img.shields.io/badge/Go-1.24%2B-00ADD8.svg)](https://go.dev/)
-[![Version](https://img.shields.io/badge/Version-1.0.2-blue.svg)](VERSIONING.md)
+[![Version](https://img.shields.io/badge/Version-1.0.3-blue.svg)](VERSIONING.md)
 [![Build](https://img.shields.io/github/actions/workflow/status/JuanVilla424/teamoon/ci.yml?branch=main&label=Build)](https://github.com/JuanVilla424/teamoon/actions)
 [![Status](https://img.shields.io/badge/Status-Active-green.svg)]()
 [![License](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)
@@ -19,8 +19,8 @@ Terminal UI dashboard for monitoring Claude Code usage, managing development tas
 - [Usage](#-usage)
 - [Configuration](#-configuration)
 - [Contributing](#-contributing)
-- [License](#-license)
 - [Contact](#-contact)
+- [License](#-license)
 
 ## ✨ Features
 
@@ -159,13 +159,13 @@ Configuration is stored at `~/.config/teamoon/config.json`.
 
 We welcome contributions! Please read our [Contributing Guidelines](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before getting started.
 
-## 📜 License
-
-2026 - This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
-
 ## 📬 Contact
 
 For questions, suggestions, or issues:
 
 - **GitHub Issues**: [github.com/JuanVilla424/teamoon/issues](https://github.com/JuanVilla424/teamoon/issues)
 - **Email**: [r6ty5r296it6tl4eg5m.constant214@passinbox.com](mailto:r6ty5r296it6tl4eg5m.constant214@passinbox.com)
+
+## 📜 License
+
+2026 - This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
