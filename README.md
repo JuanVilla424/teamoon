@@ -12,15 +12,17 @@ Terminal UI dashboard and web interface for monitoring Claude Code usage, managi
 
 - [Features](#-features)
 - [Getting Started](#-getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-  - [Environment Setup](#environment-setup)
+  - [Quick Install](#quick-install)
+  - [Manual Install](#manual-install)
+  - [Onboarding](#onboarding)
+  - [Make Targets](#make-targets)
   - [Pre-Commit Hooks](#pre-commit-hooks)
 - [Usage](#-usage)
   - [TUI Dashboard](#tui-dashboard)
   - [Web Dashboard](#web-dashboard)
   - [CLI Task Management](#cli-task-management)
 - [Configuration](#-configuration)
+- [Development](#-development)
 - [CI/CD](#-cicd)
 - [Contributing](#-contributing)
 - [Contact](#-contact)
@@ -42,15 +44,19 @@ Terminal UI dashboard and web interface for monitoring Claude Code usage, managi
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### Quick Install
 
-- [Go](https://go.dev/) 1.24+ — see [INSTALL.md](INSTALL.md) for installation instructions
-- [Node.js](https://nodejs.org/) 18+ (required for skills and MCP servers)
-- [Git](https://git-scm.com/)
-- [Make](https://www.gnu.org/software/make/)
-- [`gh` CLI](https://cli.github.com/) (optional, for GitHub PR features)
+Single command that installs all prerequisites and teamoon:
 
-### Installation
+```bash
+curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/main/install.sh | bash
+```
+
+Installs system packages, Go, Node.js, Python, Rust, GitHub CLI, Claude Code, then builds and installs teamoon with systemd service. Skips anything already installed — safe to re-run.
+
+> Requires Ubuntu/Debian with sudo access. See [INSTALL.md](INSTALL.md) for full details.
+
+### Manual Install
 
 ```bash
 git clone https://github.com/JuanVilla424/teamoon.git
@@ -59,33 +65,35 @@ make build
 make install
 ```
 
-### Initialize (Onboarding)
+Prerequisites: [Go](https://go.dev/) 1.24+, [Node.js](https://nodejs.org/) 18+, [Git](https://git-scm.com/), [Make](https://www.gnu.org/software/make/). See [INSTALL.md](INSTALL.md) for step-by-step prerequisite setup.
 
-```bash
-teamoon init
-```
+### Onboarding
 
-Interactive setup wizard that configures your environment:
+After installation, set up your environment via **web UI** or **CLI**:
 
-1. **Prerequisites** — verifies required tools (node, npx, git)
-2. **Config** — creates `~/.config/teamoon/config.json` with your preferences
-3. **Skills** — installs 21 curated Claude Code agent skills (superpowers + anthropic + vercel)
-4. **BMAD** — installs BMAD method framework commands globally
-5. **Hooks** — sets up global security hooks in `~/.claude/hooks/`
-6. **MCP Servers** — configures Context7, Memory, and Sequential Thinking
+**Web** (recommended) — open `http://localhost:7777` after `teamoon serve`. The setup wizard auto-launches on first visit with an Ubuntu installer-style interface that checks, installs, and configures everything step by step.
 
-See [INSTALL.md](INSTALL.md) for manual installation and full details.
+**CLI** — run `teamoon init` for an interactive terminal wizard.
+
+Both methods configure:
+
+1. **Prerequisites** — verifies and installs required tools
+2. **Config** — creates `~/.config/teamoon/config.json`
+3. **Skills** — 21 Claude Code agent skills (superpowers + anthropic + vercel)
+4. **BMAD** — project management framework commands
+5. **Hooks** — global security hooks for Claude Code
+6. **MCP Servers** — Context7, Memory, Sequential Thinking
 
 ### Make Targets
 
-| Target    | Description                               |
-| --------- | ----------------------------------------- |
-| `build`   | Compile the binary                        |
-| `test`    | Run all tests (`go test ./internal/...`)  |
-| `install` | Build + copy binary to `/usr/local/bin`   |
-| `service` | Build + install + restart systemd service |
-| `release` | Cross-compile binary (used by CI/CD)      |
-| `clean`   | Remove compiled binary                    |
+| Target    | Description                              |
+| --------- | ---------------------------------------- |
+| `build`   | Compile the binary                       |
+| `test`    | Run all tests (`go test ./internal/...`) |
+| `install` | Build + install binary + systemd service |
+| `service` | Alias for `install`                      |
+| `release` | Cross-compile binary (used by CI/CD)     |
+| `clean`   | Remove compiled binary                   |
 
 ### Pre-Commit Hooks
 
@@ -198,6 +206,10 @@ Configurable per-project via `project_skeletons` map.
 | `pre_commit`      | bool | `true`  | Enable pre-commit hooks step        |
 | `commit`          | bool | `true`  | Enable auto-commit step             |
 | `push`            | bool | `false` | Enable auto-push step               |
+
+## 🛠️ Development
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed development environment setup, Claude Code skills catalog, security hooks reference, and manual installation commands.
 
 ## 🔄 CI/CD
 
