@@ -136,10 +136,11 @@ jobs:
       - name: Push Tag for Main Branch
         id: push_tag_to_main
         if: github.ref == 'refs/heads/main' && steps.check_arrow.outputs.contains_arrow == 'true'
+        env:
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          VERSION=${{ steps.get_version.outputs.current_version }}
+          VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['tool']['poetry']['version'])")
           TAG_NAME="v${VERSION}"
           git tag "$TAG_NAME"
-          git push origin "$TAG_NAME"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git push "https://x-access-token:${ACCESS_TOKEN}@github.com/${REPO}.git" "$TAG_NAME"
