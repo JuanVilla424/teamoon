@@ -1873,6 +1873,10 @@ func (s *Server) handleOnboardingPrereqs(w http.ResponseWriter, r *http.Request)
 	s.sseOnboarding(w, r, onboarding.StreamPrereqs)
 }
 
+func (s *Server) handleOnboardingPrereqsInstall(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamPrereqsInstall)
+}
+
 func (s *Server) handleOnboardingSkills(w http.ResponseWriter, r *http.Request) {
 	s.sseOnboarding(w, r, onboarding.StreamSkills)
 }

@@ -157,26 +157,6 @@ func WebInstallMCP() error {
 	return installMCPServersQuiet()
 }
 
-// StreamPrereqs checks prerequisites and streams each tool result via progress callback.
-func StreamPrereqs(progress ProgressFunc) error {
-	var missing []string
-	for _, tool := range tools {
-		version := getVersion(tool.name)
-		found := version != ""
-		if !found && tool.required {
-			missing = append(missing, tool.name)
-		}
-		progress(map[string]any{
-			"type": "tool", "name": tool.name,
-			"version": version, "required": tool.required, "found": found,
-		})
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required tools: %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
 // StreamSkills sets up the teamoon home symlink and installs skills with per-skill progress.
 func StreamSkills(progress ProgressFunc) error {
 	home, err := os.UserHomeDir()
