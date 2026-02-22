@@ -14,6 +14,9 @@ on:
 jobs:
   version-controller:
     runs-on: ubuntu-latest
+    outputs:
+      contains_arrow: ${{ steps.check_arrow.outputs.contains_arrow }}
+      release_tag: ${{ steps.push_tag_to_main.outputs.release_tag }}
     steps:
       - name: Checkout Repository
         id: checkout_repository
@@ -144,8 +147,15 @@ jobs:
           TAG_NAME="v${VERSION}"
           git tag "$TAG_NAME"
           git push "https://x-access-token:${ACCESS_TOKEN}@github.com/${REPO}.git" "$TAG_NAME"
-          curl -s -X POST \
-            -H "Authorization: token ${ACCESS_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO}/dispatches" \
-            -d "{\"event_type\": \"release\", \"client_payload\": {\"tag\": \"${TAG_NAME}\"}}"
+          echo "release_tag=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+  trigger-release:
+    needs: version-controller
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.version-controller.outputs.release_tag != ''
+    uses: ./.github/workflows/release-controller.yml
+    with:
+      tag: ${{ needs.version-controller.outputs.release_tag }}
+    permissions:
+      contents: write
