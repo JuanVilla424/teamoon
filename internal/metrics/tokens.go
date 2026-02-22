@@ -5,8 +5,36 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
+
+// contextLimitForModel returns the context window size for known Claude models.
+func contextLimitForModel(model string) int {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "opus"):
+		return 200000
+	case strings.Contains(m, "sonnet"):
+		return 200000
+	case strings.Contains(m, "haiku"):
+		return 200000
+	default:
+		return 200000 // safe default for Claude models
+	}
+}
+
+// modelTier returns "opus", "sonnet", or "haiku" from a model string.
+func modelTier(model string) string {
+	m := strings.ToLower(model)
+	if strings.Contains(m, "opus") {
+		return "opus"
+	}
+	if strings.Contains(m, "haiku") {
+		return "haiku"
+	}
+	return "sonnet" // default
+}
 
 type Usage struct {
 	InputTokens              int `json:"input_tokens"`
@@ -25,14 +53,42 @@ type jsonlEntry struct {
 	Timestamp string   `json:"timestamp,omitempty"`
 }
 
+// ModelTokens tracks tokens per model tier for accurate cost calculation.
+type ModelTokens struct {
+	Input       int
+	Output      int
+	CacheRead   int
+	CacheCreate int
+}
+
 type TokenSummary struct {
-	Input        int    `json:"input"`
-	Output       int    `json:"output"`
-	CacheRead    int    `json:"cache_read"`
-	CacheCreate  int    `json:"cache_create"`
-	Total        int    `json:"total"`
-	LastModel    string `json:"last_model"`
-	SessionCount int    `json:"session_count"`
+	Input        int                     `json:"input"`
+	Output       int                     `json:"output"`
+	CacheRead    int                     `json:"cache_read"`
+	CacheCreate  int                     `json:"cache_create"`
+	Total        int                     `json:"total"`
+	LastModel    string                  `json:"last_model"`
+	SessionCount int                     `json:"session_count"`
+	ByModel      map[string]*ModelTokens `json:"-"` // keyed by tier: "opus", "sonnet", "haiku"
+}
+
+func (s *TokenSummary) addUsage(u Usage, tier string) {
+	s.Input += u.InputTokens
+	s.Output += u.OutputTokens
+	s.CacheRead += u.CacheReadInputTokens
+	s.CacheCreate += u.CacheCreationInputTokens
+	if s.ByModel == nil {
+		s.ByModel = make(map[string]*ModelTokens)
+	}
+	mt, ok := s.ByModel[tier]
+	if !ok {
+		mt = &ModelTokens{}
+		s.ByModel[tier] = mt
+	}
+	mt.Input += u.InputTokens
+	mt.Output += u.OutputTokens
+	mt.CacheRead += u.CacheReadInputTokens
+	mt.CacheCreate += u.CacheCreationInputTokens
 }
 
 type SessionContext struct {
@@ -41,6 +97,21 @@ type SessionContext struct {
 	ContextPercent float64 `json:"context_percent"`
 	OutputTokens   int     `json:"output_tokens"`
 	SessionFile    string  `json:"session_file"`
+}
+
+// collectJSONL finds all *.jsonl files recursively under a directory.
+func collectJSONL(root string) []string {
+	var files []string
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".jsonl") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files
 }
 
 func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month TokenSummary, err error) {
@@ -63,10 +134,8 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 			continue
 		}
 		sessionDir := filepath.Join(projectsDir, d.Name())
-		files, err := filepath.Glob(filepath.Join(sessionDir, "*.jsonl"))
-		if err != nil {
-			continue
-		}
+		// Recursively find all jsonl files (including subagents/)
+		files := collectJSONL(sessionDir)
 
 		for _, f := range files {
 			info, err := os.Stat(f)
@@ -80,6 +149,7 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 			}
 
 			var fileModel string
+			var fileTier string
 			entries := parseJSONL(f)
 			for _, e := range entries {
 				if e.Message == nil || e.Message.Usage.InputTokens == 0 {
@@ -87,27 +157,23 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 				}
 
 				u := e.Message.Usage
-
-				month.Input += u.InputTokens
-				month.Output += u.OutputTokens
-				month.CacheRead += u.CacheReadInputTokens
-				month.CacheCreate += u.CacheCreationInputTokens
 				if e.Message.Model != "" {
 					fileModel = e.Message.Model
+					fileTier = modelTier(e.Message.Model)
+				}
+				tier := fileTier
+				if tier == "" {
+					tier = "sonnet"
 				}
 
+				month.addUsage(u, tier)
+
 				if modTime.After(weekStart) || modTime.Equal(weekStart) {
-					week.Input += u.InputTokens
-					week.Output += u.OutputTokens
-					week.CacheRead += u.CacheReadInputTokens
-					week.CacheCreate += u.CacheCreationInputTokens
+					week.addUsage(u, tier)
 				}
 
 				if modTime.After(todayStart) || modTime.Equal(todayStart) {
-					today.Input += u.InputTokens
-					today.Output += u.OutputTokens
-					today.CacheRead += u.CacheReadInputTokens
-					today.CacheCreate += u.CacheCreationInputTokens
+					today.addUsage(u, tier)
 				}
 			}
 
@@ -151,7 +217,8 @@ func ScanActiveSession(claudeDir string, contextLimit int) SessionContext {
 			continue
 		}
 		sessionDir := filepath.Join(projectsDir, d.Name())
-		files, _ := filepath.Glob(filepath.Join(sessionDir, "*.jsonl"))
+		// Include subagent files too
+		files := collectJSONL(sessionDir)
 		for _, f := range files {
 			info, err := os.Stat(f)
 			if err != nil {
@@ -172,9 +239,13 @@ func ScanActiveSession(claudeDir string, contextLimit int) SessionContext {
 
 	var lastContext int
 	var totalOutput int
+	var lastModel string
 	for _, e := range entries {
 		if e.Message == nil {
 			continue
+		}
+		if e.Message.Model != "" {
+			lastModel = e.Message.Model
 		}
 		u := e.Message.Usage
 		ctx := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
@@ -184,14 +255,23 @@ func ScanActiveSession(claudeDir string, contextLimit int) SessionContext {
 		totalOutput += u.OutputTokens
 	}
 
+	// Auto-detect context limit from model if not configured
+	limit := contextLimit
+	if limit == 0 && lastModel != "" {
+		limit = contextLimitForModel(lastModel)
+	}
+
 	pct := 0.0
-	if contextLimit > 0 && lastContext > 0 {
-		pct = float64(lastContext) / float64(contextLimit) * 100
+	if limit > 0 && lastContext > 0 {
+		pct = float64(lastContext) / float64(limit) * 100
+		if pct > 100 {
+			pct = 100
+		}
 	}
 
 	return SessionContext{
 		ContextTokens:  lastContext,
-		ContextLimit:   contextLimit,
+		ContextLimit:   limit,
 		ContextPercent: pct,
 		OutputTokens:   totalOutput,
 		SessionFile:    filepath.Base(newestFile),

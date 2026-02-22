@@ -506,6 +506,7 @@ func (m Model) startAutopilot(t queue.Task) tea.Cmd {
 	task := t
 	ch := m.msgChan
 	mgr := m.engineMgr
+	cfg := m.cfg
 
 	return func() tea.Msg {
 		p, err := plan.ParsePlan(plan.PlanPath(task.ID))
@@ -517,7 +518,7 @@ func (m Model) startAutopilot(t queue.Task) tea.Cmd {
 			}
 		}
 		queue.UpdateState(task.ID, queue.StateRunning)
-		mgr.Start(task, p, func(msg tea.Msg) { ch <- msg })
+		mgr.Start(task, p, cfg, func(msg tea.Msg) { ch <- msg })
 		return refreshMsg{}
 	}
 }
@@ -535,6 +536,7 @@ func (m Model) startAllAutopilot() tea.Cmd {
 
 	ch := m.msgChan
 	mgr := m.engineMgr
+	cfg := m.cfg
 
 	return func() tea.Msg {
 		for _, task := range planned {
@@ -543,7 +545,7 @@ func (m Model) startAllAutopilot() tea.Cmd {
 				continue
 			}
 			queue.UpdateState(task.ID, queue.StateRunning)
-			mgr.Start(task, p, func(msg tea.Msg) { ch <- msg })
+			mgr.Start(task, p, cfg, func(msg tea.Msg) { ch <- msg })
 		}
 		return refreshMsg{}
 	}

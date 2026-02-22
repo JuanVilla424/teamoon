@@ -12,10 +12,12 @@ import (
 )
 
 type Step struct {
-	Number int
-	Title  string
-	Body   string
-	Verify string
+	Number   int
+	Title    string
+	Body     string
+	Verify   string
+	Agent    string
+	ReadOnly bool
 }
 
 type Plan struct {
@@ -47,8 +49,10 @@ func SavePlan(taskID int, content string) error {
 }
 
 var (
-	stepRe   = regexp.MustCompile(`^###\s+Step\s+(\d+):\s+(.+)$`)
-	verifyRe = regexp.MustCompile(`(?i)^Verify:\s+(.+)$`)
+	stepRe     = regexp.MustCompile(`^###\s+Step\s+(\d+):\s+(.+)$`)
+	verifyRe   = regexp.MustCompile(`(?i)^Verify:\s+(.+)$`)
+	agentRe    = regexp.MustCompile(`(?i)^Agent:\s+(.+)$`)
+	readOnlyRe = regexp.MustCompile(`(?i)^ReadOnly:\s*(true|yes)$`)
 )
 
 func ParsePlan(path string) (Plan, error) {
@@ -120,6 +124,14 @@ func ParsePlan(path string) (Plan, error) {
 			if matches := verifyRe.FindStringSubmatch(line); matches != nil {
 				if curStep != nil {
 					curStep.Verify = matches[1]
+				}
+			} else if matches := agentRe.FindStringSubmatch(line); matches != nil {
+				if curStep != nil {
+					curStep.Agent = strings.TrimSpace(matches[1])
+				}
+			} else if readOnlyRe.MatchString(line) {
+				if curStep != nil {
+					curStep.ReadOnly = true
 				}
 			} else {
 				bodyLines = append(bodyLines, line)

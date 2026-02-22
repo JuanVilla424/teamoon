@@ -316,6 +316,23 @@ func SetAllAutoPilot(on bool) error {
 	return saveStore(store)
 }
 
+func UpdateDescription(id int, description string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].Description = description
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
 func UpdateAssignee(id int, assignee string) error {
 	storeMu.Lock()
 	defer storeMu.Unlock()

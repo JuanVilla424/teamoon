@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -40,21 +42,12 @@ func main() {
 			engineMgr := engine.NewManager()
 			logBuf := logs.NewRingBuffer(100)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			if cfg.WebEnabled {
-				srv := web.NewServer(cfg, engineMgr, logBuf)
-				go srv.Start(ctx)
-			}
-
 			m := dashboard.NewModel(cfg, engineMgr, logBuf)
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			if _, err := p.Run(); err != nil {
 				return err
 			}
 
-			cancel()
 			return nil
 		},
 	}
@@ -120,8 +113,34 @@ func main() {
 		},
 	}
 
+	serveCmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run web server only (no TUI)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+			cfg.WebEnabled = true
+
+			engineMgr := engine.NewManager()
+			logBuf := logs.NewRingBuffer(100)
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			srv := web.NewServer(cfg, engineMgr, logBuf)
+			go srv.Start(ctx)
+
+			fmt.Printf("teamoon serve v%s #%s on :%d\n", version, buildNum, cfg.WebPort)
+			<-ctx.Done()
+			fmt.Println("\nshutting down")
+			return nil
+		},
+	}
+
 	taskCmd.AddCommand(taskAddCmd, taskDoneCmd, taskListCmd)
-	rootCmd.AddCommand(taskCmd)
+	rootCmd.AddCommand(taskCmd, serveCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

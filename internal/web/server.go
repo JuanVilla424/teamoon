@@ -49,9 +49,11 @@ func (h *Hub) broadcast(data []byte) {
 }
 
 type Server struct {
-	cfg   config.Config
-	store *Store
-	hub   *Hub
+	cfg        config.Config
+	store      *Store
+	hub        *Hub
+	refreshMu  sync.Mutex
+	refreshPending bool
 }
 
 func NewServer(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *Server {
@@ -107,11 +109,23 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/templates/list", s.authWrap(s.handleTemplateList))
 	mux.HandleFunc("/api/templates/add", s.authWrap(s.handleTemplateAdd))
 	mux.HandleFunc("/api/templates/delete", s.authWrap(s.handleTemplateDelete))
+	mux.HandleFunc("/api/templates/update", s.authWrap(s.handleTemplateUpdate))
 	mux.HandleFunc("/api/tasks/assignee", s.authWrap(s.handleTaskAssignee))
+	mux.HandleFunc("/api/tasks/update", s.authWrap(s.handleTaskUpdate))
 	mux.HandleFunc("/api/chat/send", s.authWrap(s.handleChatSend))
 	mux.HandleFunc("/api/chat/history", s.authWrap(s.handleChatHistory))
 	mux.HandleFunc("/api/chat/clear", s.authWrap(s.handleChatClear))
 	mux.HandleFunc("/api/projects/init", s.authWrap(s.handleProjectInit))
+	mux.HandleFunc("/api/config", s.authWrap(s.handleConfigGet))
+	mux.HandleFunc("/api/config/save", s.authWrap(s.handleConfigSave))
+	mux.HandleFunc("/api/mcp/list", s.authWrap(s.handleMCPList))
+	mux.HandleFunc("/api/mcp/toggle", s.authWrap(s.handleMCPToggle))
+	mux.HandleFunc("/api/mcp/init", s.authWrap(s.handleMCPInit))
+	mux.HandleFunc("/api/mcp/catalog", s.authWrap(s.handleMCPCatalog))
+	mux.HandleFunc("/api/mcp/install", s.authWrap(s.handleMCPInstall))
+	mux.HandleFunc("/api/skills/list", s.authWrap(s.handleSkillsList))
+	mux.HandleFunc("/api/skills/catalog", s.authWrap(s.handleSkillsCatalog))
+	mux.HandleFunc("/api/skills/install", s.authWrap(s.handleSkillsInstall))
 
 	addr := fmt.Sprintf(":%d", s.cfg.WebPort)
 	srv := &http.Server{Addr: addr, Handler: mux}
@@ -174,7 +188,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := make(sseClient, 8)
+	client := make(sseClient, 32)
 	s.hub.register(client)
 	defer s.hub.unregister(client)
 
@@ -203,4 +217,22 @@ func (s *Server) refreshAndBroadcast() {
 	if err == nil {
 		s.hub.broadcast(data)
 	}
+}
+
+// scheduleRefresh batches rapid log-driven refreshes (max one per 200ms).
+func (s *Server) scheduleRefresh() {
+	s.refreshMu.Lock()
+	if s.refreshPending {
+		s.refreshMu.Unlock()
+		return
+	}
+	s.refreshPending = true
+	s.refreshMu.Unlock()
+
+	time.AfterFunc(200*time.Millisecond, func() {
+		s.refreshMu.Lock()
+		s.refreshPending = false
+		s.refreshMu.Unlock()
+		s.refreshAndBroadcast()
+	})
 }

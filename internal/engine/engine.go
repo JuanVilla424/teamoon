@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
 	"github.com/JuanVilla424/teamoon/internal/queue"
@@ -44,7 +45,7 @@ func NewManager() *Manager {
 	return &Manager{runners: make(map[int]*Runner)}
 }
 
-func (m *Manager) Start(task queue.Task, p plan.Plan, send func(tea.Msg)) {
+func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg)) {
 	m.mu.Lock()
 	if _, exists := m.runners[task.ID]; exists {
 		m.mu.Unlock()
@@ -80,7 +81,7 @@ func (m *Manager) Start(task queue.Task, p plan.Plan, send func(tea.Msg)) {
 			m.mu.Unlock()
 			close(r.done)
 		}()
-		runTask(ctx, task, p, send)
+		runTask(ctx, task, p, cfg, send)
 	}()
 }
 

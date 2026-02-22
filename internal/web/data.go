@@ -42,6 +42,7 @@ type LogEntryJSON struct {
 	Project string    `json:"project"`
 	Message string    `json:"message"`
 	Level   string    `json:"level"`
+	Agent   string    `json:"agent,omitempty"`
 }
 
 type DataSnapshot struct {
@@ -87,16 +88,21 @@ func (s *Store) Refresh() {
 	webTasks := make([]WebTask, len(activeTasks))
 	for i, t := range activeTasks {
 		effState := string(queue.EffectiveState(t))
+		isRunning := s.engineMgr.IsRunning(t.ID)
 		// Show "generating" if plan generation is in progress
 		generatingMu.Lock()
 		if effState == "pending" && generatingSet[t.ID] {
 			effState = "generating"
 		}
 		generatingMu.Unlock()
+		// Engine is authoritative: if running, override stale JSON state
+		if isRunning && (effState == "pending" || effState == "planned") {
+			effState = "running"
+		}
 		webTasks[i] = WebTask{
 			Task:           t,
 			EffectiveState: effState,
-			IsRunning:      s.engineMgr.IsRunning(t.ID),
+			IsRunning:      isRunning,
 			HasPlan:        plan.PlanExists(t.ID),
 		}
 	}
@@ -143,6 +149,7 @@ func (s *Store) Refresh() {
 			Project: e.Project,
 			Message: e.Message,
 			Level:   lvl,
+			Agent:   e.Agent,
 		}
 	}
 

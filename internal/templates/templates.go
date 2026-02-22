@@ -97,3 +97,20 @@ func Delete(id int) error {
 	}
 	return fmt.Errorf("template #%d not found", id)
 }
+
+func Update(id int, name, content string) (Template, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	store, err := loadStore()
+	if err != nil {
+		return Template{}, err
+	}
+	for i := range store.Templates {
+		if store.Templates[i].ID == id {
+			store.Templates[i].Name = name
+			store.Templates[i].Content = content
+			return store.Templates[i], saveStore(store)
+		}
+	}
+	return Template{}, fmt.Errorf("template #%d not found", id)
+}

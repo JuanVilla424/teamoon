@@ -1,0 +1,16 @@
+[Unit]
+Description=Teamoon Cloud Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=cloud-agent
+Group=cloud-agent
+ExecStart=/usr/local/bin/teamoon serve
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/cloud-agent/Projects/teamoon/.env
+WorkingDirectory=/home/cloud-agent
+
+[Install]
+WantedBy=multi-user.target

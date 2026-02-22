@@ -1,6 +1,47 @@
 (function(){
 "use strict";
 
+function mdToHtml(md){
+  var esc = md.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  var lines = esc.split("\n");
+  var html = [];
+  var inCode = false, inList = false;
+  for(var i = 0; i < lines.length; i++){
+    var l = lines[i];
+    if(l.match(/^```/)){
+      if(inCode){ html.push("</code></pre>"); inCode = false; }
+      else { html.push("<pre><code>"); inCode = true; }
+      continue;
+    }
+    if(inCode){ html.push(l); continue; }
+    if(l.match(/^### /)) { if(inList){html.push("</ul>");inList=false;} html.push("<h4>"+l.slice(4)+"</h4>"); continue; }
+    if(l.match(/^## /)) { if(inList){html.push("</ul>");inList=false;} html.push("<h3>"+l.slice(3)+"</h3>"); continue; }
+    if(l.match(/^# /)) { if(inList){html.push("</ul>");inList=false;} html.push("<h2>"+l.slice(2)+"</h2>"); continue; }
+    if(l.match(/^[-*] /)){
+      if(!inList){html.push("<ul>");inList=true;}
+      html.push("<li>"+inlineMd(l.slice(2))+"</li>");
+      continue;
+    }
+    if(l.match(/^\d+\. /)){
+      if(!inList){html.push("<ol>");inList=true;}
+      html.push("<li>"+inlineMd(l.replace(/^\d+\.\s*/,""))+"</li>");
+      continue;
+    }
+    if(inList){html.push(inList?"</ul>":"</ol>");inList=false;}
+    if(l.trim()===""){html.push("<br>");continue;}
+    html.push("<p>"+inlineMd(l)+"</p>");
+  }
+  if(inList) html.push("</ul>");
+  if(inCode) html.push("</code></pre>");
+  return html.join("\n");
+}
+function inlineMd(s){
+  return s
+    .replace(/`([^`]+)`/g,"<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g,"<em>$1</em>");
+}
+
 var D = null;
 var prevDataStr = "";
 var selectedTaskID = 0;
@@ -11,18 +52,28 @@ var queueFilterProject = "";
 var logFilterLevel = "";
 var logFilterTask = "";
 var logFilterProject = "";
+var logFilterAgent = "";
 var prevView = "";
 var isDataUpdate = false;
 var taskLogAutoScroll = true;
 var templatesCache = [];
+var editingTemplateId = 0;
 var planCollapsed = true;
 var taskLogsCache = {};
 var planCache = {};
 var prevContentKey = "";
 var prevLogCount = 0;
 var prevTaskLogCounts = {};
+var prevTaskStates = {};
 var chatMessages = [];
 var chatLoading = false;
+var configLoaded = 0;
+var configData = null;
+var configTab = "general";
+var configSubTab = "paths";
+var configEditing = null;
+var cfgEditingTemplate = null;
+var templatesLoading = false;
 var chatProject = "";
 var chatCounter = 0;
 var chatCreatedTasks = [];
@@ -30,6 +81,124 @@ var canvasFilterAssignee = "";
 var canvasFilterProject = "";
 var canvasDragTaskId = 0;
 var canvasDragFromCol = "";
+var loadingActions = {}; // track in-progress actions: key -> true
+var mcpData = null; // cached MCP list response
+var mcpCatalogOpen = false;
+var mcpCatalogResults = null;
+var mcpCatalogSearch = "";
+var marketplaceSubTab = "mcp";
+var skillsData = null;
+var skillsCatalogOpen = false;
+var skillsCatalogResults = null;
+var skillsCatalogSearch = "";
+
+/* ── BMAD Agent Map ── */
+var agentMap = {
+  "analyst":                {name:"Mary",     icon:"\uD83D\uDCCA", color:"#bc8cff"},
+  "pm":                     {name:"John",     icon:"\uD83D\uDCCB", color:"#79c0ff"},
+  "architect":              {name:"Winston",  icon:"\uD83C\uDFD7\uFE0F", color:"#d29922"},
+  "ux-designer":            {name:"Sally",    icon:"\uD83C\uDFA8", color:"#f778ba"},
+  "dev":                    {name:"Amelia",   icon:"\uD83D\uDCBB", color:"#58a6ff"},
+  "tea":                    {name:"Murat",    icon:"\uD83E\uDDEA", color:"#3fb950"},
+  "sm":                     {name:"Bob",      icon:"\uD83C\uDFC3", color:"#e3b341"},
+  "tech-writer":            {name:"Paige",    icon:"\uD83D\uDCDA", color:"#39d353"},
+  "cloud":                  {name:"Warren",   icon:"\u2601\uFE0F", color:"#79c0ff"},
+  "quick-flow-solo-dev":    {name:"Barry",    icon:"\uD83D\uDE80", color:"#f85149"},
+  "brainstorming-coach":    {name:"Carson",   icon:"\uD83E\uDDE0", color:"#d29922"},
+  "creative-problem-solver":{name:"Dr. Quinn",icon:"\uD83D\uDD2C", color:"#bc8cff"},
+  "design-thinking-coach":  {name:"Maya",     icon:"\uD83C\uDFA8", color:"#f778ba"},
+  "innovation-strategist":  {name:"Victor",   icon:"\u26A1",       color:"#e3b341"}
+};
+
+function agentBadge(agentId){
+  var a = agentMap[agentId];
+  if(!a) return null;
+  var badge = span("agent-badge agent-badge-" + agentId, a.icon + " " + a.name);
+  badge.style.color = a.color;
+  return badge;
+}
+
+function getLastAgentForTask(taskId){
+  if(!D || !D.log_entries) return "";
+  var entries = D.log_entries;
+  for(var i=entries.length-1;i>=0;i--){
+    if(entries[i].task_id === taskId && entries[i].agent) return entries[i].agent;
+  }
+  return "";
+}
+
+/* ── Toast Notification System ── */
+(function initToastContainer(){
+  var c = document.createElement("div");
+  c.className = "toast-container";
+  c.id = "toast-container";
+  document.body.appendChild(c);
+})();
+
+function toast(message, type){
+  type = type || "info";
+  var container = document.getElementById("toast-container");
+  if(!container) return;
+  var t = document.createElement("div");
+  t.className = "toast toast-" + type;
+  var icon = document.createElement("span");
+  icon.className = "toast-icon";
+  if(type === "success") icon.textContent = "\u2713";
+  else if(type === "error") icon.textContent = "\u2717";
+  else icon.textContent = "\u2139";
+  t.appendChild(icon);
+  var msg = document.createElement("span");
+  msg.className = "toast-msg";
+  msg.textContent = message;
+  t.appendChild(msg);
+  container.appendChild(t);
+  setTimeout(function(){
+    t.classList.add("removing");
+    setTimeout(function(){ if(t.parentNode) t.parentNode.removeChild(t); }, 300);
+  }, 4000);
+}
+
+/* ── Button Loading Helper ── */
+function btnLoading(btn, loadingText){
+  if(!btn || btn.disabled) return null;
+  btn.disabled = true;
+  var origText = btn.textContent;
+  btn.textContent = "";
+  var spinner = document.createElement("span");
+  spinner.className = "btn-spinner";
+  btn.appendChild(spinner);
+  if(loadingText){
+    btn.appendChild(document.createTextNode(" " + loadingText));
+  }
+  return function(){
+    btn.disabled = false;
+    btn.textContent = origText;
+  };
+}
+
+/* ── Icon Button Helper ── */
+var ICON_SVGS = {};
+(function(){
+  var t = document.createElement("template");
+  t.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  ICON_SVGS.pencil = t.content.firstChild;
+  t = document.createElement("template");
+  t.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  ICON_SVGS.trash = t.content.firstChild;
+  t = document.createElement("template");
+  t.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  ICON_SVGS.plus = t.content.firstChild;
+})();
+function iconBtn(type, title, onclick){
+  var b = document.createElement("button");
+  b.className = "icon-btn" + (type === "trash" ? " icon-btn-danger" : type === "plus" ? " icon-btn-primary" : "");
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  var src = ICON_SVGS[type] || ICON_SVGS.pencil;
+  b.appendChild(src.cloneNode(true));
+  b.onclick = onclick;
+  return b;
+}
 
 /* ── SVG Icons ── */
 var ICONS = {
@@ -50,6 +219,7 @@ function svgIcon(str){
 }
 
 /* ── SSE ── */
+var pollTimer = null;
 function connectSSE(){
   var es = new EventSource("/api/sse");
   es.onmessage = function(ev){
@@ -63,12 +233,41 @@ function connectSSE(){
       D = parsed;
       isDataUpdate = true;
       render();
+      scheduleActivePoll();
     }catch(e){}
   };
   es.onerror = function(){
     es.close();
     setTimeout(connectSSE, 3000);
   };
+}
+
+/* ── Active poll: 2s polling when tasks are generating/running ── */
+function hasActiveTask(){
+  if(!D || !D.tasks) return false;
+  for(var i=0;i<D.tasks.length;i++){
+    var s = D.tasks[i].effective_state;
+    if(s === "generating" || s === "running") return true;
+  }
+  return false;
+}
+function scheduleActivePoll(){
+  if(pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
+  if(!hasActiveTask()) return;
+  pollTimer = setTimeout(function(){
+    pollTimer = null;
+    api("GET","/api/data",null,function(data){
+      var cmp = JSON.stringify((function(o){
+        var c = {}; for(var k in o) if(k !== "timestamp") c[k] = o[k]; return c;
+      })(data));
+      if(cmp === prevDataStr) { scheduleActivePoll(); return; }
+      prevDataStr = cmp;
+      D = data;
+      isDataUpdate = true;
+      render();
+      scheduleActivePoll();
+    });
+  }, 2000);
 }
 
 /* ── Fetch helper ── */
@@ -81,10 +280,106 @@ function api(method, path, body, cb){
     .catch(function(e){ console.error(e); });
 }
 
+/* ── MCP Catalog helpers ── */
+function searchCatalog(query){
+  mcpCatalogResults = "loading";
+  render();
+  var url = "/api/mcp/catalog?limit=20";
+  if(query) url += "&search=" + encodeURIComponent(query);
+  api("GET", url, null, function(d){
+    mcpCatalogResults = d.servers || [];
+    render();
+  });
+}
+
+function doInstall(name, pkg, envVars, btn){
+  var restore = btnLoading(btn, "INSTALLING\u2026");
+  api("POST", "/api/mcp/install", {name: name, package: pkg, env_vars: envVars}, function(d){
+    if(restore) restore();
+    if(d.ok){
+      mcpData = null;
+      mcpCatalogResults = null;
+      mcpCatalogOpen = false;
+      mcpCatalogSearch = "";
+      toast("Installed " + name, "success");
+      render();
+    } else {
+      toast("Error: " + (d.error || "unknown"), "error");
+    }
+  });
+}
+
+function showEnvVarsPrompt(srv, installBtn){
+  var parent = installBtn.parentElement.parentElement;
+  var existing = parent.querySelector(".mcp-env-form");
+  if(existing){ existing.remove(); return; }
+
+  var form = div("mcp-env-form");
+  form.className = "mcp-env-form";
+  form.style.width = "100%";
+  form.style.marginTop = "8px";
+  form.style.display = "flex";
+  form.style.flexDirection = "column";
+  form.style.gap = "6px";
+
+  var inputs = {};
+  srv.env_vars.forEach(function(v){
+    var row = div("");
+    row.style.display = "flex";
+    row.style.gap = "6px";
+    row.style.alignItems = "center";
+    var label = span("", v.name + (v.is_required ? " *" : ""));
+    label.style.fontSize = "11px";
+    label.style.minWidth = "120px";
+    label.style.fontFamily = "monospace";
+    row.appendChild(label);
+    var input = el("input","");
+    input.type = v.is_secret ? "password" : "text";
+    input.placeholder = v.name;
+    input.style.flex = "1";
+    input.style.padding = "4px 8px";
+    input.style.background = "rgba(0,0,0,.4)";
+    input.style.border = "1px solid var(--glass)";
+    input.style.borderRadius = "4px";
+    input.style.color = "var(--text)";
+    input.style.fontSize = "12px";
+    row.appendChild(input);
+    inputs[v.name] = input;
+    form.appendChild(row);
+  });
+
+  var actRow = div("");
+  actRow.style.display = "flex";
+  actRow.style.gap = "6px";
+  actRow.style.marginTop = "4px";
+  var confirmBtn = el("button","btn btn-success btn-sm",["Confirm Install"]);
+  confirmBtn.onclick = function(){
+    var envVars = {};
+    var missing = [];
+    srv.env_vars.forEach(function(v){
+      var val = inputs[v.name].value.trim();
+      if(val) envVars[v.name] = val;
+      else if(v.is_required) missing.push(v.name);
+    });
+    if(missing.length > 0){
+      toast("Missing required: " + missing.join(", "), "error");
+      return;
+    }
+    form.remove();
+    doInstall(srv.name, srv.package, envVars, installBtn);
+  };
+  actRow.appendChild(confirmBtn);
+  var cancelEnvBtn = el("button","btn btn-sm",["Cancel"]);
+  cancelEnvBtn.onclick = function(){ form.remove(); };
+  actRow.appendChild(cancelEnvBtn);
+  form.appendChild(actRow);
+  parent.appendChild(form);
+}
+
 /* ── Router ── */
 function getView(){
   var h = location.hash.replace("#","") || "dashboard";
-  if(["dashboard","queue","canvas","projects","logs","chat"].indexOf(h) < 0) h = "dashboard";
+  if(["dashboard","queue","canvas","projects","logs","chat","config"].indexOf(h) < 0) h = "dashboard";
   return h;
 }
 
@@ -152,6 +447,8 @@ function computeContentKey(v){
       var ck = canvasFilterAssignee + ":" + canvasFilterProject + ":";
       for(var i=0;i<tasks.length;i++) ck += tasks[i].id + tasks[i].effective_state + (tasks[i].assignee||"") + ",";
       return "cv:" + ck;
+    case "config":
+      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogOpen + ":" + (mcpCatalogResults === "loading" ? "ld" : mcpCatalogResults ? mcpCatalogResults.length : "n") + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogOpen + ":" + (skillsCatalogResults === "loading" ? "ld" : skillsCatalogResults ? skillsCatalogResults.length : "n");
     default:
       return "";
   }
@@ -159,9 +456,9 @@ function computeContentKey(v){
 
 function render(){
   if(!D) return;
-  updateSidebar();
+  updateTopbar();
   var v = getView();
-  var nav = document.querySelectorAll("#sb-nav a");
+  var nav = document.querySelectorAll("#dock a");
   for(var i=0;i<nav.length;i++){
     nav[i].classList.toggle("active", nav[i].getAttribute("data-view") === v);
   }
@@ -180,29 +477,39 @@ function render(){
   prevContentKey = contentKey;
 
   // Incremental log append for task terminal (queue view)
+  // ONLY use fast-path if the selected task's state has NOT changed
   if(!viewChanged && v === "queue" && isDataUpdate && selectedTaskID){
-    var allLogs = (D && D.log_entries) ? D.log_entries : [];
-    var taskLogs = [];
-    for(var i = 0; i < allLogs.length; i++){
-      if(allLogs[i].task_id === selectedTaskID) taskLogs.push(allLogs[i]);
+    var selTask = null;
+    var tasks = (D && D.tasks) ? D.tasks : [];
+    for(var i = 0; i < tasks.length; i++){
+      if(tasks[i].id === selectedTaskID){ selTask = tasks[i]; break; }
     }
-    var prevCount = prevTaskLogCounts[selectedTaskID] || 0;
-    if(taskLogs.length > prevCount){
-      var term = document.querySelector(".task-terminal");
-      if(term){
-        // Remove empty message if present
-        var emptyEl = term.querySelector(".task-terminal-empty");
-        if(emptyEl) emptyEl.remove();
-        for(var i = prevCount; i < taskLogs.length; i++){
-          term.appendChild(mkTerminalLine(taskLogs[i]));
+    var curState = selTask ? selTask.effective_state : "";
+    var stateChanged = (prevTaskStates[selectedTaskID] || "") !== curState;
+    if(!stateChanged){
+      var allLogs = (D && D.log_entries) ? D.log_entries : [];
+      var taskLogs = [];
+      for(var i = 0; i < allLogs.length; i++){
+        if(allLogs[i].task_id === selectedTaskID) taskLogs.push(allLogs[i]);
+      }
+      var prevCount = prevTaskLogCounts[selectedTaskID] || 0;
+      if(taskLogs.length > prevCount){
+        var term = document.querySelector(".task-terminal");
+        if(term){
+          var emptyEl = term.querySelector(".task-terminal-empty");
+          if(emptyEl) emptyEl.remove();
+          for(var i = prevCount; i < taskLogs.length; i++){
+            term.appendChild(mkTerminalLine(taskLogs[i]));
+          }
+          prevTaskLogCounts[selectedTaskID] = taskLogs.length;
+          if(taskLogAutoScroll) term.scrollTop = term.scrollHeight;
+          updateTopbar();
+          isDataUpdate = false;
+          return;
         }
-        prevTaskLogCounts[selectedTaskID] = taskLogs.length;
-        if(taskLogAutoScroll) term.scrollTop = term.scrollHeight;
-        updateSidebar();
-        isDataUpdate = false;
-        return;
       }
     }
+    // State changed — fall through to full re-render
   }
 
   // Incremental log append for logs view
@@ -232,7 +539,7 @@ function render(){
         }
         prevLogCount = filtered.length;
         if(logAutoScroll) lc.scrollTop = lc.scrollHeight;
-        updateSidebar();
+        updateTopbar();
         isDataUpdate = false;
         return;
       }
@@ -248,11 +555,7 @@ function render(){
 
   // Save scroll positions before swap
   var mainScroll = content.scrollTop;
-  var splitLeftScroll = 0, splitRightScroll = 0, logContainerScroll = 0;
-  var existingSL = content.querySelector(".split-left");
-  if(existingSL) splitLeftScroll = existingSL.scrollTop;
-  var existingSR = content.querySelector(".split-right");
-  if(existingSR) splitRightScroll = existingSR.scrollTop;
+  var logContainerScroll = 0;
   var existingLC = document.getElementById("log-container");
   if(existingLC) logContainerScroll = existingLC.scrollTop;
 
@@ -274,6 +577,7 @@ function render(){
     case "projects": renderProjects(tmp); break;
     case "logs": renderLogs(tmp); break;
     case "chat": renderChat(tmp); break;
+    case "config": renderConfig(tmp); break;
   }
 
   // Atomic swap
@@ -302,10 +606,7 @@ function render(){
 
   // Restore scroll positions
   content.scrollTop = mainScroll;
-  var newSL = content.querySelector(".split-left");
-  if(newSL) newSL.scrollTop = splitLeftScroll;
-  var newSR = content.querySelector(".split-right");
-  if(newSR) newSR.scrollTop = splitRightScroll;
+  // Timeline scroll preserved via mainScroll
 
   if(v === "logs"){
     var lc = document.getElementById("log-container");
@@ -343,8 +644,8 @@ function render(){
 
 window.addEventListener("hashchange", render);
 
-/* ── Sidebar ── */
-function updateSidebar(){
+/* ── Topbar ── */
+function updateTopbar(){
   var ver = document.getElementById("sb-version");
   var newVer = "v" + (D.version || "?");
   if(D.build_num && D.build_num !== "0") newVer += " #" + D.build_num;
@@ -353,58 +654,19 @@ function updateSidebar(){
   var mdl = document.getElementById("sb-model");
   var parts = [];
   if(D.plan_model) parts.push(D.plan_model);
+  if(D.exec_model && D.exec_model !== D.plan_model) parts.push(D.exec_model);
   if(D.effort) parts.push(D.effort);
   var newMdl = parts.join(" \u00b7 ");
   if(mdl.textContent !== newMdl) mdl.textContent = newMdl;
 
-  var tasks = D.tasks || [];
-  var running = 0, pending = 0, blocked = 0;
-  for(var i=0;i<tasks.length;i++){
-    var s = tasks[i].effective_state;
-    if(s === "running") running++;
-    else if(s === "pending" || s === "generating") pending++;
-    else if(s === "blocked") blocked++;
-  }
-
   var ctx = D.session || {};
   var ctxPct = ctx.context_percent || 0;
-  var ctxCls = ctxPct >= 80 ? "red" : ctxPct >= 60 ? "orange" : "green";
-
-  var container = document.getElementById("sb-stats");
-  container.textContent = "";
-
-  var row1 = div("sb-stat");
-  row1.appendChild(span("", "Context"));
-  row1.appendChild(span("val " + ctxCls, Math.round(ctxPct) + "%"));
-  container.appendChild(row1);
-
-  var prog = div("progress");
-  var fill = div("progress-fill " + ctxCls);
-  fill.style.width = ctxPct + "%";
-  prog.appendChild(fill);
-  container.appendChild(prog);
-
-  var row2 = div("sb-stat mt-8");
-  row2.appendChild(span("", "Tasks"));
-  row2.appendChild(span("val", String(tasks.length)));
-  container.appendChild(row2);
-
-  var row3 = div("sb-stat");
-  row3.appendChild(span("", "Running"));
-  row3.appendChild(span("val green", String(running)));
-  container.appendChild(row3);
-
-  if(pending){
-    var row4 = div("sb-stat");
-    row4.appendChild(span("", "Pending"));
-    row4.appendChild(span("val", String(pending)));
-    container.appendChild(row4);
-  }
-  if(blocked){
-    var row5 = div("sb-stat");
-    row5.appendChild(span("", "Blocked"));
-    row5.appendChild(span("val red", String(blocked)));
-    container.appendChild(row5);
+  var ctxEl = document.getElementById("topbar-ctx");
+  if(ctxEl){
+    var ctxText = Math.round(ctxPct) + "% ctx";
+    if(ctxEl.textContent !== ctxText) ctxEl.textContent = ctxText;
+    ctxEl.style.color = ctxPct >= 80 ? "var(--danger)" : ctxPct >= 60 ? "var(--warning)" : "var(--accent)";
+    ctxEl.style.background = ctxPct >= 80 ? "var(--danger-soft)" : ctxPct >= 60 ? "var(--warning-soft)" : "var(--accent-soft)";
   }
 }
 
@@ -418,79 +680,126 @@ function renderDashboard(root){
   var logs = D.log_entries || [];
 
   var totalToday = (t.input||0)+(t.output||0)+(t.cache_read||0)+(t.cache_create||0);
+  var totalWeek = (w.input||0)+(w.output||0)+(w.cache_read||0)+(w.cache_create||0);
+  var totalMonth = (m.input||0)+(m.output||0)+(m.cache_read||0)+(m.cache_create||0);
+  var tIn = t.input||0, tOut = t.output||0, tCr = t.cache_read||0, tCw = t.cache_create||0;
 
-  var header = div("view-header");
-  header.appendChild(span("view-title", "Dashboard"));
-  root.appendChild(header);
-
-  // Top 3 metric cards
-  var cards = div("cards cards-3");
-
-  // Tokens card — cyan accent
-  var tc = div("card card-accent-cyan");
-  tc.appendChild(mkLabel("Tokens Today", ICONS.tokens));
-  var tcVal = mkValue(fmtNum(totalToday));
-  tcVal.classList.add("grad-cyan");
-  tc.appendChild(tcVal);
-  tc.appendChild(mkMetricRow([
-    "In: " + fmtNum(t.input||0),
-    "Out: " + fmtNum(t.output||0)
-  ]));
-  tc.appendChild(mkMetricRow([
-    "Cache R: " + fmtNum(t.cache_read||0),
-    "Cache W: " + fmtNum(t.cache_create||0)
-  ]));
-  cards.appendChild(tc);
-
-  // Usage card — yellow accent
-  var cc = div("card card-accent-yellow");
-  cc.appendChild(mkLabel("Usage", ICONS.usage));
-  var cv = mkValue(String(c.sessions_month||0) + " sessions");
-  cv.classList.add("grad-yellow");
-  cc.appendChild(cv);
-  cc.appendChild(mkSub("This month"));
-  cc.appendChild(mkMetricRow([
-    "Today: " + (c.sessions_today||0) + " sess",
-    "Out: " + fmtNum(c.output_today||0)
-  ]));
-  cc.appendChild(mkMetricRow([
-    "Week: " + (c.sessions_week||0) + " sess",
-    "Out: " + fmtNum(c.output_week||0)
-  ]));
-  if(c.plan_cost > 0){
-    cc.appendChild(mkMetricRow([
-      "Budget: $" + fmtCost(c.plan_cost),
-      "Month Out: " + fmtNum(c.output_month||0)
-    ]));
+  // ── Hero Card ──
+  var hero = div("hero-card");
+  hero.appendChild(div("hero-label", ["Tokens today"]));
+  hero.appendChild(div("hero-value", [fmtNum(totalToday)]));
+  var tTotal = tIn + tOut + tCr + tCw || 1;
+  var flowBar = div("flow-bar");
+  var segs = [
+    {pct: tIn/tTotal*100, cls: "flow-in"},
+    {pct: tOut/tTotal*100, cls: "flow-out"},
+    {pct: tCr/tTotal*100, cls: "flow-cache-r"},
+    {pct: tCw/tTotal*100, cls: "flow-cache-w"}
+  ];
+  for(var si=0;si<segs.length;si++){
+    if(segs[si].pct > 0.5){
+      var seg = div("flow-seg " + segs[si].cls);
+      seg.style.width = segs[si].pct.toFixed(1) + "%";
+      flowBar.appendChild(seg);
+    }
   }
-  cards.appendChild(cc);
+  hero.appendChild(flowBar);
+  hero.appendChild(div("hero-sub", [fmtNum(tIn) + " in \u00b7 " + fmtNum(tOut) + " out \u00b7 " + fmtNum(tCr) + " cached"]));
+  root.appendChild(hero);
 
-  // Context card — dynamic accent
+  // ── Bento Grid ──
+  var bento = div("bento");
+
+  // Sessions card
+  var sessCard = div("card");
+  var sessLabel = div("card-label");
+  var sessDot = span("label-dot"); sessDot.style.background = "var(--success)";
+  sessLabel.appendChild(sessDot);
+  sessLabel.appendChild(txt("Sessions"));
+  sessCard.appendChild(sessLabel);
+  sessCard.appendChild(mkValue(String(c.sessions_week||0)));
+  sessCard.appendChild(mkSub("this week \u00b7 " + (c.sessions_today||0) + " today"));
+  bento.appendChild(sessCard);
+
+  // Cost card
+  var costCard = div("card");
+  var costLabel = div("card-label");
+  var costDot = span("label-dot"); costDot.style.background = "var(--warning)";
+  costLabel.appendChild(costDot);
+  costLabel.appendChild(txt("Cost"));
+  costCard.appendChild(costLabel);
+  var monthCost = c.cost_month || 0;
+  var todayCost = c.cost_today || 0;
+  costCard.appendChild(mkValue(monthCost > 0 ? "$" + fmtCost(monthCost) : "$0.00"));
+  costCard.appendChild(mkSub("this month \u00b7 $" + fmtCost(todayCost) + " today"));
+  bento.appendChild(costCard);
+
+  // Context card (tall)
   var ctxPct = ctx.context_percent || 0;
-  var ctxColor = ctxPct >= 80 ? "red" : ctxPct >= 60 ? "orange" : "green";
-  var ctxCard = div("card card-accent-" + ctxColor);
-  ctxCard.appendChild(mkLabel("Context Window", ICONS.context));
-  var ctxVal = mkValue(Math.round(ctxPct) + "%");
-  ctxVal.classList.add("grad-" + ctxColor);
-  ctxCard.appendChild(ctxVal);
-  var prog = div("progress mt-8");
-  var pf = div("progress-fill " + (ctxPct >= 80 ? "red" : ctxPct >= 60 ? "yellow" : "green"));
-  pf.style.width = ctxPct + "%";
-  prog.appendChild(pf);
-  ctxCard.appendChild(prog);
-  if(ctx.session_file){
-    ctxCard.appendChild(mkSub("Session: " + String(ctx.session_file).substring(0, 16) + "..."));
-  }
-  cards.appendChild(ctxCard);
-  root.appendChild(cards);
+  var ctxCard = div("card bento-tall");
+  var ctxLabel = div("card-label");
+  var ctxDot = span("label-dot");
+  ctxDot.style.background = ctxPct >= 80 ? "var(--danger)" : ctxPct >= 60 ? "var(--warning)" : "var(--success)";
+  ctxLabel.appendChild(ctxDot);
+  ctxLabel.appendChild(txt("Context"));
+  ctxCard.appendChild(ctxLabel);
+  var ctxRingWrap = div("ctx-ring-wrap");
+  ctxRingWrap.appendChild(buildPhaseRing(ctxPct, 48));
+  var ctxPctEl = span("ctx-ring-pct", Math.round(ctxPct) + "%");
+  ctxRingWrap.appendChild(ctxPctEl);
+  ctxCard.appendChild(ctxRingWrap);
+  var ctxTokens = ctx.context_tokens || 0;
+  var ctxLimit = ctx.context_limit || 0;
+  ctxCard.appendChild(mkSub(fmtNum(ctxTokens) + " / " + fmtNum(ctxLimit) + " tokens"));
+  // Week + Month tokens + cost inline
+  ctxCard.appendChild(div("mt-16"));
+  ctxCard.appendChild(mkMetricRow(["Week: "+fmtNum(totalWeek) + " \u00b7 $" + fmtCost(c.cost_week||0)]));
+  ctxCard.appendChild(mkMetricRow(["Month: "+fmtNum(totalMonth) + " \u00b7 $" + fmtCost(c.cost_month||0)]));
+  bento.appendChild(ctxCard);
 
-  // Activity feed
+  // Queue summary card (wide)
+  var running=0,pendingC=0,blockedC=0,planned=0;
+  for(var i=0;i<tasks.length;i++){
+    var s=tasks[i].effective_state;
+    if(s==="running")running++;else if(s==="pending"||s==="generating")pendingC++;
+    else if(s==="blocked")blockedC++;else if(s==="planned")planned++;
+  }
+  var qCard = div("card bento-wide card-clickable");
+  qCard.onclick = function(){ location.hash = "queue"; };
+  var qLabel = div("card-label");
+  var qDot = span("label-dot"); qDot.style.background = "var(--accent)";
+  qLabel.appendChild(qDot);
+  qLabel.appendChild(txt("Queue"));
+  qLabel.appendChild(span("view-count", String(tasks.length)));
+  qCard.appendChild(qLabel);
+
+  var mkQStat = function(dotColor, label, val){
+    var row = div("queue-stat");
+    var dot = span("queue-stat-dot"); dot.style.background = dotColor;
+    row.appendChild(dot);
+    row.appendChild(span("queue-stat-label", label));
+    row.appendChild(span("queue-stat-val", String(val)));
+    return row;
+  };
+  if(running) qCard.appendChild(mkQStat("var(--success)", "Running", running));
+  if(planned) qCard.appendChild(mkQStat("var(--info)", "Planned", planned));
+  if(pendingC) qCard.appendChild(mkQStat("var(--text-muted)", "Pending", pendingC));
+  if(blockedC) qCard.appendChild(mkQStat("var(--danger)", "Blocked", blockedC));
+  if(!running && !planned && !pendingC && !blockedC){
+    qCard.appendChild(div("empty", ["No active tasks"]));
+  }
+  bento.appendChild(qCard);
+
+  // Activity card (tall, right side)
+  var actCard = div("card");
+  var actLabel = div("card-label");
+  actLabel.appendChild(txt("Recent Activity"));
+  actCard.appendChild(actLabel);
   var recentLogs = logs.slice(-10).reverse();
-  var feed = div("feed");
-  feed.appendChild(mkFeedTitle("Recent Activity"));
   if(recentLogs.length === 0){
-    feed.appendChild(div("empty", ["No activity yet"]));
+    actCard.appendChild(div("empty", ["No activity yet"]));
   } else {
+    var feed = div("feed");
     for(var i=0;i<recentLogs.length;i++){
       var le = recentLogs[i];
       var item = div("feed-item");
@@ -501,7 +810,7 @@ function renderDashboard(root){
       var msg = span("feed-msg");
       if(le.project){
         var ps = span("", le.project);
-        ps.style.color = "var(--cyan)";
+        ps.style.color = "var(--text-secondary)";
         msg.appendChild(ps);
         msg.appendChild(txt(" "));
       }
@@ -510,63 +819,11 @@ function renderDashboard(root){
       item.appendChild(msg);
       feed.appendChild(item);
     }
+    actCard.appendChild(feed);
   }
-  root.appendChild(feed);
+  bento.appendChild(actCard);
 
-  // Summary cards
-  var running=0,pendingC=0,blockedC=0,planned=0;
-  for(var i=0;i<tasks.length;i++){
-    var s=tasks[i].effective_state;
-    if(s==="running")running++;else if(s==="pending"||s==="generating")pendingC++;
-    else if(s==="blocked")blockedC++;else if(s==="planned")planned++;
-  }
-  var activeProj=0,staleProj=0;
-  for(var i=0;i<projs.length;i++){
-    if(projs[i].active)activeProj++;
-    if(projs[i].stale)staleProj++;
-  }
-
-  var sumCards = div("cards cards-2 mt-16");
-
-  var qCard = div("card card-accent-purple");
-  qCard.style.cursor = "pointer";
-  qCard.onclick = function(){ location.hash = "queue"; };
-  qCard.appendChild(mkLabel("Queue Summary", ICONS.queue));
-  qCard.appendChild(mkMetricRow(["Total: " + tasks.length]));
-  qCard.appendChild(mkMetricRow(["Running: " + running, "Planned: " + planned]));
-  qCard.appendChild(mkMetricRow(["Pending: " + pendingC, "Blocked: " + blockedC]));
-  sumCards.appendChild(qCard);
-
-  var pCard = div("card card-accent-blue");
-  pCard.style.cursor = "pointer";
-  pCard.onclick = function(){ location.hash = "projects"; };
-  pCard.appendChild(mkLabel("Projects", ICONS.projects));
-  pCard.appendChild(mkMetricRow(["Total: " + projs.length]));
-  pCard.appendChild(mkMetricRow(["Active: " + activeProj, "Stale: " + staleProj]));
-  sumCards.appendChild(pCard);
-  root.appendChild(sumCards);
-
-  // Week/Month token cards
-  var totalWeek = (w.input||0)+(w.output||0)+(w.cache_read||0)+(w.cache_create||0);
-  var totalMonth = (m.input||0)+(m.output||0)+(m.cache_read||0)+(m.cache_create||0);
-
-  var wmCards = div("cards cards-2 mt-16");
-  var wCard = div("card card-accent-cyan");
-  wCard.appendChild(mkLabel("Tokens This Week", ICONS.week));
-  var wVal = mkValue(fmtNum(totalWeek));
-  wVal.classList.add("grad-cyan");
-  wCard.appendChild(wVal);
-  wCard.appendChild(mkMetricRow(["In: "+fmtNum(w.input||0), "Out: "+fmtNum(w.output||0)]));
-  wmCards.appendChild(wCard);
-
-  var mCard = div("card card-accent-purple");
-  mCard.appendChild(mkLabel("Tokens This Month", ICONS.month));
-  var mVal = mkValue(fmtNum(totalMonth));
-  mVal.classList.add("grad-purple");
-  mCard.appendChild(mVal);
-  mCard.appendChild(mkMetricRow(["In: "+fmtNum(m.input||0), "Out: "+fmtNum(m.output||0)]));
-  wmCards.appendChild(mCard);
-  root.appendChild(wmCards);
+  root.appendChild(bento);
 }
 
 /* ── Queue View ── */
@@ -580,16 +837,16 @@ function renderQueue(root){
   }
 
   var header = div("view-header");
-  header.appendChild(span("view-title", "Queue"));
-  var addBtn = el("button", "btn btn-primary", ["+ Add Task"]);
+  var titleWrap = div("view-title-wrap");
+  titleWrap.appendChild(span("view-title", "Queue"));
+  if(tasks.length > 0) titleWrap.appendChild(span("view-count", String(tasks.length)));
+  header.appendChild(titleWrap);
+  var addBtn = el("button", "btn btn-primary btn-sm", ["+ Add Task"]);
   addBtn.onclick = function(){ openAddTask(""); };
   header.appendChild(addBtn);
   root.appendChild(header);
 
-  var split = div("split");
-
-  // Left panel
-  var left = div("split-left");
+  // Filters
   var toolbar = div("queue-toolbar");
 
   var stateSelect = el("select", "filter-select");
@@ -609,7 +866,7 @@ function renderQueue(root){
   }
   projSelect.onchange = function(){ queueFilterProject = this.value; render(); };
   toolbar.appendChild(projSelect);
-  left.appendChild(toolbar);
+  root.appendChild(toolbar);
 
   var filtered = tasks.filter(function(t){
     if(queueFilterState && t.effective_state !== queueFilterState) return false;
@@ -618,120 +875,234 @@ function renderQueue(root){
   });
 
   if(filtered.length === 0){
-    var emptyLeft = div("empty");
-    emptyLeft.textContent = (queueFilterState || queueFilterProject)
+    var emptyEl = div("empty");
+    emptyEl.textContent = (queueFilterState || queueFilterProject)
       ? "No tasks match the current filters."
       : "No active tasks. Add one with + Add Task.";
-    left.appendChild(emptyLeft);
-  } else {
-    for(var i=0;i<filtered.length;i++){
-      (function(t){
-        var cls = "task-item";
-        if(t.id === selectedTaskID) cls += " selected";
-        if(t.is_running) cls += " has-running";
-        if(t.effective_state === "generating") cls += " has-generating";
-        var item = div(cls);
-        item.onclick = function(){ selectTask(t.id); };
-        item.appendChild(span("task-state " + t.effective_state, stateLabel(t.effective_state)));
-        item.appendChild(span("task-pri " + t.priority, (t.priority||"").toUpperCase()));
-        var info = div("task-info");
-        info.appendChild(div("task-desc", [t.description]));
-        info.appendChild(div("task-proj", [t.project || "\u2014"]));
-        item.appendChild(info);
-        if(t.is_running) item.appendChild(div("running-dot"));
-        left.appendChild(item);
-      })(filtered[i]);
-    }
+    root.appendChild(emptyEl);
+    return;
   }
-  split.appendChild(left);
 
-  // Right panel
-  var right = div("split-right");
-  var sel = findTask(selectedTaskID);
-  if(!sel){
-    var empty = div("empty detail-empty");
-    empty.appendChild(div("empty-icon", ["\u2610"]));
-    empty.appendChild(div("", ["Select a task from the list to view details"]));
-    right.appendChild(empty);
-  } else {
-    renderTaskDetail(right, sel);
+  // Timeline
+  var timeline = div("timeline");
+
+  for(var i=0;i<filtered.length;i++){
+    (function(t){
+      var cls = "tl-node";
+      if(t.id === selectedTaskID) cls += " selected";
+      if(t.is_running) cls += " has-running";
+      if(t.effective_state === "generating") cls += " has-generating";
+      var prev = prevTaskStates[t.id];
+      if(prev && prev !== "done" && t.effective_state === "done") cls += " task-just-done";
+      prevTaskStates[t.id] = t.effective_state;
+
+      var node = div(cls);
+      node.appendChild(div("tl-dot"));
+
+      // Header row
+      var hdr = div("tl-header");
+      hdr.onclick = function(){ selectTask(t.id === selectedTaskID ? 0 : t.id); };
+
+      var info = div("tl-info");
+      info.appendChild(div("tl-desc", [t.description]));
+      var meta = t.project || "\u2014";
+      if(t.created_at) meta += " \u00b7 " + fmtRelDate(t.created_at);
+      info.appendChild(div("tl-meta", [meta]));
+      hdr.appendChild(info);
+
+      var badges = div("tl-badges");
+      badges.appendChild(span("task-state " + t.effective_state, stateLabel(t.effective_state)));
+      badges.appendChild(span("task-pri " + t.priority, (t.priority||"").toUpperCase()));
+      if(t.is_running) badges.appendChild(div("running-dot"));
+      hdr.appendChild(badges);
+      node.appendChild(hdr);
+
+      // Expandable detail
+      var expand = div("tl-expand");
+      if(t.id === selectedTaskID){
+        renderTaskDetail(expand, t);
+      }
+      node.appendChild(expand);
+
+      timeline.appendChild(node);
+    })(filtered[i]);
   }
-  split.appendChild(right);
-  root.appendChild(split);
+  root.appendChild(timeline);
 }
 
 function renderTaskDetail(parent, t){
-  // ── Header ──
-  var header = div("detail-header");
-  var titleEl = div("detail-title");
-  titleEl.textContent = "#" + t.id + " " + t.description;
-  header.appendChild(titleEl);
-
-  var meta = el("dl", "detail-meta");
-  meta.appendChild(el("dt", "", ["Project"]));
-  meta.appendChild(el("dd", "", [t.project || "\u2014"]));
-  meta.appendChild(el("dt", "", ["State"]));
-  var dd2 = el("dd");
-  dd2.appendChild(span("task-state " + t.effective_state, stateLabel(t.effective_state)));
-  meta.appendChild(dd2);
-  meta.appendChild(el("dt", "", ["Priority"]));
-  var dd3 = el("dd");
-  dd3.appendChild(span("task-pri " + t.priority, (t.priority||"").toUpperCase()));
-  meta.appendChild(dd3);
-  meta.appendChild(el("dt", "", ["Created"]));
-  meta.appendChild(el("dd", "", [fmtDate(t.created_at)]));
-  if(t.is_running){
-    meta.appendChild(el("dt", "", ["Engine"]));
-    var dd5 = el("dd", "detail-engine-running");
-    dd5.appendChild(txt("Running "));
-    dd5.appendChild(div("running-dot"));
-    meta.appendChild(dd5);
+  // ── Header Card ──
+  var headerCard = div("detail-card detail-header");
+  var headerTop = div("detail-header-top");
+  headerTop.appendChild(span("detail-title-id", "#" + t.id));
+  var editable = (t.effective_state === "pending" || t.effective_state === "planned" || t.effective_state === "blocked");
+  if(editable){
+    var editBtn = iconBtn("pencil", "Edit description", function(){});
+    editBtn.onclick = function(){
+      descSpan.style.display = "none";
+      editBtn.style.display = "none";
+      var editArea = el("textarea", "edit-desc-textarea");
+      editArea.value = t.description;
+      editArea.rows = 6;
+      headerCard.appendChild(editArea);
+      var editActions = div("edit-desc-actions");
+      var saveBtn = el("button", "btn btn-primary btn-sm", ["Save"]);
+      var cancelBtn = el("button", "btn btn-sm", ["Cancel"]);
+      cancelBtn.onclick = function(){
+        editArea.remove(); editActions.remove();
+        descSpan.style.display = ""; editBtn.style.display = "";
+      };
+      saveBtn.onclick = function(){
+        var newDesc = editArea.value.trim();
+        if(!newDesc) return;
+        var restore = btnLoading(saveBtn, "Saving\u2026");
+        api("POST","/api/tasks/update",{id:t.id, description:newDesc}, function(d){
+          if(restore) restore();
+          if(d.error){ toast("Error: "+d.error, "error"); return; }
+          toast("Description updated", "success");
+        });
+      };
+      editActions.appendChild(cancelBtn);
+      editActions.appendChild(saveBtn);
+      headerCard.appendChild(editActions);
+      editArea.focus();
+    };
+    headerTop.appendChild(editBtn);
   }
-  header.appendChild(meta);
-  parent.appendChild(header);
+  headerCard.appendChild(headerTop);
+  var descSpan = div("detail-title-desc");
+  descSpan.textContent = t.description;
+  descSpan.title = t.description;
+  headerCard.appendChild(descSpan);
+
+  // Properties bar
+  var props = div("detail-props");
+  var propProject = div("detail-prop");
+  propProject.appendChild(span("detail-prop-label", "Project"));
+  propProject.appendChild(span("detail-prop-value", t.project || "\u2014"));
+  props.appendChild(propProject);
+
+  var propState = div("detail-prop");
+  propState.appendChild(span("detail-prop-label", "State"));
+  var stateEl = span("task-state " + t.effective_state, stateLabel(t.effective_state));
+  propState.appendChild(stateEl);
+  props.appendChild(propState);
+
+  var propPri = div("detail-prop");
+  propPri.appendChild(span("detail-prop-label", "Priority"));
+  propPri.appendChild(span("task-pri " + t.priority, (t.priority||"").toUpperCase()));
+  props.appendChild(propPri);
+
+  var propCreated = div("detail-prop");
+  propCreated.appendChild(span("detail-prop-label", "Created"));
+  propCreated.appendChild(span("detail-prop-value", fmtDate(t.created_at)));
+  props.appendChild(propCreated);
+
+  if(t.is_running){
+    var propEngine = div("detail-prop");
+    propEngine.appendChild(span("detail-prop-label", "Engine"));
+    var engineVal = div("detail-engine-running");
+    engineVal.appendChild(txt("Running "));
+    engineVal.appendChild(div("running-dot"));
+    propEngine.appendChild(engineVal);
+    props.appendChild(propEngine);
+  }
+  headerCard.appendChild(props);
+  parent.appendChild(headerCard);
 
   // ── Generating state ──
   if(t.effective_state === "generating"){
-    var genSec = div("detail-section detail-generating");
+    var genSec = div("detail-card detail-generating");
     var genRow = div("detail-generating-inner");
     genRow.appendChild(div("spinner"));
-    genRow.appendChild(span("detail-generating-label", "Generating plan..."));
+    genRow.appendChild(span("detail-generating-label", "Generating plan\u2026"));
     genSec.appendChild(genRow);
     parent.appendChild(genSec);
   }
 
-  // ── Actions ──
+  // ── Actions (all buttons always visible, disabled when not applicable) ──
   var actions = div("detail-actions");
   var s = t.effective_state;
-  if(s === "pending" || s === "planned" || s === "blocked"){
-    var label = s === "pending" ? "Generate Plan" : s === "planned" ? "Run" : "Resume";
-    var btn = el("button", "btn btn-primary", [label]);
-    btn.onclick = function(){ taskAutopilot(t.id); };
-    actions.appendChild(btn);
+  var apKey = "autopilot:" + t.id;
+
+  // PLAN — enabled for pending only
+  var planLoading = (s === "generating") || (s === "pending" && loadingActions[apKey]);
+  var planEnabled = (s === "pending") && !loadingActions[apKey];
+  var planBtn = el("button", "btn" + (planEnabled ? " btn-primary" : ""));
+  if(planLoading){
+    planBtn.disabled = true;
+    var psp = document.createElement("span"); psp.className = "btn-spinner"; planBtn.appendChild(psp);
+    planBtn.appendChild(txt(" Planning\u2026"));
+  } else {
+    planBtn.textContent = "Plan";
+    planBtn.disabled = !planEnabled;
+    if(planEnabled) planBtn.onclick = function(){ taskPlanOnly(t.id, this); };
   }
-  if(s === "running"){
-    var stopBtn = el("button", "btn btn-danger", ["Stop"]);
-    stopBtn.onclick = function(){ taskAutopilot(t.id); };
-    actions.appendChild(stopBtn);
+  actions.appendChild(planBtn);
+
+  // Divider: PLAN | execution group
+  actions.appendChild(div("detail-actions-divider"));
+
+  // RUN — enabled for planned, blocked
+  var runEnabled = (s === "planned" || s === "blocked") && !loadingActions[apKey];
+  var runBtn = el("button", "btn" + (runEnabled ? " btn-success" : ""));
+  if(loadingActions[apKey] && (s === "planned" || s === "blocked")){
+    runBtn.disabled = true;
+    var rsp = document.createElement("span"); rsp.className = "btn-spinner"; runBtn.appendChild(rsp);
+  } else {
+    runBtn.textContent = s === "blocked" ? "Resume" : "Run";
+    runBtn.disabled = !runEnabled;
+    if(runEnabled) runBtn.onclick = function(){ taskAutopilot(t.id, this); };
   }
-  if(s !== "running"){
-    var doneBtn = el("button", "btn btn-success", ["Done"]);
-    doneBtn.onclick = function(){ taskDone(t.id); };
-    actions.appendChild(doneBtn);
+  actions.appendChild(runBtn);
+
+  // STOP — enabled for running only
+  var stopEnabled = (s === "running") && !loadingActions[apKey];
+  var stopBtn = el("button", "btn" + (stopEnabled ? " btn-danger" : ""));
+  if(loadingActions[apKey] && s === "running"){
+    stopBtn.disabled = true;
+    var ssp = document.createElement("span"); ssp.className = "btn-spinner"; stopBtn.appendChild(ssp);
+  } else {
+    stopBtn.textContent = "Stop";
+    stopBtn.disabled = !stopEnabled;
+    if(stopEnabled) stopBtn.onclick = function(){ taskStop(t.id); };
   }
-  if(t.has_plan){
-    var replanBtn = el("button", "btn", ["Replan"]);
-    replanBtn.onclick = function(){ taskReplan(t.id); };
-    actions.appendChild(replanBtn);
+  actions.appendChild(stopBtn);
+
+  // REPLAN — enabled when has_plan and not running/generating
+  var rpKey = "replan:" + t.id;
+  var replanEnabled = t.has_plan && s !== "running" && s !== "generating" && !loadingActions[rpKey];
+  var replanBtn = el("button", "btn");
+  if(loadingActions[rpKey]){
+    replanBtn.disabled = true;
+    var rpsp = document.createElement("span"); rpsp.className = "btn-spinner"; replanBtn.appendChild(rpsp);
+  } else {
+    replanBtn.textContent = "Replan";
+    replanBtn.disabled = !replanEnabled;
+    if(replanEnabled) replanBtn.onclick = function(){ taskReplan(t.id, this); };
   }
-  var archBtn = el("button", "btn btn-danger btn-sm", ["Archive"]);
-  archBtn.onclick = function(){ taskArchive(t.id); };
+  actions.appendChild(replanBtn);
+
+  // Divider before destructive action
+  actions.appendChild(div("detail-actions-divider"));
+
+  // ARCHIVE — always enabled
+  var archKey = "archive:" + t.id;
+  if(loadingActions[archKey]){
+    var archBtn = el("button", "btn btn-danger");
+    archBtn.disabled = true;
+    var asp = document.createElement("span"); asp.className = "btn-spinner"; archBtn.appendChild(asp);
+  } else {
+    var archBtn = el("button", "btn btn-danger", ["Archive"]);
+    archBtn.onclick = function(){ if(!confirm("Archive task #" + t.id + "? This cannot be undone.")) return; taskArchive(t.id, this); };
+  }
   actions.appendChild(archBtn);
+
   parent.appendChild(actions);
 
   // ── Plan section (collapsible) ──
   if(t.has_plan){
-    var planSec = div("detail-section");
+    var planSec = div("detail-card detail-section");
     var planTitleRow = div("detail-section-title detail-section-toggle");
     planTitleRow.appendChild(txt("Plan"));
     var chevron = span("plan-chevron", planCollapsed ? "\u25B6" : "\u25BC");
@@ -751,10 +1122,10 @@ function renderTaskDetail(parent, t){
     var planEl = div("plan-content");
     planEl.id = "plan-content-" + t.id;
     if(planCache[t.id]){
-      planEl.className = "plan-content";
-      planEl.textContent = planCache[t.id];
+      planEl.className = "plan-content plan-md";
+      planEl.innerHTML = mdToHtml(planCache[t.id]);
     } else {
-      planEl.textContent = "Loading...";
+      planEl.textContent = "Loading\u2026";
       planEl.className = "plan-content loading-text";
     }
     planBody.appendChild(planEl);
@@ -798,7 +1169,13 @@ function renderTaskDetail(parent, t){
   }
 
   // Use SSE logs if available (live), otherwise cached HTTP logs
-  var taskLogs = sseLogs.length > 0 ? sseLogs : (taskLogsCache[t.id] || []);
+  var rawTaskLogs = sseLogs.length > 0 ? sseLogs : (taskLogsCache[t.id] || []);
+  // Deduplicate consecutive entries with identical messages
+  var taskLogs = [];
+  for(var di = 0; di < rawTaskLogs.length; di++){
+    if(di > 0 && rawTaskLogs[di].message === rawTaskLogs[di-1].message) continue;
+    taskLogs.push(rawTaskLogs[di]);
+  }
 
   if(taskLogs.length === 0 && sseLogs.length === 0){
     // No SSE entries and no cache — try HTTP fetch for historical logs
@@ -806,9 +1183,9 @@ function renderTaskDetail(parent, t){
     if(t.effective_state === "pending"){
       emptyMsg.textContent = "No logs yet. Generate a plan to get started.";
     } else if(t.effective_state === "generating"){
-      emptyMsg.textContent = "Plan generation in progress...";
+      emptyMsg.textContent = "Plan generation in progress\u2026";
     } else {
-      emptyMsg.textContent = "Loading logs...";
+      emptyMsg.textContent = "Loading logs\u2026";
     }
     terminal.appendChild(emptyMsg);
     // Fetch historical logs from file
@@ -897,12 +1274,30 @@ function renderProjects(root){
 
       var acts = div("proj-row-actions");
       if(p.has_git){
-        var pullBtn = el("button","btn btn-sm",["PULL"]);
-        pullBtn.onclick = function(){ gitPull(p.path); };
+        var pullKey = "pull:" + p.path;
+        var pullBtn;
+        if(loadingActions[pullKey]){
+          pullBtn = el("button","btn btn-sm");
+          pullBtn.disabled = true;
+          var psp = document.createElement("span"); psp.className = "btn-spinner"; pullBtn.appendChild(psp);
+          pullBtn.appendChild(document.createTextNode(" PULLING\u2026"));
+        } else {
+          pullBtn = el("button","btn btn-sm",["PULL"]);
+          pullBtn.onclick = function(){ gitPull(p.path, this); };
+        }
         acts.appendChild(pullBtn);
       } else {
-        var initBtn = el("button","btn btn-sm btn-success",["INIT"]);
-        initBtn.onclick = function(){ gitInitProject(p.path, p.name); };
+        var initKey = "init:" + p.path;
+        var initBtn;
+        if(loadingActions[initKey]){
+          initBtn = el("button","btn btn-sm btn-success");
+          initBtn.disabled = true;
+          var isp = document.createElement("span"); isp.className = "btn-spinner"; initBtn.appendChild(isp);
+          initBtn.appendChild(document.createTextNode(" INIT\u2026"));
+        } else {
+          initBtn = el("button","btn btn-sm btn-success",["INIT"]);
+          initBtn.onclick = function(){ gitInitProject(p.path, p.name, this); };
+        }
         acts.appendChild(initBtn);
       }
       if(p.github_repo){
@@ -910,9 +1305,7 @@ function renderProjects(root){
         prBtn.onclick = function(){ showPRs(p.github_repo); };
         acts.appendChild(prBtn);
       }
-      var taskBtn = el("button","btn btn-sm btn-primary",["+"]);
-      taskBtn.onclick = function(){ addTaskForProject(p.name); };
-      acts.appendChild(taskBtn);
+      acts.appendChild(iconBtn("plus", "Add task", function(){ addTaskForProject(p.name); }));
       row.appendChild(acts);
 
       list.appendChild(row);
@@ -928,7 +1321,7 @@ function renderLogs(root){
   var header = div("view-header");
   header.appendChild(span("view-title", "Autopilot Logs"));
   var autoLabel = el("label");
-  autoLabel.style.cssText = "font-size:11px;color:var(--text-sec);display:flex;align-items:center;gap:4px;font-family:var(--font-sans)";
+  autoLabel.style.cssText = "font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:4px;font-family:var(--font)";
   var cb = el("input");
   cb.type = "checkbox";
   cb.checked = logAutoScroll;
@@ -972,12 +1365,24 @@ function renderLogs(root){
   }
   projSel.onchange = function(){ logFilterProject = this.value; render(); };
   toolbar.appendChild(projSel);
+
+  var agentSel = el("select", "filter-select");
+  agentSel.appendChild(mkOption("", "All Agents"));
+  var agentIds = Object.keys(agentMap).sort();
+  for(var ai=0;ai<agentIds.length;ai++){
+    var aKey = agentIds[ai];
+    agentSel.appendChild(mkOption(aKey, agentMap[aKey].icon + " " + agentMap[aKey].name, logFilterAgent===aKey));
+  }
+  agentSel.onchange = function(){ logFilterAgent = this.value; render(); };
+  toolbar.appendChild(agentSel);
+
   root.appendChild(toolbar);
 
   var filtered = logs.filter(function(l){
     if(logFilterLevel && l.level !== logFilterLevel) return false;
     if(logFilterTask && String(l.task_id) !== logFilterTask) return false;
     if(logFilterProject && l.project !== logFilterProject) return false;
+    if(logFilterAgent && l.agent !== logFilterAgent) return false;
     return true;
   });
 
@@ -995,6 +1400,9 @@ function renderLogs(root){
       entry.appendChild(icon);
       entry.appendChild(span("log-proj", l.project || "\u2014"));
       entry.appendChild(span("log-task", l.task_id ? "#"+l.task_id : ""));
+      if(l.agent && agentMap[l.agent]){
+        entry.appendChild(agentBadge(l.agent));
+      }
       entry.appendChild(span("log-msg", l.message));
       container.appendChild(entry);
     }
@@ -1013,18 +1421,41 @@ function selectTask(id){
   render();
 }
 
-function taskAutopilot(id){
-  api("POST","/api/tasks/autopilot",{id:id}, function(){});
+function taskPlanOnly(id, btn){
+  var key = "autopilot:" + id;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn);
+  api("POST","/api/tasks/autopilot",{id:id, run:false}, function(){ delete loadingActions[key]; scheduleActivePoll(); });
 }
-function taskDone(id){
-  api("POST","/api/tasks/done",{id:id}, function(){ selectedTaskID=0; });
+function taskAutopilot(id, btn){
+  var key = "autopilot:" + id;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn);
+  api("POST","/api/tasks/autopilot",{id:id}, function(){ delete loadingActions[key]; scheduleActivePoll(); });
 }
-function taskArchive(id){
-  api("POST","/api/tasks/archive",{id:id}, function(){ selectedTaskID=0; });
+function taskDone(id, btn){
+  var key = "done:" + id;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn);
+  api("POST","/api/tasks/done",{id:id}, function(){ delete loadingActions[key]; selectedTaskID=0; });
 }
-function taskReplan(id){
+function taskArchive(id, btn){
+  var key = "archive:" + id;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn);
+  api("POST","/api/tasks/archive",{id:id}, function(){ delete loadingActions[key]; selectedTaskID=0; });
+}
+function taskReplan(id, btn){
+  var key = "replan:" + id;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn);
   delete planCache[id];
-  api("POST","/api/tasks/replan",{id:id}, function(){});
+  api("POST","/api/tasks/replan",{id:id}, function(){ delete loadingActions[key]; });
 }
 function taskStop(id){
   api("POST","/api/tasks/stop",{id:id}, function(){});
@@ -1034,8 +1465,8 @@ function loadPlan(id){
   if(planCache[id]){
     var el = document.getElementById("plan-content-"+id);
     if(el){
-      el.className = "plan-content";
-      el.textContent = planCache[id];
+      el.className = "plan-content plan-md";
+      el.innerHTML = mdToHtml(planCache[id]);
     }
     return;
   }
@@ -1044,29 +1475,44 @@ function loadPlan(id){
     planCache[id] = content;
     var el = document.getElementById("plan-content-"+id);
     if(el){
-      el.className = "plan-content";
-      el.textContent = content;
+      el.className = "plan-content plan-md";
+      el.innerHTML = mdToHtml(content);
     }
   });
 }
 
-function gitPull(path){
+function gitPull(path, btn){
+  var key = "pull:" + path;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn, "PULLING\u2026");
   api("POST","/api/projects/pull",{path:path}, function(d){
-    if(d.error) alert("Pull failed: "+d.error);
+    delete loadingActions[key];
+    if(d.error){ toast("Pull failed: "+d.error, "error"); }
+    else { toast("Pull complete", "success"); }
+    render();
   });
 }
 
-function gitInitProject(path, name){
+function gitInitProject(path, name, btn){
+  var key = "init:" + path;
+  if(loadingActions[key]) return;
+  loadingActions[key] = true;
+  btnLoading(btn, "INIT\u2026");
   api("POST","/api/projects/git-init",{path:path, name:name}, function(d){
-    if(d.error) alert("Git init failed: "+d.error);
+    delete loadingActions[key];
+    if(d.error){ toast("Git init failed: "+d.error, "error"); }
+    else { toast("Git initialized: "+name, "success"); }
+    render();
   });
 }
+
 
 function showPRs(repo){
   currentPRsRepo = repo;
   document.getElementById("prs-title").textContent = "PRs \u2014 " + repo;
   var content = document.getElementById("prs-content");
-  content.textContent = "Loading...";
+  content.textContent = "Loading\u2026";
   content.className = "loading-text";
   document.getElementById("btn-merge-dep").style.display = "none";
   openModal("modal-prs");
@@ -1099,9 +1545,15 @@ function showPRs(repo){
 }
 
 function mergeDependabot(){
+  var mergeBtn = document.getElementById("btn-merge-dep");
+  var closeBtn = document.querySelector("#modal-prs .modal-actions .btn:first-child");
+  var restore = btnLoading(mergeBtn, "MERGING\u2026");
+  if(closeBtn) closeBtn.disabled = true;
   api("POST","/api/projects/merge-dependabot",{repo:currentPRsRepo}, function(d){
-    if(d.error) alert("Error: "+d.error);
-    else alert("Merged: "+d.merged+", Failed: "+(d.failed||0));
+    if(restore) restore();
+    if(closeBtn) closeBtn.disabled = false;
+    if(d.error){ toast("Merge error: "+d.error, "error"); }
+    else { toast("Merged: "+d.merged+", Failed: "+(d.failed||0), d.failed > 0 ? "error" : "success"); }
     closeModal("modal-prs");
   });
 }
@@ -1131,6 +1583,8 @@ function onTemplateSelect(){
   var id = parseInt(sel.value,10);
   if(!id) {
     document.getElementById("tmpl-del-btn").style.display = "none";
+    var eb = document.getElementById("tmpl-edit-btn");
+    if(eb) eb.style.display = "none";
     return;
   }
   for(var i=0;i<templatesCache.length;i++){
@@ -1140,6 +1594,8 @@ function onTemplateSelect(){
     }
   }
   document.getElementById("tmpl-del-btn").style.display = "";
+  var eb = document.getElementById("tmpl-edit-btn");
+  if(eb) eb.style.display = "";
 }
 
 function insertTemplate(content){
@@ -1174,7 +1630,53 @@ function deleteSelectedTemplate(){
   if(!id) return;
   api("POST","/api/templates/delete",{id:id},function(d){
     if(d.error) return;
+    editingTemplateId = 0;
+    updateTemplateSaveBtn();
     loadTemplates();
+  });
+}
+
+function editSelectedTemplate(){
+  var sel = document.getElementById("tmpl-select");
+  var id = parseInt(sel.value,10);
+  if(!id) return;
+  for(var i=0;i<templatesCache.length;i++){
+    if(templatesCache[i].id === id){
+      document.getElementById("tmpl-name").value = templatesCache[i].name;
+      document.getElementById("add-desc").value = templatesCache[i].content;
+      editingTemplateId = id;
+      updateTemplateSaveBtn();
+      document.getElementById("tmpl-name").focus();
+      break;
+    }
+  }
+}
+
+function updateTemplateSaveBtn(){
+  var btn = document.querySelector(".template-save-row .btn");
+  if(!btn) return;
+  if(editingTemplateId){
+    btn.textContent = "Update snippet";
+    btn.onclick = function(){ updateTemplate(); };
+  } else {
+    btn.textContent = "Save snippet";
+    btn.onclick = function(){ saveTemplate(); };
+  }
+}
+
+function updateTemplate(){
+  var nameEl = document.getElementById("tmpl-name");
+  var name = nameEl.value.trim();
+  var content = document.getElementById("add-desc").value.trim();
+  if(!name){ nameEl.focus(); return; }
+  if(!content){ document.getElementById("add-desc").focus(); return; }
+  api("POST","/api/templates/update",{id:editingTemplateId,name:name,content:content},function(d){
+    if(d.error){ toast("Error: "+d.error, "error"); return; }
+    editingTemplateId = 0;
+    nameEl.value = "";
+    updateTemplateSaveBtn();
+    loadTemplates();
+    toast("Template updated", "success");
   });
 }
 
@@ -1189,8 +1691,10 @@ function openAddTask(proj){
   document.getElementById("add-desc").value = "";
   document.getElementById("add-priority").value = "med";
   document.getElementById("tmpl-name").value = "";
+  editingTemplateId = 0;
   document.getElementById("tmpl-select").onchange = onTemplateSelect;
   loadTemplates();
+  updateTemplateSaveBtn();
   openModal("modal-add");
   setTimeout(function(){ document.getElementById("add-desc").focus(); }, 100);
 }
@@ -1217,9 +1721,12 @@ function submitAddTask(){
   if(suffix && desc.indexOf("party-mode") === -1){
     desc = desc + ". " + suffix;
   }
+  var addBtn = document.querySelector("#modal-add .btn-primary");
+  var restore = btnLoading(addBtn, "ADDING\u2026");
   api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri}, function(d){
+    if(restore) restore();
     closeModal("modal-add");
-    if(d.id) selectedTaskID = d.id;
+    if(d.id){ selectedTaskID = d.id; toast("Task #"+d.id+" created", "success"); }
   });
 }
 
@@ -1259,6 +1766,11 @@ function mkFeedTitle(text){
 function mkTerminalLine(l){
   var line = div("term-line term-line-" + (l.level || "info"));
   line.appendChild(span("term-ts", "[" + fmtTime(l.time) + "]"));
+  if(l.agent && agentMap[l.agent]){
+    var ab = span("term-agent", agentMap[l.agent].icon + " " + agentMap[l.agent].name);
+    ab.style.color = agentMap[l.agent].color;
+    line.appendChild(ab);
+  }
   line.appendChild(span("term-msg term-msg-" + (l.level || "info"), l.message));
   return line;
 }
@@ -1330,12 +1842,55 @@ function canvasDragAction(fromCol, toCol, taskId){
 function levelIconEl(lvl){
   var s = document.createElement("span");
   switch(lvl){
-    case "success": s.style.color = "var(--green)"; s.textContent = "\u2713"; break;
-    case "warn": s.style.color = "var(--orange)"; s.textContent = "\u26A0"; break;
-    case "error": s.style.color = "var(--red)"; s.textContent = "\u2717"; break;
-    default: s.style.color = "var(--text-sec)"; s.textContent = "\u2139"; break;
+    case "success": s.style.color = "var(--success)"; s.textContent = "\u2713"; break;
+    case "warn": s.style.color = "var(--warning)"; s.textContent = "\u26A0"; break;
+    case "error": s.style.color = "var(--danger)"; s.textContent = "\u2717"; break;
+    default: s.style.color = "var(--text-muted)"; s.textContent = "\u2139"; break;
   }
   return s;
+}
+function buildPhaseRing(pct, size){
+  // Phase ring: arc gauge encoding percentage as sweep
+  size = size || 28;
+  var strokeW = 2.5;
+  var r = (size / 2) - strokeW;
+  var cx = size / 2, cy = size / 2;
+  var ns = "http://www.w3.org/2000/svg";
+  var svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", size);
+  svg.setAttribute("height", size);
+  svg.setAttribute("viewBox", "0 0 " + size + " " + size);
+  svg.style.display = "block";
+
+  // Track (background ring)
+  var track = document.createElementNS(ns, "circle");
+  track.setAttribute("cx", cx);
+  track.setAttribute("cy", cy);
+  track.setAttribute("r", r);
+  track.setAttribute("fill", "none");
+  track.setAttribute("stroke", "var(--glass)");
+  track.setAttribute("stroke-width", strokeW);
+  svg.appendChild(track);
+
+  // Arc (filled portion)
+  if(pct > 0.5){
+    var color = pct >= 80 ? "var(--danger)" : pct >= 60 ? "var(--warning)" : "var(--accent)";
+    var circ = 2 * Math.PI * r;
+    var dash = (pct / 100) * circ;
+    var arc = document.createElementNS(ns, "circle");
+    arc.setAttribute("cx", cx);
+    arc.setAttribute("cy", cy);
+    arc.setAttribute("r", r);
+    arc.setAttribute("fill", "none");
+    arc.setAttribute("stroke", color);
+    arc.setAttribute("stroke-width", strokeW);
+    arc.setAttribute("stroke-dasharray", dash.toFixed(1) + " " + circ.toFixed(1));
+    arc.setAttribute("stroke-linecap", "round");
+    arc.setAttribute("transform", "rotate(-90 " + cx + " " + cy + ")");
+    svg.appendChild(arc);
+  }
+
+  return svg;
 }
 function stateLabel(s){
   switch(s){
@@ -1414,7 +1969,7 @@ function renderChat(container){
   var textarea = el("textarea","chat-input");
   textarea.id = "chat-textarea";
   textarea.rows = 2;
-  textarea.placeholder = "Type a message...";
+  textarea.placeholder = "Type a message\u2026";
   textarea.onkeydown = function(e){
     if(e.key === "Enter" && !e.shiftKey){
       e.preventDefault();
@@ -1536,7 +2091,7 @@ function sendChatMessage(){
                         card.addEventListener("click", (function(taskId){
                           return function(){
                             window.location.hash = "#queue";
-                            selectedTaskId = taskId;
+                            selectedTaskID = taskId;
                             render();
                           };
                         })(ct.id));
@@ -1738,6 +2293,14 @@ function makeCanvasCard(t, colId){
     blkIcon.title = t.block_reason ? "Blocked: "+t.block_reason : "Blocked";
     footer.appendChild(blkIcon);
   }
+  if(t.effective_state === "running"){
+    var lastAg = getLastAgentForTask(t.id);
+    if(lastAg && agentMap[lastAg]){
+      var ab = span("canvas-agent-badge", agentMap[lastAg].icon + " " + agentMap[lastAg].name);
+      ab.style.color = agentMap[lastAg].color;
+      footer.appendChild(ab);
+    }
+  }
   inner.appendChild(footer);
   card.appendChild(inner);
 
@@ -1762,12 +2325,16 @@ function submitProjectInit(){
   var structure = document.getElementById("init-structure").value;
 
   var submitBtn = document.getElementById("init-submit");
+  var cancelBtn = document.querySelector("#modal-init .modal-actions .btn:first-child");
   submitBtn.disabled = true;
-  submitBtn.textContent = "Creating...";
+  submitBtn.textContent = "";
+  var sp = document.createElement("span"); sp.className = "btn-spinner"; submitBtn.appendChild(sp);
+  submitBtn.appendChild(document.createTextNode(" Creating\u2026"));
+  if(cancelBtn) cancelBtn.disabled = true;
 
   var prog = document.getElementById("init-progress");
   prog.style.display = "block";
-  prog.innerHTML = "";
+  prog.textContent = "";
 
   fetch("/api/projects/init",{
     method:"POST",
@@ -1782,6 +2349,7 @@ function submitProjectInit(){
         if(result.done){
           submitBtn.disabled = false;
           submitBtn.textContent = "Create Project";
+          if(cancelBtn) cancelBtn.disabled = false;
           return;
         }
         buffer += decoder.decode(result.value, {stream:true});
@@ -1795,11 +2363,19 @@ function submitProjectInit(){
               if(evt.done){
                 if(evt.status === "success"){
                   var doneRow = el("div","init-progress-step");
-                  doneRow.innerHTML = '<span class="init-step-icon" style="color:var(--green)">&#10003;</span><span class="init-step-name">Project created successfully!</span>';
+                  var doneIcon = el("span","init-step-icon");
+                  doneIcon.style.color = "var(--success)";
+                  doneIcon.textContent = "\u2713";
+                  doneRow.appendChild(doneIcon);
+                  doneRow.appendChild(el("span","init-step-name",["Project created successfully!"]));
                   prog.appendChild(doneRow);
+                  toast("Project " + name + " created!", "success");
+                } else {
+                  toast("Project creation failed", "error");
                 }
                 submitBtn.disabled = false;
                 submitBtn.textContent = "Create Project";
+                if(cancelBtn) cancelBtn.disabled = false;
                 return;
               }
               renderInitStep(prog, evt);
@@ -1813,7 +2389,18 @@ function submitProjectInit(){
   }).catch(function(){
     submitBtn.disabled = false;
     submitBtn.textContent = "Create Project";
+    if(cancelBtn) cancelBtn.disabled = false;
+    toast("Connection error during project creation", "error");
   });
+}
+
+function initStepIcon(status){
+  var s = document.createElement("span");
+  if(status === "done"){ s.style.color = "var(--success)"; s.textContent = "\u2713"; }
+  else if(status === "error"){ s.style.color = "var(--danger)"; s.textContent = "\u2717"; }
+  else if(status === "running"){ s.style.color = "var(--warning)"; s.textContent = "\u2022"; }
+  else { s.style.color = "var(--danger)"; s.textContent = "\u2717"; }
+  return s;
 }
 
 function renderInitStep(prog, evt){
@@ -1821,9 +2408,11 @@ function renderInitStep(prog, evt){
   if(existing){
     var icon = existing.querySelector(".init-step-icon");
     if(evt.status === "done"){
-      icon.innerHTML = '<span style="color:var(--green)">&#10003;</span>';
+      icon.textContent = "";
+      icon.appendChild(initStepIcon("done"));
     } else if(evt.status === "error"){
-      icon.innerHTML = '<span style="color:var(--red)">&#10007;</span>';
+      icon.textContent = "";
+      icon.appendChild(initStepIcon("error"));
       var msg = el("span","init-step-error");
       msg.textContent = evt.message || "";
       existing.appendChild(msg);
@@ -1833,9 +2422,7 @@ function renderInitStep(prog, evt){
   var row = el("div","init-progress-step");
   row.id = "init-step-" + evt.step;
   var icon = el("span","init-step-icon");
-  if(evt.status === "running") icon.innerHTML = '<span style="color:var(--yellow)">&#8226;</span>';
-  else if(evt.status === "done") icon.innerHTML = '<span style="color:var(--green)">&#10003;</span>';
-  else icon.innerHTML = '<span style="color:var(--red)">&#10007;</span>';
+  icon.appendChild(initStepIcon(evt.status));
   row.appendChild(icon);
   var name = el("span","init-step-name");
   name.textContent = "Step " + evt.step + ": " + (evt.name || "");
@@ -1860,7 +2447,932 @@ window.closeModal = closeModal;
 window.submitAddTask = submitAddTask;
 window.saveTemplate = saveTemplate;
 window.deleteSelectedTemplate = deleteSelectedTemplate;
+window.editSelectedTemplate = editSelectedTemplate;
 window.mergeDependabot = mergeDependabot;
 window.submitProjectInit = submitProjectInit;
+
+/* ── Configuration View ── */
+function loadConfig(cb){
+  api("GET","/api/config",null,function(data){
+    configData = data;
+    configLoaded++;
+    if(cb) cb();
+  });
+}
+
+function renderConfig(root){
+  var header = div("view-header");
+  header.appendChild(span("view-title", "Configuration"));
+  root.appendChild(header);
+
+  // Top tab bar: About | General | Templates
+  var tabBar = div("config-tabs");
+  ["General","Marketplace","Templates","About"].forEach(function(label){
+    var key = label.toLowerCase();
+    var tb = el("button", "config-tab-btn" + (configTab === key ? " active" : ""), [label]);
+    tb.onclick = function(){ configTab = key; configEditing = null; render(); };
+    tabBar.appendChild(tb);
+  });
+  root.appendChild(tabBar);
+
+  if(configTab === "about"){
+    if(!configData){
+      loadConfig(function(){ render(); });
+      var ld = div("empty"); ld.textContent = "Loading\u2026"; root.appendChild(ld);
+      return;
+    }
+    renderConfigAbout(root);
+    return;
+  }
+
+  if(configTab === "marketplace"){
+    renderConfigMarketplace(root);
+    return;
+  }
+
+  if(configTab === "templates"){
+    renderConfigTemplates(root);
+    return;
+  }
+
+  // ── General tab ──
+  if(!configData){
+    loadConfig(function(){ render(); });
+    var loading = div("empty");
+    loading.textContent = "Loading configuration\u2026";
+    root.appendChild(loading);
+    return;
+  }
+
+  // Sub-tab bar: Paths | Server | Budget | Autopilot
+  var subTabs = div("config-subtabs");
+  [["Paths","paths"],["Server","server"],["Budget","budget"],["Autopilot","autopilot"]].forEach(function(pair){
+    var tb = el("button", "config-subtab-btn" + (configSubTab === pair[1] ? " active" : ""), [pair[0]]);
+    tb.onclick = function(){ configSubTab = pair[1]; configEditing = null; render(); };
+    subTabs.appendChild(tb);
+  });
+  root.appendChild(subTabs);
+
+  switch(configSubTab){
+    case "paths":  renderConfigPaths(root); break;
+    case "server": renderConfigServer(root); break;
+    case "budget": renderConfigBudget(root); break;
+    case "autopilot": renderConfigAutopilot(root); break;
+  }
+}
+
+function renderConfigAutopilot(root){
+  var c = configData;
+  var editing = configEditing === "autopilot";
+
+  // ── Spawn Settings Section ──
+  var sec = div("config-section");
+  var hdr = div("section-header");
+  hdr.appendChild(el("h3","config-section-title",["Spawn Settings"]));
+  if(!editing){
+    hdr.appendChild(iconBtn("pencil","Edit",function(){ configEditing = "autopilot"; render(); }));
+  }
+  sec.appendChild(hdr);
+  var grid = div("config-grid");
+  if(editing){
+    // Model select
+    var modelRow = div("config-field");
+    var modelLbl = el("label","config-label",["Model"]);
+    modelLbl.setAttribute("for","cfg-spawn_model");
+    modelRow.appendChild(modelLbl);
+    var modelSel = el("select","config-input");
+    modelSel.id = "cfg-spawn_model";
+    [["(inherit)",""],["sonnet","sonnet"],["opus","opus"],["haiku","haiku"]].forEach(function(opt){
+      var o = el("option","",[ opt[0] ]);
+      o.value = opt[1];
+      if((c.spawn_model||"") === opt[1]) o.selected = true;
+      modelSel.appendChild(o);
+    });
+    modelRow.appendChild(modelSel);
+    grid.appendChild(modelRow);
+
+    // Effort select
+    var effortRow = div("config-field");
+    var effortLbl = el("label","config-label",["Effort"]);
+    effortLbl.setAttribute("for","cfg-spawn_effort");
+    effortRow.appendChild(effortLbl);
+    var effortSel = el("select","config-input");
+    effortSel.id = "cfg-spawn_effort";
+    [["(inherit)",""],["high","high"],["medium","medium"],["low","low"]].forEach(function(opt){
+      var o = el("option","",[ opt[0] ]);
+      o.value = opt[1];
+      if((c.spawn_effort||"") === opt[1]) o.selected = true;
+      effortSel.appendChild(o);
+    });
+    effortRow.appendChild(effortSel);
+    grid.appendChild(effortRow);
+
+    grid.appendChild(configInput("spawn_max_turns","Max Turns", String(c.spawn_max_turns || 25)));
+  } else {
+    grid.appendChild(configReadRow("Model", c.spawn_model || "(inherit)"));
+    grid.appendChild(configReadRow("Effort", c.spawn_effort || "(inherit)"));
+    grid.appendChild(configReadRow("Max Turns", String(c.spawn_max_turns || 25)));
+  }
+  sec.appendChild(grid);
+  if(editing){
+    var acts = div("config-actions");
+    var cancelBtn = el("button","btn",["Cancel"]);
+    cancelBtn.onclick = function(){ configEditing = null; render(); };
+    acts.appendChild(cancelBtn);
+    var saveBtn = el("button","btn btn-primary",["Save"]);
+    saveBtn.onclick = function(){ saveAutopilotConfig(); };
+    acts.appendChild(saveBtn);
+    sec.appendChild(acts);
+  }
+  root.appendChild(sec);
+
+  // ── Skeleton Steps Section ──
+  var skSec = div("config-section");
+  skSec.appendChild(el("h3","config-section-title",["Skeleton Steps"]));
+  var skDesc = el("p","config-empty");
+  skDesc.textContent = "Configure which steps are included in every autopilot task plan.";
+  skSec.appendChild(skDesc);
+
+  var sk = (c.skeleton || {});
+  var skToggles = [
+    {key:"investigate", label:"Investigate", desc:"Read codebase, CLAUDE.md, understand patterns", locked:true},
+    {key:"web_search", label:"Web Search", desc:"Search the web during investigation"},
+    {key:"context7_lookup", label:"Context7 Lookup", desc:"Look up library documentation"},
+    {key:"build_verify", label:"Build & Verify", desc:"Compile/build, create build system if missing"},
+    {key:"test", label:"Test", desc:"Run + create tests, set up test infra if missing"},
+    {key:"pre_commit", label:"Pre-commit", desc:"Run linters/formatters, set up hooks if missing"},
+    {key:"commit", label:"Commit", desc:"Git commit (type(core): desc, single commit)"},
+    {key:"push", label:"Push", desc:"Git push to remote (off by default)"}
+  ];
+
+  var skList = div("config-grid");
+  skToggles.forEach(function(t){
+    var row = div("mcp-toggle");
+    var cb = el("input","");
+    cb.type = "checkbox";
+    cb.setAttribute("aria-label", t.label);
+    if(t.locked){
+      cb.checked = true;
+      cb.disabled = true;
+      cb.title = "Always enabled";
+    } else {
+      cb.checked = sk[t.key] !== false;
+      cb.onchange = function(){
+        var full = {
+          web_search: sk.web_search !== false,
+          context7_lookup: sk.context7_lookup !== false,
+          build_verify: sk.build_verify !== false,
+          test: sk.test !== false,
+          pre_commit: sk.pre_commit !== false,
+          commit: sk.commit !== false,
+          push: !!sk.push
+        };
+        full[t.key] = cb.checked;
+        api("POST","/api/config/save",{skeleton:full},function(d){
+          if(d.ok){
+            toast("Skeleton config saved","success");
+            configData = null;
+            loadConfig(function(){ render(); });
+          } else {
+            toast("Error: " + (d.error||"unknown"),"error");
+            cb.checked = !cb.checked;
+          }
+        });
+      };
+    }
+    row.appendChild(cb);
+    row.appendChild(span("mcp-server-name", t.label));
+    row.appendChild(span("mcp-server-cmd", t.desc));
+    if(t.key === "context7_lookup" || t.key === "web_search"){
+      row.appendChild(buildMarketplaceLink("MCP", "mcp"));
+    }
+    skList.appendChild(row);
+  });
+  skSec.appendChild(skList);
+  root.appendChild(skSec);
+}
+
+function renderConfigMarketplace(root){
+  if(!configData){
+    loadConfig(function(){ render(); });
+    var ld = div("empty"); ld.textContent = "Loading\u2026"; root.appendChild(ld);
+    return;
+  }
+
+  var subTabs = div("config-subtabs");
+  subTabs.setAttribute("role", "tablist");
+  [["MCP","mcp"],["Skills","skills"]].forEach(function(pair){
+    var tb = el("button", "config-subtab-btn" + (marketplaceSubTab === pair[1] ? " active" : ""), [pair[0]]);
+    tb.setAttribute("role", "tab");
+    tb.setAttribute("aria-selected", marketplaceSubTab === pair[1] ? "true" : "false");
+    tb.onclick = function(){ marketplaceSubTab = pair[1]; render(); };
+    subTabs.appendChild(tb);
+  });
+  root.appendChild(subTabs);
+
+  if(marketplaceSubTab === "skills"){
+    renderMarketplaceSkills(root);
+  } else {
+    renderMarketplaceMCP(root);
+  }
+}
+
+function renderMarketplaceMCP(root){
+  var mcpSec = div("config-section");
+  mcpSec.appendChild(el("h3","config-section-title",["MCP Servers"]));
+
+  if(!mcpData){
+    api("GET","/api/mcp/list",null,function(d){
+      mcpData = d;
+      render();
+    });
+    var ld = div("config-empty");
+    ld.textContent = "Loading MCP servers\u2026";
+    mcpSec.appendChild(ld);
+    root.appendChild(mcpSec);
+    return;
+  }
+
+  if(mcpData.using_global){
+    var info = div("config-empty");
+    info.textContent = "Using global MCP servers from ~/.claude/settings.json";
+    mcpSec.appendChild(info);
+
+    if(mcpData.global){
+      var gList = div("config-grid");
+      Object.keys(mcpData.global).forEach(function(name){
+        var s = mcpData.global[name];
+        var row = div("mcp-toggle");
+        row.appendChild(span("mcp-server-name", name));
+        row.appendChild(span("mcp-server-cmd", s.command + " " + (s.args||[]).join(" ")));
+        gList.appendChild(row);
+      });
+      mcpSec.appendChild(gList);
+    }
+
+    var initBtn = el("button","btn btn-primary btn-sm",["Initialize Custom Config"]);
+    initBtn.style.marginTop = "12px";
+    initBtn.onclick = function(){
+      var restore = btnLoading(initBtn, "INITIALIZING\u2026");
+      api("POST","/api/mcp/init",{},function(d){
+        if(restore) restore();
+        if(d.ok){
+          mcpData = null;
+          toast("MCP servers initialized","success");
+          render();
+        } else {
+          toast("Error: " + (d.error||"unknown"),"error");
+        }
+      });
+    };
+    mcpSec.appendChild(initBtn);
+  } else {
+    var servers = mcpData.custom || {};
+    var names = Object.keys(servers);
+    if(names.length === 0){
+      var empty = div("config-empty");
+      empty.textContent = "No MCP servers configured.";
+      mcpSec.appendChild(empty);
+    } else {
+      var list = div("config-grid");
+      names.forEach(function(name){
+        var s = servers[name];
+        var row = div("mcp-toggle");
+
+        var cb = el("input","");
+        cb.type = "checkbox";
+        cb.checked = s.enabled;
+        cb.setAttribute("aria-label", "Toggle " + name);
+        cb.onchange = function(){
+          api("POST","/api/mcp/toggle",{name:name, enabled:cb.checked},function(d){
+            if(d.ok){
+              mcpData = null;
+              toast("MCP configuration saved","success");
+              render();
+            } else {
+              toast("Error: " + (d.error||"unknown"),"error");
+              cb.checked = !cb.checked;
+            }
+          });
+        };
+        row.appendChild(cb);
+        row.appendChild(span("mcp-server-name", name));
+        row.appendChild(span("mcp-server-cmd", s.command + " " + (s.args||[]).join(" ")));
+        list.appendChild(row);
+      });
+      mcpSec.appendChild(list);
+    }
+  }
+
+  // Add Server (Catalog)
+  var addBtn = el("button","btn btn-primary btn-sm",["Add Server"]);
+  addBtn.style.marginTop = "12px";
+  addBtn.onclick = function(){
+    mcpCatalogOpen = !mcpCatalogOpen;
+    mcpCatalogResults = null;
+    render();
+  };
+  mcpSec.appendChild(addBtn);
+
+  if(mcpCatalogOpen){
+    var catBox = div("config-section");
+    catBox.style.marginTop = "12px";
+    catBox.style.padding = "12px";
+    catBox.style.border = "1px solid var(--glass)";
+    catBox.style.borderRadius = "8px";
+
+    var searchRow = div("");
+    searchRow.style.display = "flex";
+    searchRow.style.gap = "8px";
+    searchRow.style.marginBottom = "12px";
+
+    var searchInput = el("input","");
+    searchInput.type = "text";
+    searchInput.placeholder = "Search MCP servers\u2026";
+    searchInput.name = "search";
+    searchInput.setAttribute("aria-label", "Search MCP servers");
+    searchInput.setAttribute("autocomplete", "off");
+    searchInput.value = mcpCatalogSearch;
+    searchInput.style.flex = "1";
+    searchInput.style.padding = "6px 10px";
+    searchInput.style.background = "rgba(0,0,0,.4)";
+    searchInput.style.border = "1px solid var(--glass)";
+    searchInput.style.borderRadius = "6px";
+    searchInput.style.color = "var(--text)";
+    searchInput.style.fontSize = "13px";
+    searchInput.onkeydown = function(e){
+      if(e.key === "Enter"){
+        mcpCatalogSearch = searchInput.value;
+        searchCatalog(searchInput.value);
+      }
+    };
+    searchRow.appendChild(searchInput);
+
+    var searchBtn = el("button","btn btn-primary btn-sm",["Search"]);
+    searchBtn.onclick = function(){
+      mcpCatalogSearch = searchInput.value;
+      searchCatalog(searchInput.value);
+    };
+    searchRow.appendChild(searchBtn);
+
+    var closeBtn = el("button","btn btn-sm",["Close"]);
+    closeBtn.onclick = function(){
+      mcpCatalogOpen = false;
+      mcpCatalogResults = null;
+      mcpCatalogSearch = "";
+      render();
+    };
+    searchRow.appendChild(closeBtn);
+    catBox.appendChild(searchRow);
+
+    if(mcpCatalogResults === null){
+      var hint = div("config-empty");
+      hint.textContent = "Search the official MCP registry to find and install servers.";
+      catBox.appendChild(hint);
+    } else if(mcpCatalogResults === "loading"){
+      var ld2 = div("config-empty");
+      ld2.textContent = "Searching\u2026";
+      catBox.appendChild(ld2);
+    } else if(mcpCatalogResults.length === 0){
+      var noRes = div("config-empty");
+      noRes.textContent = "No servers found.";
+      catBox.appendChild(noRes);
+    } else {
+      var resList = div("config-grid");
+      mcpCatalogResults.forEach(function(srv){
+        var row = div("mcp-toggle");
+        row.style.flexDirection = "column";
+        row.style.alignItems = "flex-start";
+        row.style.gap = "4px";
+        row.style.padding = "8px 0";
+        row.style.borderBottom = "1px solid var(--glass)";
+
+        var topRow = div("");
+        topRow.style.display = "flex";
+        topRow.style.justifyContent = "space-between";
+        topRow.style.width = "100%";
+        topRow.style.alignItems = "center";
+
+        var nameEl = span("mcp-server-name", srv.name);
+        nameEl.style.fontWeight = "600";
+        topRow.appendChild(nameEl);
+
+        if(srv.installed){
+          var badge = span("","Installed");
+          badge.style.color = "var(--success)";
+          badge.style.fontSize = "11px";
+          badge.style.fontWeight = "600";
+          topRow.appendChild(badge);
+        } else {
+          var installBtn = el("button","btn btn-success btn-sm",["Install"]);
+          installBtn.dataset.pkg = srv.package;
+          installBtn.dataset.name = srv.name;
+          installBtn.onclick = (function(s, btn){
+            return function(){
+              if(s.env_vars && s.env_vars.length > 0){
+                var hasRequired = s.env_vars.some(function(v){ return v.is_required; });
+                if(hasRequired){
+                  showEnvVarsPrompt(s, btn);
+                  return;
+                }
+              }
+              doInstall(s.name, s.package, {}, btn);
+            };
+          })(srv, installBtn);
+          topRow.appendChild(installBtn);
+        }
+        row.appendChild(topRow);
+
+        if(srv.description){
+          var desc = span("mcp-server-cmd", srv.description);
+          desc.style.fontSize = "12px";
+          desc.style.opacity = "0.8";
+          row.appendChild(desc);
+        }
+
+        var pkgEl = span("mcp-server-cmd", srv.package);
+        pkgEl.style.fontSize = "11px";
+        pkgEl.style.opacity = "0.6";
+        row.appendChild(pkgEl);
+
+        if(srv.env_vars && srv.env_vars.length > 0){
+          var envHint = span("","Env: " + srv.env_vars.map(function(v){ return v.name + (v.is_required ? "*" : ""); }).join(", "));
+          envHint.style.fontSize = "11px";
+          envHint.style.opacity = "0.5";
+          envHint.style.fontStyle = "italic";
+          row.appendChild(envHint);
+        }
+
+        resList.appendChild(row);
+      });
+      catBox.appendChild(resList);
+    }
+    mcpSec.appendChild(catBox);
+  }
+
+  root.appendChild(mcpSec);
+}
+
+function renderMarketplaceSkills(root){
+  // Installed Skills section
+  var sec = div("config-section");
+  sec.appendChild(el("h3","config-section-title",["Installed Skills"]));
+
+  if(!skillsData){
+    api("GET","/api/skills/list",null,function(d){
+      skillsData = d.skills || [];
+      render();
+    });
+    var ld = div("config-empty");
+    ld.textContent = "Loading installed skills\u2026";
+    sec.appendChild(ld);
+    root.appendChild(sec);
+    return;
+  }
+
+  if(skillsData.length === 0){
+    var empty = div("config-empty");
+    empty.textContent = "No skills installed yet.";
+    sec.appendChild(empty);
+  } else {
+    var list = div("config-grid");
+    skillsData.forEach(function(sk){
+      var row = div("mcp-toggle");
+      row.appendChild(span("mcp-server-name", sk.name));
+      row.appendChild(span("mcp-server-cmd", sk.description || sk.path));
+      list.appendChild(row);
+    });
+    sec.appendChild(list);
+  }
+
+  // Add Skill (Catalog)
+  var addBtn = el("button","btn btn-primary btn-sm",["Add Skill"]);
+  addBtn.style.marginTop = "12px";
+  addBtn.onclick = function(){
+    skillsCatalogOpen = !skillsCatalogOpen;
+    skillsCatalogResults = null;
+    render();
+  };
+  sec.appendChild(addBtn);
+
+  if(skillsCatalogOpen){
+    var catBox = div("config-section");
+    catBox.style.marginTop = "12px";
+    catBox.style.padding = "12px";
+    catBox.style.border = "1px solid var(--glass)";
+    catBox.style.borderRadius = "8px";
+
+    var searchRow = div("");
+    searchRow.style.display = "flex";
+    searchRow.style.gap = "8px";
+    searchRow.style.marginBottom = "12px";
+
+    var searchInput = el("input","");
+    searchInput.type = "text";
+    searchInput.placeholder = "Search skills\u2026";
+    searchInput.name = "search";
+    searchInput.setAttribute("aria-label", "Search skills");
+    searchInput.setAttribute("autocomplete", "off");
+    searchInput.value = skillsCatalogSearch;
+    searchInput.style.flex = "1";
+    searchInput.style.padding = "6px 10px";
+    searchInput.style.background = "rgba(0,0,0,.4)";
+    searchInput.style.border = "1px solid var(--glass)";
+    searchInput.style.borderRadius = "6px";
+    searchInput.style.color = "var(--text)";
+    searchInput.style.fontSize = "13px";
+    searchInput.onkeydown = function(e){
+      if(e.key === "Enter"){
+        skillsCatalogSearch = searchInput.value;
+        searchSkillsCatalog(searchInput.value);
+      }
+    };
+    searchRow.appendChild(searchInput);
+
+    var searchBtn = el("button","btn btn-primary btn-sm",["Search"]);
+    searchBtn.onclick = function(){
+      skillsCatalogSearch = searchInput.value;
+      searchSkillsCatalog(searchInput.value);
+    };
+    searchRow.appendChild(searchBtn);
+
+    var closeBtn = el("button","btn btn-sm",["Close"]);
+    closeBtn.onclick = function(){
+      skillsCatalogOpen = false;
+      skillsCatalogResults = null;
+      skillsCatalogSearch = "";
+      render();
+    };
+    searchRow.appendChild(closeBtn);
+    catBox.appendChild(searchRow);
+
+    if(skillsCatalogResults === null){
+      var hint = div("config-empty");
+      hint.textContent = "Search skills.sh to find and install Claude Code skills.";
+      catBox.appendChild(hint);
+    } else if(skillsCatalogResults === "loading"){
+      var ld2 = div("config-empty");
+      ld2.textContent = "Searching\u2026";
+      catBox.appendChild(ld2);
+    } else if(skillsCatalogResults.length === 0){
+      var noRes = div("config-empty");
+      noRes.textContent = "No skills found.";
+      catBox.appendChild(noRes);
+    } else {
+      var resList = div("config-grid");
+      skillsCatalogResults.forEach(function(sk){
+        var row = div("mcp-toggle");
+        row.style.flexDirection = "column";
+        row.style.alignItems = "flex-start";
+        row.style.gap = "4px";
+        row.style.padding = "8px 0";
+        row.style.borderBottom = "1px solid var(--glass)";
+
+        var topRow = div("");
+        topRow.style.display = "flex";
+        topRow.style.justifyContent = "space-between";
+        topRow.style.width = "100%";
+        topRow.style.alignItems = "center";
+
+        var nameEl = span("mcp-server-name", sk.name);
+        nameEl.style.fontWeight = "600";
+        topRow.appendChild(nameEl);
+
+        if(sk.installed){
+          var badge = span("","Installed");
+          badge.style.color = "var(--success)";
+          badge.style.fontSize = "11px";
+          badge.style.fontWeight = "600";
+          topRow.appendChild(badge);
+        } else {
+          var installBtn = el("button","btn btn-success btn-sm",["Install"]);
+          installBtn.onclick = (function(skill, btn){
+            return function(){
+              var restore = btnLoading(btn, "INSTALLING\u2026");
+              api("POST","/api/skills/install",{id: skill.source},function(d){
+                if(restore) restore();
+                if(d.ok){
+                  skillsData = null;
+                  skillsCatalogResults = null;
+                  skillsCatalogOpen = false;
+                  skillsCatalogSearch = "";
+                  toast("Installed " + skill.name, "success");
+                  render();
+                } else {
+                  toast("Error: " + (d.error || "unknown"), "error");
+                }
+              });
+            };
+          })(sk, installBtn);
+          topRow.appendChild(installBtn);
+        }
+        row.appendChild(topRow);
+
+        var metaRow = div("");
+        metaRow.style.display = "flex";
+        metaRow.style.gap = "8px";
+        metaRow.style.alignItems = "center";
+        if(sk.source){
+          metaRow.appendChild(span("skill-source-badge", sk.source));
+        }
+        if(sk.installs > 0){
+          var instCount = span("mcp-server-cmd", new Intl.NumberFormat().format(sk.installs) + " installs");
+          instCount.style.fontSize = "11px";
+          instCount.style.opacity = "0.6";
+          metaRow.appendChild(instCount);
+        }
+        if(metaRow.childNodes.length > 0) row.appendChild(metaRow);
+
+        resList.appendChild(row);
+      });
+      catBox.appendChild(resList);
+    }
+    sec.appendChild(catBox);
+  }
+
+  root.appendChild(sec);
+}
+
+function searchSkillsCatalog(query){
+  skillsCatalogResults = "loading";
+  render();
+  var url = "/api/skills/catalog?limit=20";
+  if(query) url += "&search=" + encodeURIComponent(query);
+  api("GET", url, null, function(d){
+    skillsCatalogResults = d.skills || [];
+    render();
+  });
+}
+
+function buildMarketplaceLink(label, subTab){
+  var btn = el("button","skill-link-btn",[label]);
+  btn.setAttribute("aria-label", "Go to Marketplace " + label);
+  btn.onclick = function(e){
+    e.stopPropagation();
+    configTab = "marketplace";
+    marketplaceSubTab = subTab;
+    location.hash = "config";
+    render();
+  };
+  return btn;
+}
+
+function saveAutopilotConfig(){
+  var c = {};
+  Object.keys(configData).forEach(function(k){ c[k] = configData[k]; });
+  c.web_enabled = true;
+  c.spawn_model = document.getElementById("cfg-spawn_model").value;
+  c.spawn_effort = document.getElementById("cfg-spawn_effort").value;
+  c.spawn_max_turns = parseInt(document.getElementById("cfg-spawn_max_turns").value) || 25;
+  var saveBtn = document.querySelector(".config-actions .btn-primary");
+  var restore = btnLoading(saveBtn, "SAVING\u2026");
+  api("POST","/api/config/save",c,function(){
+    if(restore) restore();
+    configEditing = null;
+    toast("Autopilot configuration saved","success");
+    configData = null;
+    loadConfig(function(){ render(); });
+  });
+}
+
+function renderConfigAbout(root){
+  var sec = div("config-section");
+  sec.appendChild(el("h3","config-section-title",["About"]));
+  var grid = div("config-grid");
+  grid.appendChild(configReadRow("Version", "v" + (D.version||"?") + " #" + (D.build_num||"0")));
+  grid.appendChild(configReadRow("Plan Model", D.plan_model));
+  grid.appendChild(configReadRow("Exec Model", D.exec_model));
+  grid.appendChild(configReadRow("Effort", D.effort));
+  sec.appendChild(grid);
+  root.appendChild(sec);
+}
+
+function renderConfigPaths(root){
+  var c = configData;
+  var editing = configEditing === "paths";
+  var sec = div("config-section");
+  var hdr = div("section-header");
+  hdr.appendChild(el("h3","config-section-title",["Paths & Refresh"]));
+  if(!editing){
+    hdr.appendChild(iconBtn("pencil","Edit",function(){ configEditing = "paths"; render(); }));
+  }
+  sec.appendChild(hdr);
+  var grid = div("config-grid");
+  if(editing){
+    grid.appendChild(configInput("projects_dir","Projects Directory", c.projects_dir || ""));
+    grid.appendChild(configInput("claude_dir","Claude Directory", c.claude_dir || ""));
+    grid.appendChild(configInput("refresh_interval_sec","Refresh Interval (sec)", String(c.refresh_interval_sec || 30)));
+  } else {
+    grid.appendChild(configReadRow("Projects Directory", c.projects_dir));
+    grid.appendChild(configReadRow("Claude Directory", c.claude_dir));
+    grid.appendChild(configReadRow("Refresh Interval", (c.refresh_interval_sec || 30) + "s"));
+  }
+  sec.appendChild(grid);
+  if(editing) sec.appendChild(configEditActions("paths"));
+  root.appendChild(sec);
+}
+
+function renderConfigServer(root){
+  var c = configData;
+  var editing = configEditing === "server";
+  var sec = div("config-section");
+  var hdr = div("section-header");
+  hdr.appendChild(el("h3","config-section-title",["Web Server"]));
+  if(!editing){
+    hdr.appendChild(iconBtn("pencil","Edit",function(){ configEditing = "server"; render(); }));
+  }
+  sec.appendChild(hdr);
+  var grid = div("config-grid");
+  if(editing){
+    grid.appendChild(configInput("web_port","Port", String(c.web_port || 7777)));
+    grid.appendChild(configInput("web_password","Password", c.web_password || "", "password"));
+  } else {
+    grid.appendChild(configReadRow("Port", String(c.web_port || 7777)));
+    grid.appendChild(configReadRow("Password", c.web_password, true));
+  }
+  sec.appendChild(grid);
+  if(editing) sec.appendChild(configEditActions("server"));
+  root.appendChild(sec);
+}
+
+function renderConfigBudget(root){
+  var c = configData;
+  var editing = configEditing === "budget";
+  var sec = div("config-section");
+  var hdr = div("section-header");
+  hdr.appendChild(el("h3","config-section-title",["Budget & Limits"]));
+  if(!editing){
+    hdr.appendChild(iconBtn("pencil","Edit",function(){ configEditing = "budget"; render(); }));
+  }
+  sec.appendChild(hdr);
+  var grid = div("config-grid");
+  if(editing){
+    grid.appendChild(configInput("budget_monthly","Monthly Budget ($)", String(c.budget_monthly || 0)));
+    grid.appendChild(configInput("context_limit","Context Limit (tokens)", String(c.context_limit || 0)));
+  } else {
+    grid.appendChild(configReadRow("Monthly Budget", "$" + (c.budget_monthly || 0)));
+    grid.appendChild(configReadRow("Context Limit", (c.context_limit || 0) + " tokens"));
+  }
+  sec.appendChild(grid);
+  if(editing) sec.appendChild(configEditActions("budget"));
+  root.appendChild(sec);
+}
+
+function configEditActions(section){
+  var acts = div("config-actions");
+  var cancelBtn = el("button","btn",["Cancel"]);
+  cancelBtn.onclick = function(){ configEditing = null; render(); };
+  acts.appendChild(cancelBtn);
+  var saveBtn = el("button","btn btn-primary",["Save"]);
+  saveBtn.onclick = function(){ saveConfigSection(section); };
+  acts.appendChild(saveBtn);
+  return acts;
+}
+
+function renderConfigTemplates(root){
+  if(!templatesCache.length && !templatesLoading){
+    templatesLoading = true;
+    api("GET","/api/templates/list",null,function(d){
+      templatesLoading = false;
+      if(d.templates) templatesCache = d.templates;
+      render();
+    });
+    var loadingEl = div("config-section");
+    loadingEl.textContent = "Loading templates\u2026";
+    root.appendChild(loadingEl);
+    return;
+  }
+
+  // Section header with add button
+  var listSec = div("config-section");
+  var header = div("section-header");
+  header.appendChild(el("h3","config-section-title",["Saved Templates (" + templatesCache.length + ")"]));
+  var addBtn = el("button", "btn btn-primary btn-sm", ["+ Add Template"]);
+  addBtn.onclick = function(){ openTemplateModal(null); };
+  header.appendChild(addBtn);
+  listSec.appendChild(header);
+
+  if(templatesCache.length === 0){
+    var empty = div("config-empty");
+    empty.textContent = "No templates yet. Click + Add Template to create one.";
+    listSec.appendChild(empty);
+  } else {
+    templatesCache.forEach(function(tmpl){
+      var row = div("tmpl-row");
+      var info = div("tmpl-row-info");
+      info.appendChild(span("tmpl-row-name", tmpl.name));
+      info.appendChild(span("tmpl-row-preview", tmpl.content.length > 80 ? tmpl.content.substring(0,80) + "..." : tmpl.content));
+      row.appendChild(info);
+
+      var acts = div("tmpl-row-actions");
+      acts.appendChild(iconBtn("pencil", "Edit template", function(){ openTemplateModal(tmpl); }));
+      acts.appendChild(iconBtn("trash", "Delete template", function(){
+        api("POST","/api/templates/delete",{id:tmpl.id},function(d){
+          if(d.ok){
+            templatesCache = templatesCache.filter(function(t){ return t.id !== tmpl.id; });
+            toast("Template deleted","success");
+            render();
+          }
+        });
+      }));
+      row.appendChild(acts);
+      listSec.appendChild(row);
+    });
+  }
+  root.appendChild(listSec);
+}
+
+function openTemplateModal(tmpl){
+  cfgEditingTemplate = tmpl;
+  document.getElementById("tmpl-modal-title").textContent = tmpl ? "Edit Template" : "New Template";
+  document.getElementById("cfg-tmpl-name").value = tmpl ? tmpl.name : "";
+  document.getElementById("cfg-tmpl-content").value = tmpl ? tmpl.content : "";
+  document.getElementById("cfg-tmpl-submit").textContent = tmpl ? "Update Template" : "Add Template";
+  openModal("modal-template");
+  setTimeout(function(){ document.getElementById("cfg-tmpl-name").focus(); }, 100);
+}
+window.openTemplateModal = openTemplateModal;
+
+function submitConfigTemplate(){
+  var name = document.getElementById("cfg-tmpl-name").value.trim();
+  var content = document.getElementById("cfg-tmpl-content").value.trim();
+  if(!name || !content){ toast("Name and content required","error"); return; }
+  var btn = document.getElementById("cfg-tmpl-submit");
+  var restore = btnLoading(btn, cfgEditingTemplate ? "SAVING\u2026" : "ADDING\u2026");
+  if(cfgEditingTemplate){
+    api("POST","/api/templates/update",{id:cfgEditingTemplate.id, name:name, content:content},function(d){
+      if(restore) restore();
+      if(d.error){ toast("Error: "+d.error,"error"); return; }
+      cfgEditingTemplate = null;
+      loadTemplates();
+      closeModal("modal-template");
+      toast("Template updated","success");
+    });
+  } else {
+    api("POST","/api/templates/add",{name:name, content:content},function(d){
+      if(restore) restore();
+      if(d.error){ toast("Error: "+d.error,"error"); return; }
+      loadTemplates();
+      closeModal("modal-template");
+      toast("Template added","success");
+    });
+  }
+}
+window.submitConfigTemplate = submitConfigTemplate;
+
+function configRow(label, value){
+  var row = div("config-row");
+  row.appendChild(span("config-label", label));
+  row.appendChild(span("config-value", value));
+  return row;
+}
+
+function configInput(key, label, value, type){
+  var row = div("config-field");
+  var lbl = el("label","config-label",[label]);
+  lbl.setAttribute("for","cfg-"+key);
+  row.appendChild(lbl);
+  var inp = el("input","config-input");
+  inp.type = type || "text";
+  inp.id = "cfg-" + key;
+  inp.value = value;
+  row.appendChild(inp);
+  return row;
+}
+
+function configReadRow(label, value, masked){
+  var row = div("config-field");
+  row.appendChild(span("config-label", label));
+  var cls = "config-value-text";
+  if(masked) cls += " masked";
+  row.appendChild(span(cls, masked ? "\u2022\u2022\u2022\u2022\u2022\u2022" : (value || "\u2014")));
+  return row;
+}
+
+function saveConfigSection(section){
+  var c = {};
+  Object.keys(configData).forEach(function(k){ c[k] = configData[k]; });
+  c.web_enabled = true;
+  if(section === "paths"){
+    c.projects_dir = document.getElementById("cfg-projects_dir").value;
+    c.claude_dir = document.getElementById("cfg-claude_dir").value;
+    c.refresh_interval_sec = parseInt(document.getElementById("cfg-refresh_interval_sec").value) || 30;
+  } else if(section === "server"){
+    c.web_port = parseInt(document.getElementById("cfg-web_port").value) || 7777;
+    c.web_password = document.getElementById("cfg-web_password").value;
+  } else if(section === "budget"){
+    c.budget_monthly = parseFloat(document.getElementById("cfg-budget_monthly").value) || 0;
+    c.context_limit = parseInt(document.getElementById("cfg-context_limit").value) || 0;
+  }
+  var saveBtn = document.querySelector(".config-actions .btn-primary");
+  var restore = btnLoading(saveBtn, "SAVING\u2026");
+  api("POST","/api/config/save",c,function(){
+    if(restore) restore();
+    configEditing = null;
+    toast("Configuration saved","success");
+    configData = null;
+    loadConfig(function(){ render(); });
+  });
+}
 
 })();
