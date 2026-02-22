@@ -167,6 +167,10 @@ var skillsCatalogOpen = false;
 var skillsCatalogResults = null;
 var skillsCatalogSearch = "";
 var projectAutopilots = [];
+var setupStep = 1;
+var setupStepDone = {};
+var setupStepError = {};
+var setupRunning = false;
 
 /* ── BMAD Agent Map ── */
 var agentMap = {
@@ -457,7 +461,7 @@ function showEnvVarsPrompt(srv, installBtn){
 /* ── Router ── */
 function getView(){
   var h = location.hash.replace("#","") || "dashboard";
-  if(["dashboard","queue","canvas","projects","logs","chat","config"].indexOf(h) < 0) h = "dashboard";
+  if(["dashboard","queue","canvas","projects","logs","chat","config","setup"].indexOf(h) < 0) h = "dashboard";
   return h;
 }
 
@@ -527,6 +531,8 @@ function computeContentKey(v){
       return "cv:" + ck;
     case "config":
       return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogOpen + ":" + (mcpCatalogResults === "loading" ? "ld" : mcpCatalogResults ? mcpCatalogResults.length : "n") + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogOpen + ":" + (skillsCatalogResults === "loading" ? "ld" : skillsCatalogResults ? skillsCatalogResults.length : "n");
+    case "setup":
+      return "s:" + setupStep + ":" + JSON.stringify(setupStepDone) + ":" + JSON.stringify(setupStepError);
     default:
       return "";
   }
@@ -656,6 +662,7 @@ function render(){
     case "logs": renderLogs(tmp); break;
     case "chat": renderChat(tmp); break;
     case "config": renderConfig(tmp); break;
+    case "setup": renderSetup(tmp); break;
   }
 
   // Atomic swap
@@ -2921,6 +2928,7 @@ function renderInitStep(prog, evt){
 api("GET","/api/data", null, function(d){
   D = d;
   render();
+  checkOnboarding();
 });
 connectSSE();
 
@@ -2932,6 +2940,349 @@ window.deleteSelectedTemplate = deleteSelectedTemplate;
 window.editSelectedTemplate = editSelectedTemplate;
 window.mergeDependabot = mergeDependabot;
 window.submitProjectInit = submitProjectInit;
+
+/* ── Setup View (Ubuntu Installer) ── */
+
+var SETUP_STEPS = [
+  {id:1, name:"Prerequisites", desc:"Check that required tools are installed on this system."},
+  {id:2, name:"Configuration", desc:"Set up projects directory, web port, and authentication."},
+  {id:3, name:"Skills", desc:"Install Claude Code skills for enhanced capabilities (21 skills)."},
+  {id:4, name:"BMAD", desc:"Install BMAD commands for project management workflows."},
+  {id:5, name:"Hooks", desc:"Install security hooks to prevent destructive operations."},
+  {id:6, name:"MCP Servers", desc:"Install MCP servers for documentation, memory, and reasoning."}
+];
+
+function checkOnboarding(){
+  fetch("/api/onboarding/status").then(function(r){ return r.json(); }).then(function(s){
+    if(s && s.needed && location.hash !== "#setup"){
+      location.hash = "setup";
+    }
+  }).catch(function(){});
+}
+
+function renderSetup(root){
+  var container = div("setup-container");
+
+  // Sidebar
+  var sidebar = div("setup-sidebar");
+  sidebar.appendChild(el("div","setup-sidebar-title",["teamoon setup"]));
+
+  for(var i=0;i<SETUP_STEPS.length;i++){
+    var st = SETUP_STEPS[i];
+    var cls = "setup-step";
+    if(st.id === setupStep) cls += " active";
+    if(setupStepDone[st.id]) cls += " done";
+    if(setupStepError[st.id]) cls += " error";
+
+    var item = div(cls);
+    item.setAttribute("data-step", st.id);
+
+    var icon = div("setup-step-icon");
+    if(setupStepDone[st.id]) icon.textContent = "\u2713";
+    else if(setupStepError[st.id]) icon.textContent = "\u2717";
+    else if(st.id === setupStep) icon.textContent = "\u25CF";
+    else icon.textContent = "\u25CB";
+
+    item.appendChild(icon);
+    item.appendChild(div("setup-step-label",[st.name]));
+
+    (function(sid){
+      item.onclick = function(){ if(!setupRunning){ setupStep = sid; render(); } };
+    })(st.id);
+
+    sidebar.appendChild(item);
+  }
+
+  var skipWrap = div("setup-sidebar-actions");
+  var skipBtn = el("button","btn btn-sm",["Go to Dashboard"]);
+  skipBtn.onclick = function(){ location.hash = "dashboard"; };
+  skipWrap.appendChild(skipBtn);
+  sidebar.appendChild(skipWrap);
+  container.appendChild(sidebar);
+
+  // Main area
+  var main = div("setup-main");
+  var step = SETUP_STEPS[setupStep - 1];
+  main.appendChild(el("div","setup-title",[step.name]));
+  main.appendChild(el("div","setup-desc",[step.desc]));
+
+  var content = div("setup-content");
+  switch(setupStep){
+    case 1: renderSetupPrereqs(content); break;
+    case 2: renderSetupConfig(content); break;
+    case 3: renderSetupSkills(content); break;
+    case 4: renderSetupBMAD(content); break;
+    case 5: renderSetupHooks(content); break;
+    case 6: renderSetupMCP(content); break;
+  }
+  main.appendChild(content);
+  container.appendChild(main);
+  root.appendChild(container);
+}
+
+function streamStep(url, body, progressEl, renderEvent, onDone){
+  setupRunning = true;
+  var opts = {method:"POST"};
+  if(body){ opts.headers = {"Content-Type":"application/json"}; opts.body = JSON.stringify(body); }
+  fetch(url, opts).then(function(res){
+    var reader = res.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    function pump(){
+      reader.read().then(function(result){
+        if(result.done){ setupRunning = false; return; }
+        buffer += decoder.decode(result.value, {stream:true});
+        var lines = buffer.split("\n");
+        buffer = lines.pop();
+        for(var i=0;i<lines.length;i++){
+          var line = lines[i].trim();
+          if(line.indexOf("data: ")===0){
+            try{
+              var evt = JSON.parse(line.substring(6));
+              if(evt.done){
+                setupRunning = false;
+                onDone(evt.status, evt.message);
+                return;
+              }
+              renderEvent(progressEl, evt);
+            }catch(e){}
+          }
+        }
+        pump();
+      });
+    }
+    pump();
+  }).catch(function(e){
+    setupRunning = false;
+    onDone("error", e.message || "Connection error");
+  });
+}
+
+function renderSetupPrereqs(content){
+  var prog = div("setup-progress");
+  var btn = el("button","btn btn-primary",[setupStepDone[1] ? "Re-check" : "Check Prerequisites"]);
+  btn.onclick = function(){
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Checking\u2026");
+    streamStep("/api/onboarding/prereqs", null, prog, function(p, evt){
+      var ok = evt.found;
+      var cls = "setup-progress-item " + (ok ? "ok" : (evt.required ? "error" : "skip"));
+      var item = div(cls);
+      item.appendChild(span("icon", ok ? "\u2713" : (evt.required ? "\u2717" : "~")));
+      item.appendChild(span("label", evt.name));
+      item.appendChild(span("version", evt.version || (evt.required ? "not found" : "optional")));
+      p.appendChild(item);
+    }, function(status, msg){
+      if(restore) restore();
+      if(status === "success"){
+        setupStepDone[1] = true;
+        delete setupStepError[1];
+        prog.appendChild(div("setup-status ok",["All required tools found"]));
+      } else {
+        setupStepError[1] = true;
+        prog.appendChild(div("setup-status err",[msg || "Missing required tools"]));
+      }
+      render();
+    });
+  };
+  content.appendChild(btn);
+  content.appendChild(prog);
+}
+
+function renderSetupConfig(content){
+  var form = div("setup-form");
+  var fields = [
+    {id:"setup-projects-dir", label:"Projects Directory", val:"~/Projects", type:"text"},
+    {id:"setup-web-port", label:"Web Dashboard Port", val:"7777", type:"number"},
+    {id:"setup-web-password", label:"Web Password (empty = no auth)", val:"", type:"password"},
+    {id:"setup-max-concurrent", label:"Max Concurrent Sessions", val:"3", type:"number"}
+  ];
+  for(var i=0;i<fields.length;i++){
+    var f = fields[i];
+    var field = div("setup-form-field");
+    field.appendChild(el("label","setup-form-label",[f.label]));
+    var inp = elAttr("input","setup-form-input",{type:f.type, id:f.id, value:f.val, placeholder:f.val});
+    field.appendChild(inp);
+    form.appendChild(field);
+  }
+  var btn = el("button","btn btn-primary",[setupStepDone[2] ? "Re-configure" : "Save Configuration"]);
+  btn.onclick = function(){
+    var restore = btnLoading(btn, "Saving\u2026");
+    var wc = {
+      projects_dir: document.getElementById("setup-projects-dir").value || "~/Projects",
+      web_port: parseInt(document.getElementById("setup-web-port").value) || 7777,
+      web_password: document.getElementById("setup-web-password").value,
+      max_concurrent: parseInt(document.getElementById("setup-max-concurrent").value) || 3
+    };
+    api("POST","/api/onboarding/config", wc, function(data){
+      if(restore) restore();
+      if(data && data.ok){
+        setupStepDone[2] = true;
+        delete setupStepError[2];
+        toast("Configuration saved","success");
+      } else {
+        setupStepError[2] = true;
+        toast("Failed to save configuration","error");
+      }
+      render();
+    });
+  };
+  content.appendChild(form);
+  content.appendChild(btn);
+}
+
+function renderSetupSkills(content){
+  var prog = div("setup-progress");
+  var btn = el("button","btn btn-primary",[setupStepDone[3] ? "Re-install" : "Install Skills"]);
+  btn.onclick = function(){
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStep("/api/onboarding/skills", null, prog, function(p, evt){
+      if(evt.type === "symlink"){
+        var item = div("setup-progress-item ok");
+        item.appendChild(span("icon","\u2713"));
+        item.appendChild(span("label","Symlink: ~/.agents/skills"));
+        p.appendChild(item);
+        return;
+      }
+      var existing = document.getElementById("setup-skill-"+evt.name);
+      if(existing){
+        var ic = existing.querySelector(".icon");
+        if(evt.status === "done"){ ic.textContent = "\u2713"; existing.className = "setup-progress-item ok"; }
+        else if(evt.status.indexOf("error")===0){ ic.textContent = "\u2717"; existing.className = "setup-progress-item error"; }
+        else if(evt.status === "skipped"){ ic.textContent = "~"; existing.className = "setup-progress-item skip"; }
+        return;
+      }
+      var cls = "setup-progress-item";
+      var iconText = "\u2022";
+      if(evt.status === "done"){ cls += " ok"; iconText = "\u2713"; }
+      else if(evt.status === "skipped"){ cls += " skip"; iconText = "~"; }
+      else if(evt.status.indexOf("error")===0){ cls += " error"; iconText = "\u2717"; }
+      else { cls += " running"; }
+      var item = div(cls);
+      item.id = "setup-skill-"+evt.name;
+      item.appendChild(span("icon", iconText));
+      item.appendChild(span("label", evt.name));
+      p.appendChild(item);
+    }, function(status, msg){
+      if(restore) restore();
+      if(status === "success"){
+        setupStepDone[3] = true;
+        delete setupStepError[3];
+        prog.appendChild(div("setup-status ok",["All skills installed"]));
+      } else {
+        setupStepError[3] = true;
+        prog.appendChild(div("setup-status err",[msg || "Some skills failed"]));
+      }
+      render();
+    });
+  };
+  content.appendChild(btn);
+  content.appendChild(prog);
+}
+
+function renderSetupBMAD(content){
+  var prog = div("setup-progress");
+  var btn = el("button","btn btn-primary",[setupStepDone[4] ? "Re-install" : "Install BMAD Commands"]);
+  btn.onclick = function(){
+    prog.textContent = "";
+    var barWrap = div("setup-progress-bar-wrap");
+    var barFill = div("setup-progress-bar-fill");
+    barFill.id = "setup-bmad-bar";
+    barWrap.appendChild(barFill);
+    var counter = span("setup-progress-counter","0 / ?");
+    counter.id = "setup-bmad-counter";
+    prog.appendChild(barWrap);
+    prog.appendChild(counter);
+
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStep("/api/onboarding/bmad", null, prog, function(p, evt){
+      if(evt.type === "progress"){
+        var fill = document.getElementById("setup-bmad-bar");
+        var ctr = document.getElementById("setup-bmad-counter");
+        if(fill) fill.style.width = Math.round((evt.count/evt.total)*100)+"%";
+        if(ctr) ctr.textContent = evt.count+" / "+evt.total+" files";
+      } else if(evt.type === "symlink"){
+        var item = div("setup-progress-item ok");
+        item.appendChild(span("icon","\u2713"));
+        item.appendChild(span("label","Symlink: ~/.claude/commands/bmad"));
+        p.appendChild(item);
+      }
+    }, function(status, msg){
+      if(restore) restore();
+      if(status === "success"){
+        setupStepDone[4] = true;
+        delete setupStepError[4];
+        prog.appendChild(div("setup-status ok",["BMAD commands installed"]));
+      } else {
+        setupStepError[4] = true;
+        prog.appendChild(div("setup-status err",[msg || "BMAD installation failed"]));
+      }
+      render();
+    });
+  };
+  content.appendChild(btn);
+  content.appendChild(prog);
+}
+
+function renderSetupHooks(content){
+  var prog = div("setup-progress");
+  var btn = el("button","btn btn-primary",[setupStepDone[5] ? "Re-install" : "Install Security Hooks"]);
+  btn.onclick = function(){
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStep("/api/onboarding/hooks", null, prog, function(p, evt){
+      var item = div("setup-progress-item ok");
+      item.appendChild(span("icon","\u2713"));
+      item.appendChild(span("label", evt.name || evt.type));
+      p.appendChild(item);
+    }, function(status, msg){
+      if(restore) restore();
+      if(status === "success"){
+        setupStepDone[5] = true;
+        delete setupStepError[5];
+        prog.appendChild(div("setup-status ok",["Security hooks installed"]));
+      } else {
+        setupStepError[5] = true;
+        prog.appendChild(div("setup-status err",[msg || "Hooks installation failed"]));
+      }
+      render();
+    });
+  };
+  content.appendChild(btn);
+  content.appendChild(prog);
+}
+
+function renderSetupMCP(content){
+  var prog = div("setup-progress");
+  var btn = el("button","btn btn-primary",[setupStepDone[6] ? "Re-install" : "Install MCP Servers"]);
+  btn.onclick = function(){
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStep("/api/onboarding/mcp", null, prog, function(p, evt){
+      var cls = evt.status === "done" ? "ok" : (evt.status === "skipped" ? "skip" : "running");
+      var iconText = evt.status === "done" ? "\u2713" : (evt.status === "skipped" ? "~" : "\u2022");
+      var item = div("setup-progress-item "+cls);
+      item.appendChild(span("icon", iconText));
+      item.appendChild(span("label", evt.name));
+      if(evt.status === "skipped") item.appendChild(span("version","already configured"));
+      p.appendChild(item);
+    }, function(status, msg){
+      if(restore) restore();
+      if(status === "success"){
+        setupStepDone[6] = true;
+        delete setupStepError[6];
+        prog.appendChild(div("setup-status ok",["MCP servers installed"]));
+      } else {
+        setupStepError[6] = true;
+        prog.appendChild(div("setup-status err",[msg || "MCP installation failed"]));
+      }
+      render();
+    });
+  };
+  content.appendChild(btn);
+  content.appendChild(prog);
+}
 
 /* ── Configuration View ── */
 function loadConfig(cb){
