@@ -127,6 +127,7 @@ func (s *Server) Start(ctx context.Context) {
 	// Onboarding routes — no auth (password may not be set yet)
 	mux.HandleFunc("/api/onboarding/status", s.handleOnboardingStatus)
 	mux.HandleFunc("/api/onboarding/prereqs", s.handleOnboardingPrereqs)
+	mux.HandleFunc("/api/onboarding/prereqs/install", s.handleOnboardingPrereqsInstall)
 	mux.HandleFunc("/api/onboarding/config", s.handleOnboardingConfig)
 	mux.HandleFunc("/api/onboarding/skills", s.handleOnboardingSkills)
 	mux.HandleFunc("/api/onboarding/bmad", s.handleOnboardingBMAD)
