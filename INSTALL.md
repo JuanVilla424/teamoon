@@ -152,13 +152,13 @@ Verifies: `python --version` (3.12+)
 
 teamoon's autopilot engine works best with a curated set of agent skills installed. These enhance Claude Code's planning, debugging, TDD, frontend, and browser automation capabilities.
 
-Skills are **automatically installed** with `teamoon init`:
+Skills are **automatically installed** as part of the `teamoon init` onboarding wizard, which also sets up config, BMAD commands, global hooks, and MCP servers.
 
 ```bash
 teamoon init
 ```
 
-For manual installation from source: `go run ./cmd/install-skills`
+For manual skill installation only: `go run ./cmd/install-skills`
 
 Browse all available skills at [skills.sh](https://skills.sh/).
 
@@ -216,7 +216,7 @@ Skills are installed globally at `~/.agents/skills/` and are automatically avail
 
 ## 🔒 Claude Code Hooks
 
-teamoon includes security hooks that are automatically installed in every new project via `teamoon init`. Hooks validate Claude Code actions **before execution** — they work even with `--dangerously-skip-permissions`.
+teamoon includes security hooks that are installed **globally** via `teamoon init` and **per-project** when scaffolding new projects. Hooks validate Claude Code actions **before execution** — they work even with `--dangerously-skip-permissions`.
 
 ### Included Hooks
 
