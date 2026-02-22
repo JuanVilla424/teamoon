@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
+	"github.com/JuanVilla424/teamoon/internal/plangen"
 	"github.com/JuanVilla424/teamoon/internal/projectinit"
 	"github.com/JuanVilla424/teamoon/internal/projects"
 	"github.com/JuanVilla424/teamoon/internal/queue"
@@ -467,126 +469,13 @@ usar /bmad:core:workflows:party-mode`, name, projectType, backupDir, manifest, m
 }
 
 func buildSkeletonPrompt(sk config.SkeletonConfig) string {
-	var sb strings.Builder
-	sb.WriteString("\n\nSKELETON — Your plan MUST follow this structure. The Investigate step is ALWAYS present.\n")
-	sb.WriteString("Generate implementation steps (Step 3..N-x) based on the task, then append the enabled tail steps.\n\n")
-
-	sb.WriteString("Step 1: Investigate codebase [ALWAYS ON] [ReadOnly]\n")
-	sb.WriteString("ReadOnly: true\n")
-	sb.WriteString("- Read CLAUDE.md, MEMORY.md, CONTEXT.md\n")
-	sb.WriteString("- Read all relevant source files\n")
-	sb.WriteString("- Understand architecture, patterns, conventions\n")
-	if sk.WebSearch {
-		sb.WriteString("- Search the web if needed for context\n")
-	}
-	sb.WriteString("- Summarize findings\n\n")
-
-	if sk.Context7Lookup {
-		sb.WriteString("Step 2: Look up library documentation [ReadOnly]\n")
-		sb.WriteString("ReadOnly: true\n")
-		sb.WriteString("- Use resolve-library-id then query-docs for each relevant library\n")
-		sb.WriteString("- Note relevant APIs and patterns\n\n")
-	}
-
-	sb.WriteString("Step 3..N-x: Implementation steps [YOU GENERATE THESE]\n")
-	sb.WriteString("- Actual code changes, file edits specific to the task\n")
-	sb.WriteString("- Number of steps varies per task\n\n")
-
-	if sk.BuildVerify {
-		sb.WriteString("Tail step: Build and verify\n")
-		sb.WriteString("- Compile/build the project (make build, go build, npx vite build, etc.)\n")
-		sb.WriteString("- If no build system exists, set one up (Makefile, package.json scripts, etc.)\n")
-		sb.WriteString("- Verify no compilation errors or warnings\n")
-		sb.WriteString("- If applicable, verify the service starts correctly\n\n")
-	}
-
-	if sk.Test {
-		sb.WriteString("Tail step: Test\n")
-		sb.WriteString("- If no test infrastructure exists, create it (go test, pytest, vitest, etc.)\n")
-		sb.WriteString("- Run existing test suite for affected packages\n")
-		sb.WriteString("- Write new unit/integration tests covering the implementation changes\n")
-		sb.WriteString("- Run the full test suite and fix any failures\n")
-		sb.WriteString("- All tests must pass before proceeding\n\n")
-	}
-
-	if sk.PreCommit {
-		sb.WriteString("Tail step: Pre-commit\n")
-		sb.WriteString("- If no pre-commit hooks exist, set them up\n")
-		sb.WriteString("- Run all pre-commit checks on changed files\n")
-		sb.WriteString("- Fix any issues found (formatting, linting, validation)\n")
-		sb.WriteString("- Re-run until all checks pass\n\n")
-	}
-
-	if sk.Commit {
-		sb.WriteString("Tail step: Commit\n")
-		sb.WriteString("- Stage all changed files (specific files, not git add -A)\n")
-		sb.WriteString("- Commit with format: type(core): description in lowercase\n")
-		sb.WriteString("- NO emojis/icons in commit message\n")
-		sb.WriteString("- Single commit grouping all changes\n")
-		sb.WriteString("- If pre-commit hooks fail on commit, fix issues and retry\n\n")
-	}
-
-	if sk.Push {
-		sb.WriteString("Tail step: Push\n")
-		sb.WriteString("- Push to current remote branch\n")
-		sb.WriteString("- Verify push succeeds\n\n")
-	}
-
-	return sb.String()
+	return plangen.BuildSkeletonPrompt(sk)
 }
 
 func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
-	skeletonBlock := buildSkeletonPrompt(s.cfg.Skeleton)
-
-	prompt := fmt.Sprintf(
-		"You may read files to understand the codebase, then create a plan.\n"+
-			"Project path: /home/cloud-agent/Projects/%s\n\n"+
-			"TASK: %s\n\n"+
-			"INSTRUCTIONS:\n"+
-			"1. FIRST read CLAUDE.md in the project root for project-specific guidelines\n"+
-			"2. Read the relevant source files to understand the current code\n"+
-			"3. Then output your final plan as a TEXT MESSAGE (not a tool call)\n\n"+
-			"%s\n\n"+
-			"Your FINAL message MUST be the plan in this markdown format:\n\n"+
-			"# Plan: %s\n\n"+
-			"## Analysis\n[what you found in the codebase]\n\n"+
-			"## Steps\n\n### Step 1: [title]\nAgent: [agent-id]\nReadOnly: true/false\n[instructions with specific files and changes]\nVerify: [verification]\n\n"+
-			"### Step 2: [title]\nAgent: [agent-id]\nReadOnly: true/false\n[instructions]\nVerify: [verification]\n\n"+
-			"(5-12 steps total, use as many agents as needed)\n\n"+
-			"## Constraints\n- [constraints]\n\n"+
-			"AGENT ASSIGNMENT (MANDATORY for every step):\n"+
-			"Each step MUST have an 'Agent:' line. Available BMAD agents:\n"+
-			"- analyst (Mary - requirements analysis, research, data gathering)\n"+
-			"- pm (John - product strategy, feature scoping, prioritization)\n"+
-			"- architect (Winston - system design, architecture, technical decisions)\n"+
-			"- ux-designer (Sally - UX/UI design, user flows, accessibility)\n"+
-			"- dev (Amelia - implementation, coding, file changes)\n"+
-			"- tea (Murat - testing, QA, test architecture, validation)\n"+
-			"- sm (Bob - task breakdown, sprint management, story prep)\n"+
-			"- tech-writer (Paige - documentation, README, API docs)\n"+
-			"- cloud (Warren - cloud infrastructure, deployment, CI/CD)\n"+
-			"- quick-flow-solo-dev (Barry - rapid prototyping, full-stack quick tasks)\n"+
-			"- brainstorming-coach (Carson - ideation, creative exploration)\n"+
-			"- creative-problem-solver (Dr. Quinn - root cause analysis, complex debugging)\n"+
-			"- design-thinking-coach (Maya - user-centered design process)\n"+
-			"- innovation-strategist (Victor - business model, strategic decisions)\n\n"+
-			"Distribute steps across ALL relevant agents. A typical plan should involve:\n"+
-			"1. Analysis/research agent first (analyst or pm)\n"+
-			"2. Architecture/design agents (architect, ux-designer)\n"+
-			"3. Implementation agents (dev, quick-flow-solo-dev)\n"+
-			"4. Testing agent (tea)\n"+
-			"5. Documentation/deployment agents (tech-writer, cloud)\n\n"+
-			"ReadOnly ANNOTATION: Add 'ReadOnly: true' to steps that only read/research (like Investigate and Library Lookup).\n"+
-			"Add 'ReadOnly: false' or omit for steps that modify files.\n\n"+
-			"CRITICAL: Your very last message MUST be the markdown plan text, NOT a tool call.\n\n"+
-			"PROHIBITIONS:\n"+
-			"- NEVER invoke /bmad:core:workflows:party-mode or any /bmad slash command\n"+
-			"- NEVER use EnterPlanMode — you ARE generating the plan already\n"+
-			"- NEVER create .md files (SUMMARY.md, ANALYSIS.md, etc.) — output the plan as a text message only\n"+
-			"- NEVER include steps that say 'invoke party mode' or 'load workflow' — the autopilot system handles orchestration\n"+
-			"- Be concise and direct. No preamble.",
-		t.Project, t.Description, skeletonBlock, t.Description,
-	)
+	sk := config.SkeletonFor(s.cfg, t.Project)
+	skeletonBlock := buildSkeletonPrompt(sk)
+	prompt := plangen.BuildPlanPrompt(t, skeletonBlock)
 
 	s.store.logBuf.Add(logs.LogEntry{
 		Time: time.Now(), TaskID: t.ID, Project: t.Project,
@@ -775,6 +664,132 @@ func (s *Server) handleTemplateUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, t)
 }
 
+// --- Project Autopilot handlers ---
+
+func (s *Server) handleProjectAutopilotStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Project string `json:"project"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Project == "" {
+		writeErr(w, 400, "project required")
+		return
+	}
+
+	// Enable autopilot on all pending/planned tasks for this project
+	if allTasks, err := queue.ListAll(); err == nil {
+		for _, t := range allTasks {
+			if t.Project == req.Project && !t.AutoPilot && !t.Done {
+				s := queue.EffectiveState(t)
+				if s == queue.StatePending || s == queue.StatePlanned {
+					queue.ToggleAutoPilot(t.ID)
+				}
+			}
+		}
+	}
+
+	cfg := s.cfg
+	planFn := func(t queue.Task, sk config.SkeletonConfig) (plan.Plan, error) {
+		return plangen.GeneratePlan(t, sk, cfg)
+	}
+	send := s.webSend(0)
+
+	ok := s.store.engineMgr.StartProject(req.Project, cfg.MaxConcurrent, func(ctx context.Context) {
+		engine.RunProjectLoop(ctx, req.Project, cfg, planFn, send, s.store.engineMgr)
+	})
+	if !ok {
+		writeErr(w, 409, "autopilot already running or max_concurrent reached")
+		return
+	}
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleProjectAutopilotStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Project string `json:"project"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Project == "" {
+		writeErr(w, 400, "project required")
+		return
+	}
+	s.store.engineMgr.StopProject(req.Project)
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleProjectSkeleton(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	if project == "" {
+		writeErr(w, 400, "project query param required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err := config.Load()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		sk := config.SkeletonFor(cfg, project)
+		hasCustom := false
+		if cfg.ProjectSkeletons != nil {
+			_, hasCustom = cfg.ProjectSkeletons[project]
+		}
+		writeJSON(w, map[string]any{"skeleton": sk, "custom": hasCustom})
+
+	case http.MethodPost:
+		var req struct {
+			Skeleton *config.SkeletonConfig `json:"skeleton"`
+			Reset    bool                   `json:"reset"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if req.Reset {
+			if cfg.ProjectSkeletons != nil {
+				delete(cfg.ProjectSkeletons, project)
+			}
+		} else if req.Skeleton != nil {
+			if cfg.ProjectSkeletons == nil {
+				cfg.ProjectSkeletons = make(map[string]config.SkeletonConfig)
+			}
+			cfg.ProjectSkeletons[project] = *req.Skeleton
+		}
+		if err := config.Save(cfg); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		s.cfg = cfg
+		writeJSON(w, map[string]bool{"ok": true})
+
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
+}
+
 func filterEnvWeb(env []string, key string) []string {
 	prefix := key + "="
 	result := make([]string, 0, len(env))
@@ -842,14 +857,67 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// Build prompt with recent context
 	recent := chat.RecentContext(10)
 	var promptBuf strings.Builder
-	promptBuf.WriteString("You are a helpful AI assistant for software engineering tasks.\n\n")
-	promptBuf.WriteString("You can create tasks in the project queue by including directives in your response.\n")
-	promptBuf.WriteString("Format: [TASK_CREATE]{\"description\":\"task desc\",\"priority\":\"med\",\"assignee\":\"human\"}[/TASK_CREATE]\n")
+	promptBuf.WriteString("You are a helpful AI assistant for software engineering project management.\n\n")
+	promptBuf.WriteString("## Capabilities\n\n")
+	promptBuf.WriteString("### Creating Tasks\n")
+	promptBuf.WriteString("Format: [TASK_CREATE]{\"description\":\"task desc\",\"priority\":\"med\",\"assignee\":\"agent\"}[/TASK_CREATE]\n")
 	promptBuf.WriteString("- priority: \"high\", \"med\", or \"low\"\n")
-	promptBuf.WriteString("- assignee: \"human\" (for the user to do) or \"agent\" (for AI autopilot)\n")
-	promptBuf.WriteString("Use this when the user asks you to create tasks, break work into subtasks, or set up prerequisites.\n")
-	promptBuf.WriteString("Each directive creates one task. You can include multiple directives in one response.\n")
-	promptBuf.WriteString("Always explain what tasks you are creating in your text before or after the directives.\n\n")
+	promptBuf.WriteString("- assignee: \"human\" (for the user) or \"agent\" (for AI autopilot)\n")
+	promptBuf.WriteString("Each directive creates one task. You can include multiple directives.\n")
+	promptBuf.WriteString("Always explain what tasks you are creating.\n")
+	promptBuf.WriteString("CRITICAL: Tasks ALWAYS require a project. If no project is selected (project is empty), you MUST either:\n")
+	promptBuf.WriteString("  a) Use [PROJECT_INIT] first to create the project, OR\n")
+	promptBuf.WriteString("  b) Ask the user to select an existing project from the dropdown before creating tasks.\n")
+	promptBuf.WriteString("NEVER emit [TASK_CREATE] without a project context.\n\n")
+	promptBuf.WriteString("### Initializing New Projects\n")
+	promptBuf.WriteString("Format: [PROJECT_INIT]{\"name\":\"project-name\",\"type\":\"node\",\"private\":false,\"separate\":false}[/PROJECT_INIT]\n")
+	promptBuf.WriteString("- type: \"python\", \"node\", or \"go\"\n")
+	promptBuf.WriteString("- private: true/false (default: false)\n")
+	promptBuf.WriteString("- separate: if true creates backend + frontend repos (default: false)\n")
+	promptBuf.WriteString("- Use BEFORE any TASK_CREATE when creating a NEW project\n")
+	promptBuf.WriteString("- NEVER use for existing projects\n\n")
+	promptBuf.WriteString("## When the user asks to CREATE A NEW PROJECT:\n\n")
+	promptBuf.WriteString("You MUST follow this process — DO NOT SKIP ANY STEP:\n\n")
+	promptBuf.WriteString("### Step 1: RESEARCH (MANDATORY — use WebSearch tool)\n")
+	promptBuf.WriteString("You MUST use the WebSearch tool to investigate:\n")
+	promptBuf.WriteString("- **Competitors & market**: Search for existing solutions, alternatives, pricing models, market size\n")
+	promptBuf.WriteString("- **Technology**: Search for best frameworks, libraries, and patterns for this type of project\n")
+	promptBuf.WriteString("- **Architecture**: Search for recommended architectures, deployment patterns\n")
+	promptBuf.WriteString("- **User needs**: What features users expect, pain points of existing solutions\n")
+	promptBuf.WriteString("DO NOT fabricate research. You MUST actually use WebSearch to find real data.\n\n")
+	promptBuf.WriteString("### Step 2: PRESENT DETAILED FINDINGS\n")
+	promptBuf.WriteString("Show the user a COMPREHENSIVE research report with:\n")
+	promptBuf.WriteString("- Named competitors with links and brief analysis\n")
+	promptBuf.WriteString("- Specific technology recommendations with reasoning\n")
+	promptBuf.WriteString("- Architecture diagram (text-based)\n")
+	promptBuf.WriteString("- MVP feature list prioritized by user value\n")
+	promptBuf.WriteString("This report should be DETAILED (not a 4-line summary).\n\n")
+	promptBuf.WriteString("### Step 3: Create the project\n")
+	promptBuf.WriteString("Emit [PROJECT_INIT] with the appropriate name and type.\n\n")
+	promptBuf.WriteString("### Step 4: Create tasks based on research\n")
+	promptBuf.WriteString("Create well-informed [TASK_CREATE] directives. Each task should reference specific findings from your research.\n\n")
+	promptBuf.WriteString("Each task should be specific, actionable, and informed by your research.\n")
+	promptBuf.WriteString("Make tasks granular enough for an AI agent to execute in a single session.\n")
+	promptBuf.WriteString("Assign all tasks to \"agent\" unless the user says otherwise.\n\n")
+	promptBuf.WriteString("## Formatting\n")
+	promptBuf.WriteString("When organizing tasks by phases, use collapsible HTML sections.\n")
+	promptBuf.WriteString("CRITICAL: Use HTML lists inside <details>, NOT markdown lists (markdown is not parsed inside HTML blocks).\n")
+	promptBuf.WriteString("Example:\n")
+	promptBuf.WriteString("<details open><summary>Phase 1 — Name (N tasks)</summary>\n<ol>\n<li><strong>Task title</strong> — priority, assignee. Brief description.</li>\n<li><strong>Task 2</strong> — priority, assignee. Brief description.</li>\n</ol>\n</details>\n\n")
+
+	// Inject existing projects list so Claude knows what already exists
+	if entries, err := os.ReadDir(s.cfg.ProjectsDir); err == nil {
+		var existingNames []string
+		for _, e := range entries {
+			if e.IsDir() {
+				existingNames = append(existingNames, e.Name())
+			}
+		}
+		if len(existingNames) > 0 {
+			promptBuf.WriteString("Existing projects: " + strings.Join(existingNames, ", ") + "\n\n")
+		}
+	}
+
 	if req.Project != "" {
 		home, _ := os.UserHomeDir()
 		promptBuf.WriteString(fmt.Sprintf("Working on project: %s (path: %s)\n\n",
@@ -884,7 +952,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		"GIT_COMMITTER_EMAIL="+chatGitEmail,
 	)
 	chatCfg := s.cfg
-	chatCfg.Spawn.MaxTurns = 10 // chat uses fewer turns
+	chatCfg.Spawn.MaxTurns = 50 // needs enough turns for research + task creation
+	// Ensure MCP servers are available for chat (web search, context7, etc.)
+	if chatCfg.MCPServers == nil {
+		config.InitMCPFromGlobal(&chatCfg)
+	}
 	chatArgs, chatCleanup := engine.BuildSpawnArgs(chatCfg, promptBuf.String(), nil)
 	if chatCleanup != nil {
 		defer chatCleanup()
@@ -932,11 +1004,15 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text,omitempty"`
+				Name string `json:"name,omitempty"`
 			} `json:"content"`
 		} `json:"message,omitempty"`
-		Result string `json:"result,omitempty"`
+		Result       string  `json:"result,omitempty"`
+		NumTurns     int     `json:"num_turns,omitempty"`
+		TotalCostUsd float64 `json:"total_cost_usd,omitempty"`
 	}
 
+	var displayResult string
 	for scanner.Scan() {
 		line := scanner.Text()
 		var evt streamEvt
@@ -953,14 +1029,27 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 						fmt.Fprintf(w, "data: %s\n\n", tokenData)
 						flusher.Flush()
 					}
+					if c.Type == "tool_use" && c.Name != "" {
+						toolData, _ := json.Marshal(map[string]string{"tool_use": c.Name})
+						fmt.Fprintf(w, "data: %s\n\n", toolData)
+						flusher.Flush()
+					}
 				}
 			}
+		case "user":
+			toolDoneData, _ := json.Marshal(map[string]bool{"tool_done": true})
+			fmt.Fprintf(w, "data: %s\n\n", toolDoneData)
+			flusher.Flush()
 		case "result":
-			if evt.Result != "" {
-				fullResponse.Reset()
-				fullResponse.WriteString(evt.Result)
-			}
-			doneData, _ := json.Marshal(map[string]any{"done": true, "result": evt.Result})
+			// Keep fullResponse intact (has ALL text including directives from all turns)
+			// Store evt.Result separately for display only
+			displayResult = evt.Result
+			doneData, _ := json.Marshal(map[string]any{
+				"done":      true,
+				"result":    evt.Result,
+				"num_turns": evt.NumTurns,
+				"cost_usd":  evt.TotalCostUsd,
+			})
 			fmt.Fprintf(w, "data: %s\n\n", doneData)
 			flusher.Flush()
 		}
@@ -972,13 +1061,61 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		os.WriteFile("/tmp/teamoon-chat-stderr.log", []byte(errMsg), 0644)
 	}
 
-	// Parse task creation directives from response
+	// Parse directives from response
 	responseText := fullResponse.String()
+
+	// Parse PROJECT_INIT directive (must run before TASK_CREATE)
+	initRe := regexp.MustCompile(`\[PROJECT_INIT\](.*?)\[/PROJECT_INIT\]`)
+	if initMatch := initRe.FindStringSubmatch(responseText); len(initMatch) >= 2 {
+		var initReq projectinit.InitRequest
+		if err := json.Unmarshal([]byte(initMatch[1]), &initReq); err == nil && initReq.Name != "" {
+			if initReq.Type == "" {
+				initReq.Type = "python"
+			}
+			if initReq.Version == "" {
+				initReq.Version = "1.0.0"
+			}
+
+			initErr := projectinit.RunInit(initReq, s.cfg.ProjectsDir, func(sr projectinit.StepResult) {
+				stepData, _ := json.Marshal(map[string]any{"init_step": sr})
+				fmt.Fprintf(w, "data: %s\n\n", stepData)
+				flusher.Flush()
+			})
+
+			// Always set the project name so tasks can be created regardless of init outcome
+			req.Project = initReq.Name
+			if initErr == nil {
+				initDone, _ := json.Marshal(map[string]any{"project_init": initReq.Name, "status": "success"})
+				fmt.Fprintf(w, "data: %s\n\n", initDone)
+				flusher.Flush()
+			} else {
+				log.Printf("[chat] project init failed: %v", initErr)
+				initFail, _ := json.Marshal(map[string]any{"project_init": initReq.Name, "status": "error", "error": initErr.Error()})
+				fmt.Fprintf(w, "data: %s\n\n", initFail)
+				flusher.Flush()
+			}
+		}
+		responseText = initRe.ReplaceAllString(responseText, "")
+	}
+
+	// Parse task creation directives
 	taskDirectiveRe := regexp.MustCompile(`\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
 	matches := taskDirectiveRe.FindAllStringSubmatch(responseText, -1)
 	var createdTasks []map[string]any
 
-	if len(matches) > 0 {
+	if len(matches) > 0 && req.Project == "" {
+		// GUARD: refuse to create tasks without a project
+		errData, _ := json.Marshal(map[string]any{
+			"error": "Cannot create tasks without a project. Select an existing project or create a new one first.",
+		})
+		fmt.Fprintf(w, "data: %s\n\n", errData)
+		flusher.Flush()
+		// Strip directives so raw tags don't show in chat
+		responseText = taskDirectiveRe.ReplaceAllString(responseText, "")
+		responseText = strings.TrimSpace(responseText)
+	}
+
+	if len(matches) > 0 && req.Project != "" {
 		type taskDirective struct {
 			Description string `json:"description"`
 			Priority    string `json:"priority"`
@@ -1006,6 +1143,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			queue.UpdateAssignee(t.ID, td.Assignee)
+			if td.Assignee == "agent" {
+				queue.ToggleAutoPilot(t.ID)
+			}
 			createdTasks = append(createdTasks, map[string]any{
 				"id":          t.ID,
 				"description": td.Description,
@@ -1027,11 +1167,19 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		responseText = strings.TrimSpace(responseText)
 	}
 
-	// Save assistant response
-	if responseText != "" {
+	// Save assistant response (use displayResult for clean text, fallback to stripped responseText)
+	saveText := displayResult
+	if saveText == "" {
+		saveText = responseText
+	}
+	// Strip any remaining directives from saved text
+	saveText = taskDirectiveRe.ReplaceAllString(saveText, "")
+	saveText = initRe.ReplaceAllString(saveText, "")
+	saveText = strings.TrimSpace(saveText)
+	if saveText != "" {
 		chat.AppendMessage(chat.Message{
 			Role:      "assistant",
-			Content:   responseText,
+			Content:   saveText,
 			Project:   req.Project,
 			Timestamp: time.Now(),
 		})
@@ -1153,6 +1301,8 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"spawn_effort":        cfg.Spawn.Effort,
 		"spawn_max_turns":     cfg.Spawn.MaxTurns,
 		"skeleton":            cfg.Skeleton,
+		"max_concurrent":      cfg.MaxConcurrent,
+		"project_skeletons":   cfg.ProjectSkeletons,
 	})
 }
 
@@ -1175,6 +1325,7 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		SpawnEffort        *string               `json:"spawn_effort,omitempty"`
 		SpawnMaxTurns      *int                  `json:"spawn_max_turns,omitempty"`
 		Skeleton           *config.SkeletonConfig `json:"skeleton,omitempty"`
+		MaxConcurrent      *int                   `json:"max_concurrent,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1218,6 +1369,9 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Skeleton != nil {
 		cfg.Skeleton = *req.Skeleton
+	}
+	if req.MaxConcurrent != nil && *req.MaxConcurrent > 0 {
+		cfg.MaxConcurrent = *req.MaxConcurrent
 	}
 
 	if err := config.Save(cfg); err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -314,6 +315,120 @@ func SetAllAutoPilot(on bool) error {
 		}
 	}
 	return saveStore(store)
+}
+
+func GetTask(id int) (Task, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return Task{}, err
+	}
+	for _, t := range store.Tasks {
+		if t.ID == id {
+			return t, nil
+		}
+	}
+	return Task{}, fmt.Errorf("task #%d not found", id)
+}
+
+func ListAutopilotPending(project string) ([]Task, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []Task
+	for _, t := range store.Tasks {
+		if t.Project != project || !t.AutoPilot {
+			continue
+		}
+		s := EffectiveState(t)
+		if s == StatePending || s == StatePlanned {
+			result = append(result, t)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		ri, rj := priorityRank(result[i].Priority), priorityRank(result[j].Priority)
+		if ri != rj {
+			return ri > rj
+		}
+		return result[i].ID < result[j].ID
+	})
+
+	return result, nil
+}
+
+func priorityRank(p string) int {
+	switch p {
+	case "high":
+		return 2
+	case "med":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// RecoverRunning resets tasks stuck in "running" state after a service restart.
+// Tasks with a plan file go back to "planned", others go back to "pending".
+func RecoverRunning() ([]Task, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return nil, err
+	}
+
+	var recovered []Task
+	for i := range store.Tasks {
+		if store.Tasks[i].State == StateRunning {
+			if store.Tasks[i].PlanFile != "" {
+				store.Tasks[i].State = StatePlanned
+			} else {
+				store.Tasks[i].State = StatePending
+			}
+			recovered = append(recovered, store.Tasks[i])
+		}
+	}
+
+	if len(recovered) > 0 {
+		if err := saveStore(store); err != nil {
+			return nil, err
+		}
+	}
+	return recovered, nil
+}
+
+// AutopilotProjects returns distinct projects with autopilot-eligible tasks.
+func AutopilotProjects() ([]string, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	var projects []string
+	for _, t := range store.Tasks {
+		if !t.AutoPilot || seen[t.Project] {
+			continue
+		}
+		s := EffectiveState(t)
+		if s == StatePending || s == StatePlanned {
+			seen[t.Project] = true
+			projects = append(projects, t.Project)
+		}
+	}
+	return projects, nil
 }
 
 func UpdateDescription(id int, description string) error {

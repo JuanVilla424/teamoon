@@ -24,16 +24,22 @@ type WebTask struct {
 }
 
 type WebProject struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Branch     string `json:"branch"`
-	LastCommit string `json:"last_commit"`
-	Modified   int    `json:"modified"`
-	Active     bool   `json:"active"`
-	Stale      bool   `json:"stale"`
-	HasGit     bool   `json:"has_git"`
-	GitHubRepo string `json:"github_repo"`
-	StatusIcon string `json:"status_icon"`
+	Name             string `json:"name"`
+	Path             string `json:"path"`
+	Branch           string `json:"branch"`
+	LastCommit       string `json:"last_commit"`
+	Modified         int    `json:"modified"`
+	Active           bool   `json:"active"`
+	Stale            bool   `json:"stale"`
+	HasGit           bool   `json:"has_git"`
+	GitHubRepo       string `json:"github_repo"`
+	StatusIcon       string `json:"status_icon"`
+	AutopilotRunning bool   `json:"autopilot_running"`
+	TaskTotal        int    `json:"task_total"`
+	TaskPending      int    `json:"task_pending"`
+	TaskRunning      int    `json:"task_running"`
+	TaskDone         int    `json:"task_done"`
+	TaskBlocked      int    `json:"task_blocked"`
 }
 
 type LogEntryJSON struct {
@@ -55,11 +61,12 @@ type DataSnapshot struct {
 	Tasks      []WebTask             `json:"tasks"`
 	Projects   []WebProject          `json:"projects"`
 	LogEntries []LogEntryJSON        `json:"log_entries"`
-	PlanModel  string                `json:"plan_model"`
-	ExecModel  string                `json:"exec_model"`
-	Effort     string                `json:"effort"`
-	Version    string                `json:"version"`
-	BuildNum   string                `json:"build_num"`
+	PlanModel         string   `json:"plan_model"`
+	ExecModel         string   `json:"exec_model"`
+	Effort            string   `json:"effort"`
+	Version           string   `json:"version"`
+	BuildNum          string   `json:"build_num"`
+	ProjectAutopilots []string `json:"project_autopilots"`
 }
 
 type Store struct {
@@ -107,6 +114,34 @@ func (s *Store) Refresh() {
 		}
 	}
 
+	// Count tasks per project
+	type projCounts struct{ total, pending, running, done, blocked int }
+	projTaskCounts := make(map[string]*projCounts)
+	for _, wt := range webTasks {
+		pc := projTaskCounts[wt.Project]
+		if pc == nil {
+			pc = &projCounts{}
+			projTaskCounts[wt.Project] = pc
+		}
+		pc.total++
+		switch wt.EffectiveState {
+		case "pending", "generating", "planned":
+			pc.pending++
+		case "running":
+			pc.running++
+		case "done":
+			pc.done++
+		case "blocked":
+			pc.blocked++
+		}
+	}
+
+	activeLoops := s.engineMgr.ActiveProjectLoops()
+	activeLoopSet := make(map[string]bool, len(activeLoops))
+	for _, name := range activeLoops {
+		activeLoopSet[name] = true
+	}
+
 	webProjects := make([]WebProject, len(projs))
 	for i, p := range projs {
 		icon := "inactive"
@@ -117,18 +152,28 @@ func (s *Store) Refresh() {
 		} else if p.Stale {
 			icon = "stale"
 		}
-		webProjects[i] = WebProject{
-			Name:       p.Name,
-			Path:       p.Path,
-			Branch:     p.Branch,
-			LastCommit: p.LastCommit,
-			Modified:   p.Modified,
-			Active:     p.Active,
-			Stale:      p.Stale,
-			HasGit:     p.HasGit,
-			GitHubRepo: p.GitHubRepo,
-			StatusIcon: icon,
+		pc := projTaskCounts[p.Name]
+		wp := WebProject{
+			Name:             p.Name,
+			Path:             p.Path,
+			Branch:           p.Branch,
+			LastCommit:       p.LastCommit,
+			Modified:         p.Modified,
+			Active:           p.Active,
+			Stale:            p.Stale,
+			HasGit:           p.HasGit,
+			GitHubRepo:       p.GitHubRepo,
+			StatusIcon:       icon,
+			AutopilotRunning: activeLoopSet[p.Name],
 		}
+		if pc != nil {
+			wp.TaskTotal = pc.total
+			wp.TaskPending = pc.pending
+			wp.TaskRunning = pc.running
+			wp.TaskDone = pc.done
+			wp.TaskBlocked = pc.blocked
+		}
+		webProjects[i] = wp
 	}
 
 	entries := s.logBuf.Snapshot()
@@ -168,8 +213,9 @@ func (s *Store) Refresh() {
 		PlanModel:  planModel,
 		ExecModel:  execModel,
 		Effort:     os.Getenv("CLAUDE_CODE_EFFORT_LEVEL"),
-		Version:    Version,
-		BuildNum:   BuildNum,
+		Version:           Version,
+		BuildNum:           BuildNum,
+		ProjectAutopilots: activeLoops,
 	}
 
 	s.mu.Lock()

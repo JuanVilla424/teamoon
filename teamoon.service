@@ -1,5 +1,5 @@
 [Unit]
-Description=Teamoon Cloud Dashboard
+Description=Teamoon - AI-powered project management and autopilot task engine
 After=network.target
 
 [Service]

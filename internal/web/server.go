@@ -12,6 +12,9 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/logs"
+	"github.com/JuanVilla424/teamoon/internal/plan"
+	"github.com/JuanVilla424/teamoon/internal/plangen"
+	"github.com/JuanVilla424/teamoon/internal/queue"
 )
 
 type sseClient chan []byte
@@ -62,8 +65,38 @@ func NewServer(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) 
 	return &Server{cfg: cfg, store: store, hub: hub}
 }
 
+func (s *Server) RecoverAndResume() {
+	recovered, err := queue.RecoverRunning()
+	if err != nil {
+		log.Printf("[recovery] error: %v", err)
+		return
+	}
+	for _, t := range recovered {
+		log.Printf("[recovery] task #%d (%s) reset to %s", t.ID, t.Project, t.State)
+	}
+
+	projects, err := queue.AutopilotProjects()
+	if err != nil {
+		log.Printf("[recovery] error listing projects: %v", err)
+		return
+	}
+	for _, project := range projects {
+		cfg := s.cfg
+		send := s.webSend(0)
+		ok := s.store.engineMgr.StartProject(project, cfg.MaxConcurrent, func(ctx context.Context) {
+			engine.RunProjectLoop(ctx, project, cfg, func(t queue.Task, sk config.SkeletonConfig) (plan.Plan, error) {
+				return plangen.GeneratePlan(t, sk, cfg)
+			}, send, s.store.engineMgr)
+		})
+		if ok {
+			log.Printf("[recovery] autopilot resumed for project: %s", project)
+		}
+	}
+}
+
 func (s *Server) Start(ctx context.Context) {
 	s.store.Refresh()
+	s.RecoverAndResume()
 
 	go func() {
 		interval := time.Duration(s.cfg.RefreshIntervalSec) * time.Second
@@ -106,6 +139,9 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/projects/merge-dependabot", s.authWrap(s.handleMergeDependabot))
 	mux.HandleFunc("/api/projects/pull", s.authWrap(s.handleProjectPull))
 	mux.HandleFunc("/api/projects/git-init", s.authWrap(s.handleProjectGitInit))
+	mux.HandleFunc("/api/projects/autopilot/start", s.authWrap(s.handleProjectAutopilotStart))
+	mux.HandleFunc("/api/projects/autopilot/stop", s.authWrap(s.handleProjectAutopilotStop))
+	mux.HandleFunc("/api/projects/skeleton", s.authWrap(s.handleProjectSkeleton))
 	mux.HandleFunc("/api/templates/list", s.authWrap(s.handleTemplateList))
 	mux.HandleFunc("/api/templates/add", s.authWrap(s.handleTemplateAdd))
 	mux.HandleFunc("/api/templates/delete", s.authWrap(s.handleTemplateDelete))
