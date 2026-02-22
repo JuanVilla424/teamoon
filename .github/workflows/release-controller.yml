@@ -9,12 +9,17 @@ on:
       - 'v*.*.*'
   repository_dispatch:
     types: [release]
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ github.event.client_payload.tag || github.ref_name }}
+  RELEASE_TAG: ${{ inputs.tag || github.event.client_payload.tag || github.ref_name }}
 
 jobs:
   build:
