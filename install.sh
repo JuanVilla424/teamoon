@@ -45,7 +45,7 @@ ask() {
 
 ask_input() {
     local prompt="$1" default="$2"
-    printf '\033[1;33m?\033[0m %s [%s] ' "$prompt" "$default"
+    printf '\033[1;33m?\033[0m %s [%s] ' "$prompt" "$default" >/dev/tty 2>/dev/null || true
     local answer
     read -r answer </dev/tty 2>/dev/null || answer=""
     echo "${answer:-$default}"

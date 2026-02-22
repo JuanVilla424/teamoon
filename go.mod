@@ -1,6 +1,6 @@
 module github.com/JuanVilla424/teamoon
 
-// version = 1.0.21
+// version = 1.0.22
 
 go 1.24.0
 
