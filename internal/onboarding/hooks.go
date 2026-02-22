@@ -120,6 +120,76 @@ func mergeHooksIntoSettings(settingsPath, hooksDir string) error {
 	return os.WriteFile(settingsPath, out, 0644)
 }
 
+// installHooksStream installs hooks to teamoon home with progress streaming.
+func installHooksStream(progress ProgressFunc) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	tmHooksDir := filepath.Join(teamoonHome(), "hooks")
+	if err := os.MkdirAll(tmHooksDir, 0755); err != nil {
+		return fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	// Write each hook script to teamoon home
+	files := projectinit.GlobalHookFiles()
+	for name, content := range files {
+		dest := filepath.Join(tmHooksDir, name)
+		if err := os.WriteFile(dest, []byte(content), 0755); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+		progress(map[string]any{"type": "hook", "name": name, "status": "done"})
+	}
+
+	// Create per-file symlinks in ~/.claude/hooks/
+	claudeHooksDir := filepath.Join(home, ".claude", "hooks")
+	if err := os.MkdirAll(claudeHooksDir, 0755); err != nil {
+		return fmt.Errorf("create claude hooks dir: %w", err)
+	}
+	for name := range files {
+		target := filepath.Join(tmHooksDir, name)
+		link := filepath.Join(claudeHooksDir, name)
+		if err := ensureSymlink(target, link); err != nil {
+			return fmt.Errorf("symlink %s: %w", name, err)
+		}
+	}
+	progress(map[string]any{"type": "symlink", "name": "hooks", "status": "done"})
+
+	// Merge hooks into settings.json — paths point to teamoon home
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if err := mergeHooksIntoSettings(settingsPath, tmHooksDir); err != nil {
+		return fmt.Errorf("merge settings: %w", err)
+	}
+	progress(map[string]any{"type": "hook", "name": "settings.json", "status": "done"})
+
+	return nil
+}
+
+// installGlobalHooksQuiet installs hooks without printing to stdout.
+func installGlobalHooksQuiet() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+
+	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+		return fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	files := projectinit.GlobalHookFiles()
+	for name, content := range files {
+		dest := filepath.Join(hooksDir, name)
+		if err := os.WriteFile(dest, []byte(content), 0755); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	return mergeHooksIntoSettings(settingsPath, hooksDir)
+}
+
 // mergeMatcher inserts hooks from 'desired' into the matching entry in 'existing',
 // creating the matcher entry if it does not exist. Deduplicates by command path.
 func mergeMatcher(existing []hookMatcher, desired hookMatcher) []hookMatcher {
