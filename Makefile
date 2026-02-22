@@ -30,5 +30,8 @@ service: build
 test:
 	go test ./internal/...
 
+release:
+	CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)$(SUFFIX) ./cmd/teamoon/
+
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)

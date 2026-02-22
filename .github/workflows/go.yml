@@ -1,11 +1,14 @@
 ---
-# .github/workflows/ci.yml
+# .github/workflows/go.yml
 
-name: CI
+name: Go
 
 on:
   push:
     branches:
+      - dev
+      - test
+      - prod
       - main
   pull_request:
 

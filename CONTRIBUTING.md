@@ -22,13 +22,13 @@ Please note that all participants in our project are expected to follow our [Cod
 4. **Test your changes**:
    Run the test suite to ensure your changes don’t break any functionality:
 
-   go build ./...
-   go test ./...
+   make build
+   make test
 
 5. **Commit your changes**:
-   Use meaningful commit messages that explain what you have done:
+   Follow the [commit message format](VERSIONING.md#-commit-message-guidelines). Scope is always `core`. Do **not** include versioning keywords (`[patch candidate]`, `[minor candidate]`, `[major candidate]`) — those are reserved for maintainers only.
 
-   git commit -m "Add feature/fix: Description of changes"
+   git commit -m "feat(core): add new feature description"
 
 6. **Push your changes**:
    Push your changes to your fork:

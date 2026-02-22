@@ -54,15 +54,8 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'
-          TAG_VERSION: ${{ github.ref_name }}
-        run: |
-          BUILD_DATE="$(date +%Y%m%d.%H%M%S)"
-          BINARY_NAME="teamoon${{ matrix.suffix }}"
-          go build \
-            -ldflags "-X main.version=${TAG_VERSION} -X main.buildNum=${BUILD_DATE}" \
-            -o "${BINARY_NAME}" \
-            ./cmd/teamoon/
+          SUFFIX: ${{ matrix.suffix }}
+        run: make release
 
       - name: Create archive (tar.gz)
         if: matrix.archive == 'tar.gz'
