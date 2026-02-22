@@ -36,3 +36,19 @@ func installMCPServers() error {
 
 	return nil
 }
+
+// installMCPServersQuiet installs MCP servers without printing to stdout.
+func installMCPServersQuiet() error {
+	existing := config.ReadGlobalMCPServers()
+
+	for _, srv := range defaultMCPServers {
+		if _, ok := existing[srv.name]; ok {
+			continue
+		}
+		if err := config.InstallMCPToGlobal(srv.name, srv.command, srv.args, nil); err != nil {
+			return fmt.Errorf("installing %s: %w", srv.name, err)
+		}
+	}
+
+	return nil
+}

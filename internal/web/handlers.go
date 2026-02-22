@@ -21,6 +21,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/chat"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
+	"github.com/JuanVilla424/teamoon/internal/onboarding"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
 	"github.com/JuanVilla424/teamoon/internal/plangen"
@@ -1804,4 +1805,86 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// --- Onboarding handlers ---
+
+func (s *Server) handleOnboardingStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, onboarding.Check())
+}
+
+func (s *Server) handleOnboardingConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var wc onboarding.WebConfig
+	if err := json.NewDecoder(r.Body).Decode(&wc); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := onboarding.WebSaveConfig(wc); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if cfg, err := config.Load(); err == nil {
+		s.cfg = cfg
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// sseOnboarding creates a standard SSE handler that runs a streaming onboarding step.
+func (s *Server) sseOnboarding(w http.ResponseWriter, r *http.Request, run func(onboarding.ProgressFunc) error) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, 500, "streaming not supported")
+		return
+	}
+
+	err := run(func(evt map[string]any) {
+		data, _ := json.Marshal(evt)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	})
+
+	status := "success"
+	msg := ""
+	if err != nil {
+		status = "error"
+		msg = err.Error()
+	}
+	doneData, _ := json.Marshal(map[string]string{"status": status, "message": msg, "done": "true"})
+	fmt.Fprintf(w, "data: %s\n\n", doneData)
+	flusher.Flush()
+}
+
+func (s *Server) handleOnboardingPrereqs(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamPrereqs)
+}
+
+func (s *Server) handleOnboardingSkills(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamSkills)
+}
+
+func (s *Server) handleOnboardingBMAD(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamBMAD)
+}
+
+func (s *Server) handleOnboardingHooks(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamHooks)
+}
+
+func (s *Server) handleOnboardingMCP(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamMCP)
 }
