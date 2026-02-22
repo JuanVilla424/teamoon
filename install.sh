@@ -137,6 +137,8 @@ step "nvm + Node.js LTS"
 
 export NVM_DIR="${HOME}/.nvm"
 
+# nvm scripts use unbound variables — temporarily disable nounset
+set +u
 if [ -s "$NVM_DIR/nvm.sh" ]; then
     # shellcheck disable=SC1091
     . "$NVM_DIR/nvm.sh"
@@ -158,15 +160,16 @@ if has node; then
     else
         info "node $NODE_VER too old, installing LTS"
         nvm install --lts
-        nvm use --lts
+        nvm alias default node
         ok "node $(node --version) installed"
     fi
 else
     info "installing Node.js LTS"
     nvm install --lts
-    nvm use --lts
+    nvm alias default node
     ok "node $(node --version) installed"
 fi
+set -u
 
 # ── 5. Rust ──────────────────────────────────────────────
 step "Rust"
@@ -177,7 +180,7 @@ else
     info "installing rust via rustup"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     # shellcheck disable=SC1091
-    source "$HOME/.cargo/env"
+    set +u; source "$HOME/.cargo/env"; set -u
     ok "rust installed ($(rustc --version | awk '{print $2}'))"
 fi
 
@@ -186,6 +189,8 @@ step "pyenv + Python 3.11"
 
 export PYENV_ROOT="${HOME}/.pyenv"
 
+# pyenv init uses unbound variables — temporarily disable nounset
+set +u
 if [ -d "$PYENV_ROOT" ]; then
     export PATH="$PYENV_ROOT/bin:$PATH"
     eval "$(pyenv init -)"
@@ -207,7 +212,7 @@ else
     ok "pyenv installed"
 fi
 
-if pyenv versions --bare 2>/dev/null | grep -q '^3\.12'; then
+if pyenv versions --bare 2>/dev/null | grep -q '^3\.11'; then
     ok "python 3.11 already installed via pyenv"
 else
     info "installing python 3.11 (this may take a few minutes)"
@@ -215,6 +220,7 @@ else
     ok "python 3.11 installed"
 fi
 pyenv global 3.11
+set -u
 
 # ── 7. Claude Code ──────────────────────────────────────
 step "Claude Code CLI"
