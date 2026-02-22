@@ -18,7 +18,7 @@ poetry.lock
 .env.*.local
 
 # Logs
-logs
+/logs
 *.log
 pnpm-debug.log*
 lerna-debug.log*
