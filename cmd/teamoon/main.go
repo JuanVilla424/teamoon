@@ -14,8 +14,8 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/dashboard"
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/logs"
+	"github.com/JuanVilla424/teamoon/internal/onboarding"
 	"github.com/JuanVilla424/teamoon/internal/queue"
-	"github.com/JuanVilla424/teamoon/internal/skills"
 	"github.com/JuanVilla424/teamoon/internal/web"
 )
 
@@ -142,9 +142,9 @@ func main() {
 
 	initCmd := &cobra.Command{
 		Use:   "init",
-		Short: "Install global Claude Code skills",
+		Short: "Interactive onboarding wizard for Claude Code global setup",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return skills.Install()
+			return onboarding.Run()
 		},
 	}
 

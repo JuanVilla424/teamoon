@@ -44,7 +44,8 @@ Terminal UI dashboard and web interface for monitoring Claude Code usage, managi
 
 ### Prerequisites
 
-- [Go](https://go.dev/) 1.24+
+- [Go](https://go.dev/) 1.24+ — see [INSTALL.md](INSTALL.md) for installation instructions
+- [Node.js](https://nodejs.org/) 18+ (required for skills and MCP servers)
 - [Git](https://git-scm.com/)
 - [Make](https://www.gnu.org/software/make/)
 - [`gh` CLI](https://cli.github.com/) (optional, for GitHub PR features)
@@ -58,17 +59,22 @@ make build
 make install
 ```
 
-### Environment Setup
-
-Configuration is automatically created at `~/.config/teamoon/config.json` on first run. See [Configuration](#-configuration) for available options.
-
-### Initialize (Skills + Hooks)
+### Initialize (Onboarding)
 
 ```bash
 teamoon init
 ```
 
-This installs 21 curated Claude Code agent skills globally (superpowers + anthropic + vercel). See [INSTALL.md](INSTALL.md) for the full list and manual installation instructions.
+Interactive setup wizard that configures your environment:
+
+1. **Prerequisites** — verifies required tools (node, npx, git)
+2. **Config** — creates `~/.config/teamoon/config.json` with your preferences
+3. **Skills** — installs 21 curated Claude Code agent skills (superpowers + anthropic + vercel)
+4. **BMAD** — installs BMAD method framework commands globally
+5. **Hooks** — sets up global security hooks in `~/.claude/hooks/`
+6. **MCP Servers** — configures Context7, Memory, and Sequential Thinking
+
+See [INSTALL.md](INSTALL.md) for manual installation and full details.
 
 ### Make Targets
 

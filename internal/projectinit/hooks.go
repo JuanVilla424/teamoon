@@ -331,6 +331,12 @@ var hookFiles = map[string]string{
 	"commit-format.sh":  commitFormatSH,
 }
 
+// GlobalHookFiles returns the hook script contents keyed by filename.
+// Allows other packages to access the hook scripts without duplicating them.
+func GlobalHookFiles() map[string]string {
+	return hookFiles
+}
+
 // InstallHooks creates .claude/hooks/ in the target project directory
 // with all security hook scripts, settings.json, CLAUDE.md, and MEMORY.md.
 func InstallHooks(projectDir, projectName, projectType string) error {
