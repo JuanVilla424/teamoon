@@ -46,8 +46,11 @@ func runSingleInit(req InitRequest, projectsDir string, progress ProgressFunc) e
 		{"Cleaning template files", func() error { return stepCleanTemplate(req, projectsDir) }},
 		{"Trimming workflows", func() error { return stepTrimWorkflows(req, projectsDir) }},
 		{"Updating manifest", func() error { return stepUpdateManifest(req, projectsDir) }},
+		{"Creating changelog", func() error { return stepCreateChangelog(req, projectsDir) }},
+		{"Creating version config", func() error { return stepCreateBumpversion(req, projectsDir) }},
 		{"Updating README", func() error { return stepUpdateReadme(req, projectsDir) }},
 		{"Setting up environment", func() error { return stepSetupEnv(req, projectsDir) }},
+		{"Installing Claude Code hooks", func() error { return InstallHooks(projectDir(req, projectsDir), req.Name, req.Type) }},
 		{"Committing and pushing", func() error { return stepCommitPush(req, projectsDir) }},
 	}
 
@@ -112,10 +115,19 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		if e := stepUpdateManifest(backReq, projectsDir); e != nil {
 			return e
 		}
+		if e := stepCreateChangelog(backReq, projectsDir); e != nil {
+			return e
+		}
+		if e := stepCreateBumpversion(backReq, projectsDir); e != nil {
+			return e
+		}
 		if e := stepUpdateReadme(backReq, projectsDir); e != nil {
 			return e
 		}
-		return stepSetupEnv(backReq, projectsDir)
+		if e := stepSetupEnv(backReq, projectsDir); e != nil {
+			return e
+		}
+		return InstallHooks(projectDir(backReq, projectsDir), backReq.Name, backReq.Type)
 	}); err != nil {
 		return err
 	}
@@ -148,10 +160,19 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		if e := stepUpdateManifest(frontReq, projectsDir); e != nil {
 			return e
 		}
+		if e := stepCreateChangelog(frontReq, projectsDir); e != nil {
+			return e
+		}
+		if e := stepCreateBumpversion(frontReq, projectsDir); e != nil {
+			return e
+		}
 		if e := stepUpdateReadme(frontReq, projectsDir); e != nil {
 			return e
 		}
-		return stepSetupEnv(frontReq, projectsDir)
+		if e := stepSetupEnv(frontReq, projectsDir); e != nil {
+			return e
+		}
+		return InstallHooks(projectDir(frontReq, projectsDir), frontReq.Name, frontReq.Type)
 	}); err != nil {
 		return err
 	}
@@ -174,12 +195,32 @@ func runCmd(dir, name string, args ...string) (string, error) {
 }
 
 func stepCreateRepo(req InitRequest, projectsDir string) error {
+	dir := filepath.Join(projectsDir, req.Name)
+
+	// If directory already exists, skip creation
+	if _, err := os.Stat(dir); err == nil {
+		return nil
+	}
+
 	vis := "--public"
 	if req.Private {
 		vis = "--private"
 	}
 	_, err := runCmd(projectsDir, "gh", "repo", "create", req.Name, vis, "--clone")
-	return err
+	if err != nil {
+		// Repo might already exist on GitHub — try cloning it
+		_, cloneErr := runCmd(projectsDir, "gh", "repo", "clone", req.Name)
+		if cloneErr != nil {
+			// Final fallback: create local directory + git init
+			if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+				return fmt.Errorf("all repo creation methods failed: %w", mkErr)
+			}
+			if _, gitErr := runCmd(dir, "git", "init"); gitErr != nil {
+				return fmt.Errorf("git init failed: %w", gitErr)
+			}
+		}
+	}
+	return nil
 }
 
 func stepFetchTemplate(req InitRequest, projectsDir string) error {
@@ -267,15 +308,50 @@ func stepUpdateManifest(req InitRequest, projectsDir string) error {
 		version = "1.0.0"
 	}
 
+	// Type-specific manifest
 	switch req.Type {
 	case "python":
-		content := fmt.Sprintf(`[project]
+		// Python gets full poetry pyproject.toml as its primary manifest
+		content := fmt.Sprintf(`[tool.poetry]
 name = "%s"
 version = "%s"
 description = ""
-requires-python = ">=3.11"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+setuptools = "^78.1.0"
+bump2version = "^1.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^4.0.1"
+pylint = "^3.3.0"
+yamllint = "^1.35.0"
+isort = "^6.0.1"
+toml = "^0.10.0"
+black = "^25.1.0"
+pytest = "^8.3.1"
+pytest-cov = "^6.1.1"
+coverage = "^7.2.5"
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.pylint]
+rcfile = ".pylintrc"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
 `, req.Name, version)
-		return os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0644)
+		if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(content), 0644); err != nil {
+			return err
+		}
 
 	case "node":
 		content := fmt.Sprintf(`{
@@ -289,13 +365,99 @@ requires-python = ">=3.11"
   }
 }
 `, req.Name, version)
-		return os.WriteFile(filepath.Join(dir, "package.json"), []byte(content), 0644)
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(content), 0644); err != nil {
+			return err
+		}
 
 	case "go":
 		content := fmt.Sprintf("module github.com/JuanVilla424/%s\n\ngo 1.23\n", req.Name)
-		return os.WriteFile(filepath.Join(dir, "go.mod"), []byte(content), 0644)
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(content), 0644); err != nil {
+			return err
+		}
 	}
+
+	// CI/CD pyproject.toml for go and node (python already has it above)
+	if req.Type == "go" || req.Type == "node" {
+		pyproject := fmt.Sprintf(`[tool.poetry]
+name = "%s"
+version = "%s"
+description = ""
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+bump2version = "^1.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^4.0.1"
+pylint = "^3.3.0"
+yamllint = "^1.35.0"
+black = "^25.1.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+`, req.Name, version)
+		os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(pyproject), 0644)
+	}
+
+	// requirements.dev.txt for all types
+	reqDev := `pre-commit>=4.0.0
+pylint>=3.3.1
+poetry>=1.8.4
+bump2version>=1.0.0
+toml>=0.10.1
+black>=24.3.0
+pytest>=7.3.1
+pytest-cov>=4.0.0
+coverage>=7.2.5
+`
+	os.WriteFile(filepath.Join(dir, "requirements.dev.txt"), []byte(reqDev), 0644)
+
 	return nil
+}
+
+func stepCreateChangelog(req InitRequest, projectsDir string) error {
+	dir := projectDir(req, projectsDir)
+	content := `# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+`
+	return os.WriteFile(filepath.Join(dir, "CHANGELOG.md"), []byte(content), 0644)
+}
+
+func stepCreateBumpversion(req InitRequest, projectsDir string) error {
+	dir := projectDir(req, projectsDir)
+	version := req.Version
+	if version == "" {
+		version = "1.0.0"
+	}
+
+	var files string
+	switch req.Type {
+	case "python":
+		files = "\n[bumpversion:file:pyproject.toml]\n"
+	case "node":
+		files = "\n[bumpversion:file:package.json]\n\n[bumpversion:file:pyproject.toml]\n"
+	case "go":
+		files = "\n[bumpversion:file:go.mod]\n\n[bumpversion:file:pyproject.toml]\n"
+	}
+
+	content := fmt.Sprintf("[bumpversion]\ncurrent_version = %s\ncommit = True\ntag = False\n%s", version, files)
+	return os.WriteFile(filepath.Join(dir, ".bumpversion.cfg"), []byte(content), 0644)
 }
 
 func stepUpdateReadme(req InitRequest, projectsDir string) error {
@@ -315,17 +477,42 @@ func stepUpdateReadme(req InitRequest, projectsDir string) error {
 
 func stepSetupEnv(req InitRequest, projectsDir string) error {
 	dir := projectDir(req, projectsDir)
+
+	// Git submodules (if .gitmodules exists from template)
+	if _, err := os.Stat(filepath.Join(dir, ".gitmodules")); err == nil {
+		runCmd(dir, "git", "submodule", "init")
+		runCmd(dir, "git", "submodule", "update")
+	}
+
+	// Type-specific setup
 	switch req.Type {
 	case "python":
-		_, err := runCmd(dir, "python3", "-m", "venv", "venv")
-		return err
+		if _, err := runCmd(dir, "python3", "-m", "venv", "venv"); err != nil {
+			return err
+		}
+		pip := filepath.Join(dir, "venv", "bin", "pip")
+		if _, err := os.Stat(filepath.Join(dir, "requirements.dev.txt")); err == nil {
+			runCmd(dir, pip, "install", "-r", "requirements.dev.txt")
+		}
 	case "node":
-		// package.json already created in manifest step
-		return nil
-	case "go":
-		// go.mod already created in manifest step
-		return nil
+		if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+			runCmd(dir, "npm", "install")
+		}
 	}
+
+	// Pre-commit install (all types)
+	precommit := "pre-commit"
+	if req.Type == "python" {
+		venvPC := filepath.Join(dir, "venv", "bin", "pre-commit")
+		if _, err := os.Stat(venvPC); err == nil {
+			precommit = venvPC
+		}
+	}
+	if _, err := exec.LookPath(precommit); err == nil || precommit != "pre-commit" {
+		runCmd(dir, precommit, "install")
+		runCmd(dir, precommit, "install", "--hook-type", "pre-push")
+	}
+
 	return nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/queue"
+	"github.com/JuanVilla424/teamoon/internal/skills"
 	"github.com/JuanVilla424/teamoon/internal/web"
 )
 
@@ -139,8 +140,16 @@ func main() {
 		},
 	}
 
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Install global Claude Code skills",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return skills.Install()
+		},
+	}
+
 	taskCmd.AddCommand(taskAddCmd, taskDoneCmd, taskListCmd)
-	rootCmd.AddCommand(taskCmd, serveCmd)
+	rootCmd.AddCommand(taskCmd, serveCmd, initCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

@@ -40,6 +40,16 @@ func DefaultSkeleton() SkeletonConfig {
 	}
 }
 
+// SkeletonFor returns the skeleton config for a project, falling back to global.
+func SkeletonFor(cfg Config, project string) SkeletonConfig {
+	if cfg.ProjectSkeletons != nil {
+		if sk, ok := cfg.ProjectSkeletons[project]; ok {
+			return sk
+		}
+	}
+	return cfg.Skeleton
+}
+
 type Config struct {
 	ProjectsDir        string                `json:"projects_dir"`
 	ClaudeDir          string                `json:"claude_dir"`
@@ -50,9 +60,11 @@ type Config struct {
 	WebPort            int                   `json:"web_port"`
 	WebPassword        string                `json:"web_password"`
 	WebhookURL         string                `json:"webhook_url,omitempty"`
-	Spawn              SpawnConfig           `json:"spawn"`
-	Skeleton           SkeletonConfig        `json:"skeleton"`
-	MCPServers         map[string]MCPServer  `json:"mcp_servers,omitempty"`
+	Spawn              SpawnConfig                    `json:"spawn"`
+	Skeleton           SkeletonConfig                 `json:"skeleton"`
+	ProjectSkeletons   map[string]SkeletonConfig      `json:"project_skeletons,omitempty"`
+	MaxConcurrent      int                            `json:"max_concurrent"`
+	MCPServers         map[string]MCPServer           `json:"mcp_servers,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -68,6 +80,7 @@ func DefaultConfig() Config {
 		WebPassword:        "",
 		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 25},
 		Skeleton:           DefaultSkeleton(),
+		MaxConcurrent:      3,
 		MCPServers:         nil,
 	}
 }

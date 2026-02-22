@@ -42,9 +42,81 @@ function inlineMd(s){
     .replace(/\*([^*]+)\*/g,"<em>$1</em>");
 }
 
+function renderMarkdown(text) {
+  if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+    // Pre-process: extract <details> blocks, parse their inner markdown separately,
+    // then re-insert as HTML (marked.js skips markdown inside HTML blocks)
+    var processed = text.replace(/<details([^>]*)>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi, function(m, attrs, summary, body) {
+      var innerHtml = marked.parse(body.trim(), { breaks: true, gfm: true });
+      return '<details' + attrs + '><summary>' + summary + '</summary>\n' + innerHtml + '\n</details>';
+    });
+    var raw = marked.parse(processed, { breaks: true, gfm: true });
+    return DOMPurify.sanitize(raw, { ADD_TAGS: ['details','summary'], ADD_ATTR: ['open'] });
+  }
+  return mdToHtml(text);
+}
+
+var TOOL_ICONS = {
+  "WebSearch":"🔍","Read":"📄","Write":"✏️","Edit":"✏️","Bash":"⚡",
+  "Glob":"🗂️","Grep":"🔎","WebFetch":"🌐","Task":"🤖"
+};
+function toolIcon(name){
+  if(TOOL_ICONS[name]) return TOOL_ICONS[name];
+  if(name.indexOf("mcp__")===0) return "🔧";
+  return "⚙️";
+}
+function toolLabel(name){
+  if(name.indexOf("mcp__")===0){
+    var parts=name.split("__");
+    if(parts.length>=3) return parts[1]+": "+parts[2].replace(/-/g," ");
+  }
+  return name.replace(/([A-Z])/g," $1").trim();
+}
+function chatUpdateToolActivity(bubbleEl){
+  var container=bubbleEl.querySelector(".chat-tool-activity");
+  if(!container){
+    container=document.createElement("div");
+    container.className="chat-tool-activity";
+    bubbleEl.insertBefore(container,bubbleEl.firstChild);
+  }
+  // Remove old processing indicator
+  var oldProc=container.querySelector(".tool-processing-row");
+  if(oldProc) oldProc.remove();
+  var rows=container.querySelectorAll(".tool-activity-row:not(.tool-processing-row)");
+  for(var i=0;i<chatToolCalls.length;i++){
+    var call=chatToolCalls[i];
+    var row=rows[i];
+    if(!row){
+      row=document.createElement("div");
+      row.className="tool-activity-row";
+      container.appendChild(row);
+    }
+    if(call.done){
+      row.className="tool-activity-row tool-done";
+      row.innerHTML='<span class="tool-act-icon">\u2713</span><span class="tool-act-label">'+toolIcon(call.name)+" "+toolLabel(call.name)+'</span>';
+    } else {
+      row.className="tool-activity-row tool-running";
+      row.innerHTML='<span class="tool-act-spinner"><span class="spinner-sm"></span></span><span class="tool-act-label">'+toolIcon(call.name)+" "+toolLabel(call.name)+'\u2026</span>';
+    }
+  }
+}
+function chatAppendMetaFooter(bubbleEl,meta){
+  if(bubbleEl.querySelector(".chat-meta-footer")) return;
+  var footer=document.createElement("div");
+  footer.className="chat-meta-footer";
+  var parts=[];
+  if(meta.num_turns>0) parts.push(meta.num_turns+" turn"+(meta.num_turns!==1?"s":""));
+  if(meta.cost_usd>0) parts.push("$"+meta.cost_usd.toFixed(4));
+  var secs=(meta.duration_ms/1000).toFixed(1);
+  parts.push(secs+"s");
+  footer.textContent=parts.join(" \u00b7 ");
+  bubbleEl.appendChild(footer);
+}
+
 var D = null;
 var prevDataStr = "";
 var selectedTaskID = 0;
+var selectedProjectName = "";
 var currentPRsRepo = "";
 var logAutoScroll = true;
 var queueFilterState = "";
@@ -67,6 +139,7 @@ var prevTaskLogCounts = {};
 var prevTaskStates = {};
 var chatMessages = [];
 var chatLoading = false;
+var chatInitSteps = [];
 var configLoaded = 0;
 var configData = null;
 var configTab = "general";
@@ -77,6 +150,8 @@ var templatesLoading = false;
 var chatProject = "";
 var chatCounter = 0;
 var chatCreatedTasks = [];
+var chatToolCalls = [];
+var chatTurnStartMs = 0;
 var canvasFilterAssignee = "";
 var canvasFilterProject = "";
 var canvasDragTaskId = 0;
@@ -91,6 +166,7 @@ var skillsData = null;
 var skillsCatalogOpen = false;
 var skillsCatalogResults = null;
 var skillsCatalogSearch = "";
+var projectAutopilots = [];
 
 /* ── BMAD Agent Map ── */
 var agentMap = {
@@ -244,7 +320,9 @@ function connectSSE(){
 
 /* ── Active poll: 2s polling when tasks are generating/running ── */
 function hasActiveTask(){
-  if(!D || !D.tasks) return false;
+  if(!D) return false;
+  if(D.project_autopilots && D.project_autopilots.length > 0) return true;
+  if(!D.tasks) return false;
   for(var i=0;i<D.tasks.length;i++){
     var s = D.tasks[i].effective_state;
     if(s === "generating" || s === "running") return true;
@@ -438,7 +516,7 @@ function computeContentKey(v){
         var p = projs[i];
         pk += p.name + "," + p.status_icon + "," + (p.modified||0) + "," + (p.branch||"") + ";";
       }
-      return "p:" + pk;
+      return "p:" + selectedProjectName + ":" + pk;
     case "logs":
       return "l:" + logFilterLevel + ":" + logFilterTask + ":" + logFilterProject + ":" + logs.length;
     case "chat":
@@ -1237,6 +1315,7 @@ function renderTaskDetail(parent, t){
 
 /* ── Projects View ── */
 function renderProjects(root){
+  if(selectedProjectName) return renderProjectDetail(root);
   var projs = D.projects || [];
 
   var header = div("view-header");
@@ -1254,64 +1333,249 @@ function renderProjects(root){
   thead.appendChild(span("proj-dot-h",""));
   thead.appendChild(span("proj-row-name","NAME"));
   thead.appendChild(span("proj-row-branch","BRANCH"));
-  thead.appendChild(span("proj-row-commit","LAST COMMIT"));
-  thead.appendChild(span("proj-row-mod","MOD"));
+  thead.appendChild(span("proj-row-mod","TASKS"));
   thead.appendChild(span("proj-status","STATUS"));
   thead.appendChild(span("proj-row-actions",""));
   list.appendChild(thead);
 
   for(var i=0;i<projs.length;i++){
     (function(p, idx){
-      var row = div("proj-row status-" + (p.status_icon || "inactive"));
+      var rowCls = "proj-row status-" + (p.status_icon || "inactive");
+      if(p.autopilot_running) rowCls += " autopilot-active";
+      var row = div(rowCls);
       row.style.animationDelay = (idx * 0.02) + "s";
 
       row.appendChild(span("proj-dot",""));
-      row.appendChild(span("proj-row-name", p.name));
-      row.appendChild(span("proj-row-branch", p.branch || "—"));
-      row.appendChild(span("proj-row-commit", p.last_commit || "—"));
-      row.appendChild(span("proj-row-mod", p.modified > 0 ? p.modified+"" : ""));
+      var nameCell = span("proj-row-name proj-name-link", p.name);
+      if(p.autopilot_running){
+        var autoBadge = span("autopilot-badge","AUTO");
+        nameCell.appendChild(autoBadge);
+      }
+      row.appendChild(nameCell);
+      row.appendChild(span("proj-row-branch", p.branch || "\u2014"));
+      var tasksCell = span("proj-row-mod","");
+      if(p.task_total > 0){
+        tasksCell.textContent = p.task_done + "/" + p.task_total;
+        if(p.task_running > 0) tasksCell.textContent += " (" + p.task_running + " run)";
+      }
+      row.appendChild(tasksCell);
       row.appendChild(span("proj-status " + p.status_icon, statusLabel(p.status_icon)));
 
       var acts = div("proj-row-actions");
-      if(p.has_git){
-        var pullKey = "pull:" + p.path;
-        var pullBtn;
-        if(loadingActions[pullKey]){
-          pullBtn = el("button","btn btn-sm");
-          pullBtn.disabled = true;
-          var psp = document.createElement("span"); psp.className = "btn-spinner"; pullBtn.appendChild(psp);
-          pullBtn.appendChild(document.createTextNode(" PULLING\u2026"));
-        } else {
-          pullBtn = el("button","btn btn-sm",["PULL"]);
-          pullBtn.onclick = function(){ gitPull(p.path, this); };
-        }
-        acts.appendChild(pullBtn);
+      // Project autopilot button
+      if(p.autopilot_running){
+        var stopAutoBtn = el("button","btn btn-sm btn-danger",["STOP"]);
+        stopAutoBtn.onclick = function(e){
+          e.stopPropagation();
+          var restore = btnLoading(stopAutoBtn, "...");
+          api("POST","/api/projects/autopilot/stop",{project:p.name},function(){
+            if(restore) restore();
+            scheduleActivePoll();
+          });
+        };
+        acts.appendChild(stopAutoBtn);
       } else {
-        var initKey = "init:" + p.path;
-        var initBtn;
-        if(loadingActions[initKey]){
-          initBtn = el("button","btn btn-sm btn-success");
-          initBtn.disabled = true;
-          var isp = document.createElement("span"); isp.className = "btn-spinner"; initBtn.appendChild(isp);
-          initBtn.appendChild(document.createTextNode(" INIT\u2026"));
-        } else {
-          initBtn = el("button","btn btn-sm btn-success",["INIT"]);
-          initBtn.onclick = function(){ gitInitProject(p.path, p.name, this); };
-        }
-        acts.appendChild(initBtn);
+        var autoBtn = el("button","btn btn-sm btn-auto-off",["AUTO"]);
+        autoBtn.title = "Start project autopilot";
+        autoBtn.onclick = function(e){
+          e.stopPropagation();
+          var restore = btnLoading(autoBtn, "...");
+          api("POST","/api/projects/autopilot/start",{project:p.name},function(resp){
+            if(restore) restore();
+            if(resp.error) toast(resp.error, "error");
+            else toast("Autopilot started for " + p.name, "success");
+            scheduleActivePoll();
+          });
+        };
+        acts.appendChild(autoBtn);
       }
-      if(p.github_repo){
-        var prBtn = el("button","btn btn-sm",["PRS"]);
-        prBtn.onclick = function(){ showPRs(p.github_repo); };
-        acts.appendChild(prBtn);
-      }
-      acts.appendChild(iconBtn("plus", "Add task", function(){ addTaskForProject(p.name); }));
       row.appendChild(acts);
+      // Entire row is clickable for detail view
+      row.style.cursor = "pointer";
+      row.onclick = function(){ selectedProjectName = p.name; render(); };
 
       list.appendChild(row);
     })(projs[i], i);
   }
   root.appendChild(list);
+}
+
+/* ── Project Detail View ── */
+function renderProjectDetail(root){
+  var projs = D.projects || [];
+  var p = null;
+  for(var i=0;i<projs.length;i++){
+    if(projs[i].name === selectedProjectName){ p = projs[i]; break; }
+  }
+  if(!p){ selectedProjectName = ""; renderProjects(root); return; }
+
+  // Header
+  var header = div("view-header");
+  var backBtn = el("button","btn btn-sm");
+  backBtn.textContent = "\u2190 Back";
+  backBtn.onclick = function(){ selectedProjectName = ""; render(); };
+  header.appendChild(backBtn);
+  header.appendChild(span("view-title", p.name));
+  // Action buttons
+  var acts = div("pd-actions");
+  if(p.autopilot_running){
+    var stopBtn = el("button","btn btn-sm btn-danger",["STOP AUTO"]);
+    stopBtn.onclick = function(){
+      var restore = btnLoading(stopBtn, "STOPPING\u2026");
+      api("POST","/api/projects/autopilot/stop",{project:p.name},function(){ if(restore) restore(); scheduleActivePoll(); });
+    };
+    acts.appendChild(stopBtn);
+  } else {
+    var autoBtn = el("button","btn btn-sm btn-success",["AUTO"]);
+    autoBtn.onclick = function(){
+      var restore = btnLoading(autoBtn, "STARTING\u2026");
+      api("POST","/api/projects/autopilot/start",{project:p.name},function(resp){
+        if(restore) restore();
+        if(resp.error) toast(resp.error,"error");
+        else toast("Autopilot started","success");
+        scheduleActivePoll();
+      });
+    };
+    acts.appendChild(autoBtn);
+  }
+  if(p.has_git){
+    var pullBtn = el("button","btn btn-sm",["PULL"]);
+    pullBtn.onclick = function(){ gitPull(p.path, this); };
+    acts.appendChild(pullBtn);
+  }
+  if(p.github_repo){
+    var prBtn = el("button","btn btn-sm",["PRS"]);
+    prBtn.onclick = function(){ showPRs(p.github_repo); };
+    acts.appendChild(prBtn);
+  }
+  acts.appendChild(iconBtn("plus","Add task",function(){ addTaskForProject(p.name); }));
+  header.appendChild(acts);
+  root.appendChild(header);
+
+  // Status line
+  var statusLine = div("pd-status-line");
+  var statusDot = span("proj-dot pd-dot status-" + (p.status_icon||"inactive"),"");
+  statusLine.appendChild(statusDot);
+  statusLine.appendChild(span("pd-branch","branch: " + (p.branch || "\u2014")));
+  statusLine.appendChild(span("proj-status " + p.status_icon, statusLabel(p.status_icon)));
+  if(p.autopilot_running) statusLine.appendChild(span("autopilot-badge","AUTO"));
+  root.appendChild(statusLine);
+
+  // Git section
+  var gitSec = div("pd-section");
+  gitSec.appendChild(span("pd-section-title","Git"));
+  var gitGrid = div("pd-grid");
+  gitGrid.appendChild(mkPdRow("Last commit", p.last_commit || "\u2014"));
+  gitGrid.appendChild(mkPdRow("Modified files", p.modified > 0 ? p.modified+"" : "0"));
+  if(p.github_repo) gitGrid.appendChild(mkPdRow("GitHub", p.github_repo));
+  gitGrid.appendChild(mkPdRow("Path", p.path));
+  gitSec.appendChild(gitGrid);
+  root.appendChild(gitSec);
+
+  // Tasks section
+  var taskSec = div("pd-section");
+  taskSec.appendChild(span("pd-section-title","Tasks"));
+  var taskSummary = div("pd-task-summary");
+  taskSummary.appendChild(span("pd-task-count", p.task_total + " total"));
+  if(p.task_pending > 0) taskSummary.appendChild(span("pd-task-count pending", p.task_pending + " pending"));
+  if(p.task_running > 0) taskSummary.appendChild(span("pd-task-count running", p.task_running + " running"));
+  if(p.task_done > 0) taskSummary.appendChild(span("pd-task-count done", p.task_done + " done"));
+  if(p.task_blocked > 0) taskSummary.appendChild(span("pd-task-count blocked", p.task_blocked + " blocked"));
+  taskSec.appendChild(taskSummary);
+
+  // Progress bar
+  if(p.task_total > 0){
+    var pct = Math.round((p.task_done / p.task_total) * 100);
+    var pbar = div("pd-progress-bar");
+    var pfill = div("pd-progress-fill");
+    pfill.style.width = pct + "%";
+    pbar.appendChild(pfill);
+    taskSec.appendChild(pbar);
+    taskSec.appendChild(span("pd-progress-label", pct + "% complete"));
+  }
+
+  // Task groups
+  var allTasks = (D.tasks || []).filter(function(t){ return t.project === p.name; });
+  var groups = [
+    {label:"Running", state:"running", open:true},
+    {label:"Generating", state:"generating", open:true},
+    {label:"Pending", state:"pending", open:allTasks.length < 30},
+    {label:"Planned", state:"planned", open:true},
+    {label:"Done", state:"done", open:false},
+    {label:"Blocked", state:"blocked", open:true}
+  ];
+  for(var g=0;g<groups.length;g++){
+    var grp = groups[g];
+    var grpTasks = allTasks.filter(function(t){ return t.effective_state === grp.state; });
+    if(grpTasks.length === 0) continue;
+    var details = document.createElement("details");
+    details.className = "pd-task-group";
+    if(grp.open) details.open = true;
+    var summary = document.createElement("summary");
+    summary.className = "pd-task-group-summary";
+    summary.textContent = grp.label + " (" + grpTasks.length + ")";
+    details.appendChild(summary);
+    for(var ti=0;ti<grpTasks.length;ti++){
+      var t = grpTasks[ti];
+      var trow = div("pd-task-row");
+      trow.appendChild(span("pd-task-id","#" + t.id));
+      trow.appendChild(span("pd-task-desc", t.description.length > 80 ? t.description.substring(0,80)+"\u2026" : t.description));
+      trow.appendChild(span("task-state " + t.effective_state, stateLabel(t.effective_state)));
+      trow.appendChild(span("task-pri " + t.priority, (t.priority||"").toUpperCase()));
+      trow.onclick = (function(tid){ return function(){ selectedTaskID = tid; window.location.hash = "#queue"; render(); }; })(t.id);
+      trow.style.cursor = "pointer";
+      details.appendChild(trow);
+    }
+    taskSec.appendChild(details);
+  }
+  root.appendChild(taskSec);
+
+  // Config section
+  var cfgSec = div("pd-section");
+  cfgSec.appendChild(span("pd-section-title","Config"));
+  var cfgGrid = div("pd-grid");
+  var sk = (D.config && D.config.project_skeletons && D.config.project_skeletons[p.name]) || (D.config && D.config.skeleton) || {};
+  var skEntries = ["web_search","context7_lookup","build_verify","test","pre_commit","commit","push"];
+  var skLine = "";
+  for(var si=0;si<skEntries.length;si++){
+    var key = skEntries[si];
+    var val = sk[key] !== undefined ? sk[key] : false;
+    skLine += (val ? "\u2713 " : "\u2717 ") + key.replace(/_/g," ") + "   ";
+  }
+  cfgGrid.appendChild(mkPdRow("Skeleton", skLine.trim()));
+  if(D.config && D.config.spawn){
+    cfgGrid.appendChild(mkPdRow("Model", D.config.spawn.model || D.exec_model || "default"));
+    cfgGrid.appendChild(mkPdRow("Max turns", (D.config.spawn.max_turns || 25) + ""));
+  }
+  cfgSec.appendChild(cfgGrid);
+  root.appendChild(cfgSec);
+
+  // Recent logs
+  var logSec = div("pd-section");
+  logSec.appendChild(span("pd-section-title","Recent Activity"));
+  var logs = (D.log_entries || []).filter(function(l){ return l.project === p.name; });
+  var recentLogs = logs.slice(-10).reverse();
+  if(recentLogs.length === 0){
+    logSec.appendChild(span("pd-empty","No recent activity"));
+  } else {
+    for(var li=0;li<recentLogs.length;li++){
+      var le = recentLogs[li];
+      var logRow = div("pd-log-row");
+      var ts = le.time ? new Date(le.time).toLocaleTimeString() : "";
+      logRow.appendChild(span("pd-log-time", ts));
+      logRow.appendChild(span("pd-log-level log-"+le.level, le.level));
+      logRow.appendChild(span("pd-log-msg", le.message.length > 100 ? le.message.substring(0,100)+"\u2026" : le.message));
+      logSec.appendChild(logRow);
+    }
+  }
+  root.appendChild(logSec);
+}
+
+function mkPdRow(label, value){
+  var row = div("pd-row");
+  row.appendChild(span("pd-row-label", label));
+  row.appendChild(span("pd-row-value", value));
+  return row;
 }
 
 /* ── Logs View ── */
@@ -1914,6 +2178,18 @@ function statusLabel(s){
 function ucfirst(s){ return s.charAt(0).toUpperCase()+s.slice(1); }
 
 /* ── Chat View ── */
+function chatSetSanitizedHtml(elem, md) {
+  // Uses marked.js + DOMPurify for safe HTML rendering
+  elem.innerHTML = renderMarkdown(md); // eslint-disable-line -- sanitized by DOMPurify
+  // Post-process: style collapsible details/summary
+  var details = elem.querySelectorAll("details");
+  for(var i=0;i<details.length;i++){
+    details[i].classList.add("chat-phase-details");
+    var sum = details[i].querySelector("summary");
+    if(sum) sum.classList.add("chat-phase-summary");
+  }
+}
+
 function renderChat(container){
   var wrap = el("div","chat-container");
 
@@ -1940,6 +2216,8 @@ function renderChat(container){
   clearBtn.onclick = function(){
     api("POST","/api/chat/clear",{},function(){
       chatMessages = [];
+      chatInitSteps = [];
+      chatToolCalls = [];
       chatCounter++;
       render();
     });
@@ -1947,22 +2225,122 @@ function renderChat(container){
   topBar.appendChild(clearBtn);
   wrap.appendChild(topBar);
 
-  // Messages area
+  // Messages wrapper (relative for scroll-to-bottom btn)
+  var msgsWrap = el("div","chat-messages-wrap");
+
   var msgArea = el("div","chat-messages");
   msgArea.id = "chat-messages";
-  if(chatMessages.length === 0){
-    var hint = el("div","chat-hint");
-    hint.textContent = "Start a conversation. Select a project and type a message.";
-    msgArea.appendChild(hint);
+
+  if(chatMessages.length === 0 && !chatLoading){
+    // Empty state with suggestion chips
+    var emptyState = el("div","chat-empty-state");
+    var emptyIcon = document.createElementNS("http://www.w3.org/2000/svg","svg");
+    emptyIcon.setAttribute("viewBox","0 0 24 24");
+    emptyIcon.setAttribute("width","48");
+    emptyIcon.setAttribute("height","48");
+    emptyIcon.setAttribute("fill","none");
+    emptyIcon.setAttribute("stroke","currentColor");
+    emptyIcon.setAttribute("stroke-width","1.5");
+    emptyIcon.setAttribute("class","chat-empty-icon");
+    var iconPath = document.createElementNS("http://www.w3.org/2000/svg","path");
+    iconPath.setAttribute("d","M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z");
+    emptyIcon.appendChild(iconPath);
+    emptyState.appendChild(emptyIcon);
+    var emptyText = el("div","chat-empty-text");
+    emptyText.textContent = "Start a conversation with the AI assistant";
+    emptyState.appendChild(emptyText);
+    var chips = el("div","chat-suggestions");
+    var suggestions = [
+      "Create a new project",
+      "Break down a task into subtasks",
+      "Research a technology stack"
+    ];
+    for(var si=0;si<suggestions.length;si++){
+      var chip = el("div","chat-chip");
+      chip.textContent = suggestions[si];
+      chip.onclick = (function(text){
+        return function(){
+          var ta = document.getElementById("chat-textarea");
+          if(ta){ ta.value = text; ta.focus(); }
+        };
+      })(suggestions[si]);
+      chips.appendChild(chip);
+    }
+    emptyState.appendChild(chips);
+    msgArea.appendChild(emptyState);
   } else {
     for(var i=0;i<chatMessages.length;i++){
       var m = chatMessages[i];
-      var bubble = el("div","chat-bubble " + (m.role === "user" ? "user" : "assistant"));
-      bubble.textContent = m.content;
-      msgArea.appendChild(bubble);
+      if(m.role === "user"){
+        var userBubble = el("div","chat-bubble user");
+        userBubble.textContent = m.content;
+        msgArea.appendChild(userBubble);
+      } else {
+        var bwrap = el("div","chat-bubble-wrap");
+        bwrap.style.alignSelf = "flex-start";
+        bwrap.style.maxWidth = "95%";
+        var aBubble = el("div","chat-bubble assistant");
+        aBubble.style.maxWidth = "100%";
+
+        // Typing indicator for empty loading bubble
+        if(chatLoading && m.content === "" && i === chatMessages.length - 1){
+          var typing = el("div","chat-typing");
+          for(var td=0;td<3;td++){
+            typing.appendChild(el("div","chat-typing-dot"));
+          }
+          aBubble.appendChild(typing);
+        } else {
+          var textDiv = el("div","chat-text-content");
+          chatSetSanitizedHtml(textDiv, m.content);
+          aBubble.appendChild(textDiv);
+        }
+        // Persistent processing bar — visible until done event
+        if(chatLoading && i === chatMessages.length - 1){
+          var procBar = el("div","chat-processing-bar");
+          var procSpinner = document.createElement("span");
+          procSpinner.className = "spinner-sm";
+          procBar.appendChild(procSpinner);
+          var procText = document.createElement("span");
+          procText.textContent = " Processing\u2026";
+          procBar.appendChild(procText);
+          aBubble.appendChild(procBar);
+        }
+        bwrap.appendChild(aBubble);
+
+        // Copy button (only for non-empty, non-loading)
+        if(m.content && !(chatLoading && i === chatMessages.length - 1)){
+          var actions = el("div","chat-bubble-actions");
+          var copyBtn = el("button","chat-copy-btn");
+          copyBtn.textContent = "Copy";
+          copyBtn.onclick = (function(content){
+            return function(){
+              navigator.clipboard.writeText(content).then(function(){
+                toast("Copied to clipboard","success");
+              });
+            };
+          })(m.content);
+          actions.appendChild(copyBtn);
+          bwrap.appendChild(actions);
+        }
+        msgArea.appendChild(bwrap);
+      }
     }
   }
-  wrap.appendChild(msgArea);
+  msgsWrap.appendChild(msgArea);
+
+  // Scroll-to-bottom button
+  var scrollBtn = el("div","chat-scroll-btn");
+  scrollBtn.textContent = "\u2193";
+  scrollBtn.onclick = function(){ msgArea.scrollTo({ top: msgArea.scrollHeight, behavior: "smooth" }); };
+  msgsWrap.appendChild(scrollBtn);
+
+  msgArea.onscroll = function(){
+    var atBottom = msgArea.scrollHeight - msgArea.scrollTop - msgArea.clientHeight < 100;
+    if(atBottom) scrollBtn.classList.remove("visible");
+    else scrollBtn.classList.add("visible");
+  };
+
+  wrap.appendChild(msgsWrap);
 
   // Input bar
   var inputBar = el("div","chat-input-bar");
@@ -1988,6 +2366,9 @@ function renderChat(container){
 
   container.appendChild(wrap);
 
+  // Auto-scroll to bottom after render
+  setTimeout(function(){ msgArea.scrollTop = msgArea.scrollHeight; }, 0);
+
   // Load history on first render
   if(chatMessages.length === 0 && !chatLoading){
     api("GET","/api/chat/history",null,function(d){
@@ -2007,6 +2388,8 @@ function sendChatMessage(){
   if(!msg || chatLoading) return;
 
   chatLoading = true;
+  chatToolCalls = [];
+  chatTurnStartMs = Date.now();
   chatMessages.push({role:"user", content:msg, project:chatProject});
   chatMessages.push({role:"assistant", content:"", project:chatProject});
   chatCounter++;
@@ -2037,29 +2420,128 @@ function sendChatMessage(){
           if(line.indexOf("data: ") === 0){
             try{
               var evt = JSON.parse(line.substring(6));
+              if(evt.tool_use){
+                // Mark previous tool as done if pending
+                if(chatToolCalls.length>0 && !chatToolCalls[chatToolCalls.length-1].done){
+                  chatToolCalls[chatToolCalls.length-1].done=true;
+                }
+                chatToolCalls.push({name:evt.tool_use,done:false});
+                var msgDivT=document.getElementById("chat-messages");
+                if(msgDivT){
+                  var bubblesT=msgDivT.querySelectorAll(".chat-bubble.assistant");
+                  if(bubblesT.length>0){
+                    var lastBT=bubblesT[bubblesT.length-1];
+                    var typingT=lastBT.querySelector(".chat-typing");
+                    if(typingT) lastBT.removeChild(typingT);
+                    chatUpdateToolActivity(lastBT);
+                    msgDivT.scrollTop=msgDivT.scrollHeight;
+                  }
+                }
+              }
+              if(evt.tool_done){
+                if(chatToolCalls.length>0 && !chatToolCalls[chatToolCalls.length-1].done){
+                  chatToolCalls[chatToolCalls.length-1].done=true;
+                }
+                var msgDivTD=document.getElementById("chat-messages");
+                if(msgDivTD){
+                  var bubblesTD=msgDivTD.querySelectorAll(".chat-bubble.assistant");
+                  if(bubblesTD.length>0) chatUpdateToolActivity(bubblesTD[bubblesTD.length-1]);
+                }
+              }
               if(evt.token){
                 chatMessages[chatMessages.length-1].content += evt.token;
                 var msgDiv = document.getElementById("chat-messages");
                 if(msgDiv){
                   var bubbles = msgDiv.querySelectorAll(".chat-bubble.assistant");
                   if(bubbles.length > 0){
-                    bubbles[bubbles.length-1].textContent = chatMessages[chatMessages.length-1].content;
+                    var lastB = bubbles[bubbles.length-1];
+                    // Remove typing indicator on first token
+                    var typingEl = lastB.querySelector(".chat-typing");
+                    if(typingEl) lastB.removeChild(typingEl);
+                    // Render into text-content div, not the whole bubble
+                    var textDiv = lastB.querySelector(".chat-text-content");
+                    if(!textDiv){
+                      textDiv = document.createElement("div");
+                      textDiv.className = "chat-text-content";
+                      lastB.appendChild(textDiv);
+                    }
+                    chatSetSanitizedHtml(textDiv, chatMessages[chatMessages.length-1].content);
                     msgDiv.scrollTop = msgDiv.scrollHeight;
                   }
+                }
+              }
+              if(evt.init_step){
+                var step = evt.init_step;
+                chatInitSteps.push(step);
+                var msgDiv2 = document.getElementById("chat-messages");
+                if(msgDiv2){
+                  var bubbles2 = msgDiv2.querySelectorAll(".chat-bubble.assistant");
+                  if(bubbles2.length > 0){
+                    var lastB2 = bubbles2[bubbles2.length-1];
+                    // Remove typing indicator if still showing
+                    var typingEl2 = lastB2.querySelector(".chat-typing");
+                    if(typingEl2) lastB2.removeChild(typingEl2);
+                    // Find or create init steps container
+                    var stepsDiv = lastB2.querySelector(".chat-init-steps");
+                    if(!stepsDiv){
+                      stepsDiv = document.createElement("div");
+                      stepsDiv.className = "chat-init-steps";
+                      lastB2.appendChild(stepsDiv);
+                    }
+                    var stepEl = document.createElement("div");
+                    stepEl.className = "chat-init-step " + (step.status === "ok" ? "ok" : "error");
+                    var iconSpan = document.createElement("span");
+                    iconSpan.className = "step-icon";
+                    iconSpan.textContent = step.status === "ok" ? "\u2713" : "\u2717";
+                    stepEl.appendChild(iconSpan);
+                    var nameSpan = document.createElement("span");
+                    nameSpan.className = "step-name";
+                    nameSpan.textContent = step.name + (step.message && step.status !== "ok" ? ": " + step.message : "");
+                    stepEl.appendChild(nameSpan);
+                    stepsDiv.appendChild(stepEl);
+                    msgDiv2.scrollTop = msgDiv2.scrollHeight;
+                  }
+                }
+              }
+              if(evt.project_init){
+                if(evt.status === "success"){
+                  chatProject = evt.project_init;
+                  toast("Project " + evt.project_init + " initialized!", "success");
+                  fetchData();
+                } else {
+                  toast("Project init failed: " + (evt.error || "unknown"), "error");
                 }
               }
               if(evt.tasks_created){
                 chatCreatedTasks = evt.tasks_created;
               }
+              if(evt.error && !evt.project_init){
+                toast(evt.error, "error");
+              }
               if(evt.done){
                 if(evt.result) chatMessages[chatMessages.length-1].content = evt.result;
                 // Strip directives from stored/displayed content
                 var cleanContent = chatMessages[chatMessages.length-1].content
-                  .replace(/\[TASK_CREATE\].*?\[\/TASK_CREATE\]/g, "").trim();
+                  .replace(/\[TASK_CREATE\].*?\[\/TASK_CREATE\]/g, "")
+                  .replace(/\[PROJECT_INIT\].*?\[\/PROJECT_INIT\]/g, "").trim();
                 chatMessages[chatMessages.length-1].content = cleanContent;
+                // Mark all pending tools as done
+                for(var tc=0;tc<chatToolCalls.length;tc++) chatToolCalls[tc].done=true;
+                var turnMeta = {
+                  num_turns: evt.num_turns||0,
+                  cost_usd: evt.cost_usd||0,
+                  duration_ms: Date.now()-chatTurnStartMs
+                };
+                chatInitSteps = [];
                 chatLoading = false;
                 chatCounter++;
                 render();
+                // Append meta footer to last bubble
+                var mdMeta = document.getElementById("chat-messages");
+                if(mdMeta){
+                  var bbsMeta = mdMeta.querySelectorAll(".chat-bubble.assistant");
+                  if(bbsMeta.length>0) chatAppendMetaFooter(bbsMeta[bbsMeta.length-1], turnMeta);
+                }
                 // Append task cards to the last assistant bubble
                 if(chatCreatedTasks.length > 0){
                   var md = document.getElementById("chat-messages");
@@ -2568,10 +3050,12 @@ function renderConfigAutopilot(root){
     grid.appendChild(effortRow);
 
     grid.appendChild(configInput("spawn_max_turns","Max Turns", String(c.spawn_max_turns || 25)));
+    grid.appendChild(configInput("max_concurrent","Max Concurrent Autopilots", String(c.max_concurrent || 3)));
   } else {
     grid.appendChild(configReadRow("Model", c.spawn_model || "(inherit)"));
     grid.appendChild(configReadRow("Effort", c.spawn_effort || "(inherit)"));
     grid.appendChild(configReadRow("Max Turns", String(c.spawn_max_turns || 25)));
+    grid.appendChild(configReadRow("Max Concurrent", String(c.max_concurrent || 3)));
   }
   sec.appendChild(grid);
   if(editing){
@@ -3124,6 +3608,7 @@ function saveAutopilotConfig(){
   c.spawn_model = document.getElementById("cfg-spawn_model").value;
   c.spawn_effort = document.getElementById("cfg-spawn_effort").value;
   c.spawn_max_turns = parseInt(document.getElementById("cfg-spawn_max_turns").value) || 25;
+  c.max_concurrent = parseInt(document.getElementById("cfg-max_concurrent").value) || 3;
   var saveBtn = document.querySelector(".config-actions .btn-primary");
   var restore = btnLoading(saveBtn, "SAVING\u2026");
   api("POST","/api/config/save",c,function(){

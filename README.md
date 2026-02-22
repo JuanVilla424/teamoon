@@ -53,6 +53,41 @@ make install
 
 Configuration is automatically created at `~/.config/teamoon/config.json` on first run. See [Configuration](#-configuration) for available options.
 
+### Claude Code Skills (Recommended)
+
+Install 21 curated agent skills for enhanced autopilot capabilities (superpowers + anthropic + vercel):
+
+```bash
+# Superpowers (14 skills) — planning, TDD, debugging, code review, parallel agents
+npx skills add obra/superpowers@brainstorming -g -y
+npx skills add obra/superpowers@systematic-debugging -g -y
+npx skills add obra/superpowers@writing-plans -g -y
+npx skills add obra/superpowers@test-driven-development -g -y
+npx skills add obra/superpowers@executing-plans -g -y
+npx skills add obra/superpowers@requesting-code-review -g -y
+npx skills add obra/superpowers@using-superpowers -g -y
+npx skills add obra/superpowers@subagent-driven-development -g -y
+npx skills add obra/superpowers@verification-before-completion -g -y
+npx skills add obra/superpowers@receiving-code-review -g -y
+npx skills add obra/superpowers@using-git-worktrees -g -y
+npx skills add obra/superpowers@writing-skills -g -y
+npx skills add obra/superpowers@dispatching-parallel-agents -g -y
+npx skills add obra/superpowers@finishing-a-development-branch -g -y
+
+# Anthropic (2 skills) — frontend design, skill creation
+npx skills add anthropics/skills@frontend-design -g -y
+npx skills add anthropics/skills@skill-creator -g -y
+
+# Vercel (5 skills) — React, web design, composition, React Native, browser
+npx skills add vercel-labs/agent-skills@vercel-react-best-practices -g -y
+npx skills add vercel-labs/agent-skills@web-design-guidelines -g -y
+npx skills add vercel-labs/agent-skills@vercel-composition-patterns -g -y
+npx skills add vercel-labs/agent-skills@vercel-react-native-skills -g -y
+npx skills add vercel-labs/agent-browser@agent-browser -g -y
+```
+
+See [INSTALL.md](INSTALL.md) for details on each skill pack.
+
 ### Pre-Commit Hooks
 
 ```bash
