@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Python
         id: setup_python
         uses: actions/setup-python@v5
@@ -140,7 +141,6 @@ jobs:
           ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          git config --local --unset-all http.https://github.com/.extraheader || true
           VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['tool']['poetry']['version'])")
           TAG_NAME="v${VERSION}"
           git tag "$TAG_NAME"
