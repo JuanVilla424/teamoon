@@ -2,14 +2,37 @@ package onboarding
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/skills"
 )
+
+// ProgressFunc is the callback type for streaming step progress via SSE.
+type ProgressFunc func(map[string]any)
+
+// ToolResult represents a single tool check for the prerequisites step.
+type ToolResult struct {
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Required bool   `json:"required"`
+	Found    bool   `json:"found"`
+}
 
 type stepStatus struct {
 	name    string
 	done    bool
 	warning string
+}
+
+// WebConfig holds the config values submitted by the onboarding form.
+type WebConfig struct {
+	ProjectsDir   string `json:"projects_dir"`
+	WebPort       int    `json:"web_port"`
+	WebPassword   string `json:"web_password"`
+	MaxConcurrent int    `json:"max_concurrent"`
 }
 
 // Run executes the full interactive onboarding wizard.
@@ -84,4 +107,135 @@ func printSummary(steps []stepStatus) {
 	}
 	fmt.Println("\nRun `teamoon` to open the TUI dashboard.")
 	fmt.Println("Run `teamoon serve` to start the web dashboard.")
+}
+
+// WebCheckPrereqs checks prerequisites and returns structured results.
+func WebCheckPrereqs() ([]ToolResult, error) {
+	var results []ToolResult
+	var missing []string
+	for _, tool := range tools {
+		version := getVersion(tool.name)
+		found := version != ""
+		if !found && tool.required {
+			missing = append(missing, tool.name)
+		}
+		results = append(results, ToolResult{
+			Name:     tool.name,
+			Version:  version,
+			Required: tool.required,
+			Found:    found,
+		})
+	}
+	if len(missing) > 0 {
+		return results, fmt.Errorf("missing required tools: %s", strings.Join(missing, ", "))
+	}
+	return results, nil
+}
+
+// WebSaveConfig saves config from web-submitted values (no stdin interaction).
+func WebSaveConfig(wc WebConfig) error {
+	return saveConfigWeb(wc)
+}
+
+// WebInstallSkills installs Claude Code skills.
+func WebInstallSkills() error {
+	return skills.Install()
+}
+
+// WebInstallBMAD installs BMAD commands (force, no confirmation prompt).
+func WebInstallBMAD() error {
+	return installBMADWeb()
+}
+
+// WebInstallHooks installs global hooks and merges settings.json.
+func WebInstallHooks() error {
+	return installGlobalHooksQuiet()
+}
+
+// WebInstallMCP installs default MCP servers.
+func WebInstallMCP() error {
+	return installMCPServersQuiet()
+}
+
+// StreamPrereqs checks prerequisites and streams each tool result via progress callback.
+func StreamPrereqs(progress ProgressFunc) error {
+	var missing []string
+	for _, tool := range tools {
+		version := getVersion(tool.name)
+		found := version != ""
+		if !found && tool.required {
+			missing = append(missing, tool.name)
+		}
+		progress(map[string]any{
+			"type": "tool", "name": tool.name,
+			"version": version, "required": tool.required, "found": found,
+		})
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required tools: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// StreamSkills sets up the teamoon home symlink and installs skills with per-skill progress.
+func StreamSkills(progress ProgressFunc) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	tmSkillsDir := filepath.Join(teamoonHome(), "skills")
+	if err := os.MkdirAll(tmSkillsDir, 0755); err != nil {
+		return fmt.Errorf("create skills dir: %w", err)
+	}
+
+	// Migrate existing skills dir to teamoon home and create symlink
+	agentsSkillsDir := filepath.Join(home, ".agents", "skills")
+	info, lErr := os.Lstat(agentsSkillsDir)
+	if lErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		entries, _ := os.ReadDir(agentsSkillsDir)
+		for _, e := range entries {
+			src := filepath.Join(agentsSkillsDir, e.Name())
+			dst := filepath.Join(tmSkillsDir, e.Name())
+			if _, err := os.Stat(dst); err != nil {
+				os.Rename(src, dst)
+			}
+		}
+		os.RemoveAll(agentsSkillsDir)
+	}
+
+	if err := ensureSymlink(tmSkillsDir, agentsSkillsDir); err != nil {
+		return fmt.Errorf("symlink skills: %w", err)
+	}
+	progress(map[string]any{"type": "symlink", "name": "skills", "status": "done"})
+
+	return skills.InstallWithProgress(func(name, status string) {
+		progress(map[string]any{"type": "skill", "name": name, "status": status})
+	})
+}
+
+// StreamBMAD installs BMAD commands to teamoon home with per-file progress.
+func StreamBMAD(progress ProgressFunc) error {
+	return installBMADStream(progress)
+}
+
+// StreamHooks installs security hooks to teamoon home with per-hook progress.
+func StreamHooks(progress ProgressFunc) error {
+	return installHooksStream(progress)
+}
+
+// StreamMCP installs MCP servers with per-server progress.
+func StreamMCP(progress ProgressFunc) error {
+	existing := config.ReadGlobalMCPServers()
+	for _, srv := range defaultMCPServers {
+		if _, ok := existing[srv.name]; ok {
+			progress(map[string]any{"type": "server", "name": srv.name, "status": "skipped"})
+			continue
+		}
+		if err := config.InstallMCPToGlobal(srv.name, srv.command, srv.args, nil); err != nil {
+			return fmt.Errorf("installing %s: %w", srv.name, err)
+		}
+		progress(map[string]any{"type": "server", "name": srv.name, "status": "done"})
+	}
+	return nil
 }

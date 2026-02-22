@@ -68,3 +68,25 @@ func expandHome(path, home string) string {
 	}
 	return path
 }
+
+// saveConfigWeb saves config from web-submitted values (non-interactive).
+func saveConfigWeb(wc WebConfig) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	cfg := config.DefaultConfig()
+	if wc.ProjectsDir != "" {
+		cfg.ProjectsDir = expandHome(wc.ProjectsDir, home)
+	}
+	if wc.WebPort > 0 && wc.WebPort < 65536 {
+		cfg.WebPort = wc.WebPort
+	}
+	cfg.WebPassword = wc.WebPassword
+	if wc.MaxConcurrent > 0 {
+		cfg.MaxConcurrent = wc.MaxConcurrent
+	}
+
+	return config.Save(cfg)
+}
