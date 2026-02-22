@@ -1,7 +1,7 @@
 # 🌙 teamoon
 
 [![Go](https://img.shields.io/badge/Go-1.24%2B-00ADD8.svg)](https://go.dev/)
-[![Version](https://img.shields.io/badge/Version-1.0.4-blue.svg)](VERSIONING.md)
+[![Version](https://img.shields.io/github/v/tag/JuanVilla424/teamoon?label=Version&color=blue)](VERSIONING.md)
 [![Build](https://img.shields.io/github/actions/workflow/status/JuanVilla424/teamoon/go.yml?branch=dev&label=Build)](https://github.com/JuanVilla424/teamoon/actions)
 [![Status](https://img.shields.io/badge/Status-Active-green.svg)]()
 [![License](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)
