@@ -13,7 +13,7 @@ func main() {
 		os.Exit(1)
 	}
 	dir := os.Args[1]
-	if err := projectinit.InstallHooks(dir); err != nil {
+	if err := projectinit.InstallHooks(dir, "", ""); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
