@@ -119,6 +119,10 @@ func (r *RingBuffer) Add(e LogEntry) {
 	}
 }
 
+func (r *RingBuffer) File() *os.File {
+	return r.file
+}
+
 func (r *RingBuffer) Close() {
 	if r.file != nil {
 		r.file.Close()

@@ -71,7 +71,26 @@ func BuildSpawnArgs(cfg config.Config, prompt string, addDirs []string) ([]strin
 		"--verbose",
 		"--max-turns", strconv.Itoa(maxTurns),
 		"--no-session-persistence",
-		"--dangerously-skip-permissions",
+	}
+	if os.Getuid() != 0 {
+		args = append(args, "--dangerously-skip-permissions")
+	} else {
+		// Root cannot use --dangerously-skip-permissions; pre-allow tools instead
+		allowed := []string{
+			"Bash", "Read", "Write", "Edit", "Glob", "Grep",
+			"WebSearch", "WebFetch", "TodoWrite", "Task",
+			"NotebookEdit", "NotebookRead",
+		}
+		// Include MCP tools from config
+		if cfg.MCPServers != nil {
+			for name, s := range cfg.MCPServers {
+				if s.Enabled {
+					allowed = append(allowed, "mcp__"+name)
+				}
+			}
+		}
+		args = append(args, "--allowedTools")
+		args = append(args, allowed...)
 	}
 	if cfg.Spawn.Model != "" {
 		args = append(args, "--model", cfg.Spawn.Model)

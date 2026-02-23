@@ -3275,7 +3275,7 @@ function renderSetupConfig(content){
     var wc = {
       projects_dir: document.getElementById("setup-projects-dir").value || "~/Projects",
       web_port: parseInt(document.getElementById("setup-web-port").value) || 7777,
-      web_host: document.getElementById("setup-web-host").value || "localhost",
+      web_host: document.getElementById("setup-web-host").value,
       web_password: document.getElementById("setup-web-password").value,
       max_concurrent: parseInt(document.getElementById("setup-max-concurrent").value) || 3
     };

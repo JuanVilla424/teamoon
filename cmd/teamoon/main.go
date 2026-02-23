@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -45,6 +46,9 @@ func main() {
 
 			engineMgr := engine.NewManager()
 			logBuf := logs.NewRingBuffer(100)
+			if f := logBuf.File(); f != nil {
+				log.SetOutput(f)
+			}
 
 			m := dashboard.NewModel(cfg, engineMgr, logBuf)
 			p := tea.NewProgram(m, tea.WithAltScreen())
@@ -129,6 +133,9 @@ func main() {
 
 			engineMgr := engine.NewManager()
 			logBuf := logs.NewRingBuffer(100)
+			if f := logBuf.File(); f != nil {
+				log.SetOutput(f)
+			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
@@ -136,9 +143,9 @@ func main() {
 			srv := web.NewServer(cfg, engineMgr, logBuf)
 			go srv.Start(ctx)
 
-			fmt.Printf("teamoon serve v%s #%s on :%d\n", version, buildNum, cfg.WebPort)
+			log.Printf("[serve] v%s #%s on :%d", version, buildNum, cfg.WebPort)
 			<-ctx.Done()
-			fmt.Println("\nshutting down")
+			log.Println("[serve] shutting down")
 			return nil
 		},
 	}

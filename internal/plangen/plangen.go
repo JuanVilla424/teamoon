@@ -1,6 +1,7 @@
 package plangen
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -172,10 +173,12 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config) (pl
 	}
 	cmd := exec.Command("claude", args...)
 	cmd.Env = env
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	out, err := cmd.Output()
 	if err != nil {
-		return plan.Plan{}, fmt.Errorf("plan generation failed: %w", err)
+		return plan.Plan{}, fmt.Errorf("plan generation failed: %w — stderr: %s", err, stderrBuf.String())
 	}
 
 	var result struct {
