@@ -108,7 +108,7 @@ if [ "$DISTRO_FAMILY" = "debian" ]; then
         tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
         libgdbm-dev libnss3-dev libgdbm-compat-dev uuid-dev
         jq htop tree tmux
-        shellcheck yamllint pre-commit
+        shellcheck
         ca-certificates gnupg lsb-release apt-transport-https
         software-properties-common pkg-config
     )
@@ -129,6 +129,14 @@ if [ "$DISTRO_FAMILY" = "debian" ]; then
         ok "system packages installed"
     fi
 else
+    # Enable EPEL + CRB repos (needed for htop, ShellCheck, etc.)
+    info "enabling EPEL + CRB repositories"
+    sudo dnf install -y -q epel-release 2>/dev/null || \
+        sudo dnf install -y -q https://dl.fedoraproject.org/pub/epel/epel-release-latest-$(rpm -E %rhel).noarch.rpm 2>/dev/null || true
+    # CRB = "crb" on RHEL 9+, "powertools" on RHEL 8
+    sudo dnf config-manager --set-enabled crb 2>/dev/null || \
+        sudo dnf config-manager --set-enabled powertools 2>/dev/null || true
+
     PKGS=(
         git curl wget zip unzip
         gcc gcc-c++ make cmake
@@ -137,9 +145,10 @@ else
         tk-devel libxml2-devel libffi-devel
         gdbm-devel nss-devel libuuid-devel
         jq htop tree tmux
-        ShellCheck yamllint
-        ca-certificates gnupg2 redhat-lsb-core
+        ShellCheck
+        ca-certificates gnupg2
         dnf-plugins-core pkgconf-pkg-config
+        python3-pip
     )
 
     MISSING=()
@@ -153,9 +162,10 @@ else
         ok "all system packages already installed"
     else
         info "installing ${#MISSING[@]} packages..."
-        sudo dnf install -y -q "${MISSING[@]}"
+        sudo dnf install -y "${MISSING[@]}"
         ok "system packages installed"
     fi
+
 fi
 
 if ! has yq; then
@@ -315,15 +325,6 @@ else
         ok "python 3.11 installed"
     else
         warn "skipped"
-    fi
-fi
-
-# RHEL: install pre-commit via pip if not available
-if [ "$DISTRO_FAMILY" = "rhel" ] && ! has pre-commit; then
-    if has pip3; then
-        info "installing pre-commit via pip3 (not in RHEL repos)"
-        pip3 install --user pre-commit 2>/dev/null || true
-        ok "pre-commit installed"
     fi
 fi
 

@@ -182,8 +182,8 @@ func StreamPrereqsInstall(progress ProgressFunc) error {
 // ── Check functions ─────────────────────────────────────
 
 var keySystemPackagesByDistro = map[distroFamily][]string{
-	distroDebian: {"build-essential", "libssl-dev", "jq", "shellcheck", "yamllint"},
-	distroRHEL:   {"gcc", "openssl-devel", "jq", "ShellCheck", "yamllint"},
+	distroDebian: {"build-essential", "libssl-dev", "jq", "shellcheck"},
+	distroRHEL:   {"gcc", "openssl-devel", "jq", "ShellCheck"},
 }
 
 func checkSystemPackages() (string, bool) {
@@ -334,7 +334,7 @@ var allSystemPackagesByDistro = map[distroFamily][]string{
 		"tk-dev", "libxml2-dev", "libxmlsec1-dev", "libffi-dev", "liblzma-dev",
 		"libgdbm-dev", "libnss3-dev", "libgdbm-compat-dev", "uuid-dev",
 		"jq", "htop", "tree", "tmux",
-		"shellcheck", "yamllint", "pre-commit",
+		"shellcheck",
 		"ca-certificates", "gnupg", "lsb-release", "apt-transport-https",
 		"software-properties-common", "pkg-config",
 	},
@@ -346,9 +346,10 @@ var allSystemPackagesByDistro = map[distroFamily][]string{
 		"tk-devel", "libxml2-devel", "libffi-devel",
 		"gdbm-devel", "nss-devel", "libuuid-devel",
 		"jq", "htop", "tree", "tmux",
-		"ShellCheck", "yamllint",
-		"ca-certificates", "gnupg2", "redhat-lsb-core",
+		"ShellCheck",
+		"ca-certificates", "gnupg2",
 		"dnf-plugins-core", "pkgconf-pkg-config",
+		"python3-pip",
 	},
 }
 
@@ -381,9 +382,16 @@ func installSystemPackages(progress ProgressFunc) error {
 		"type": "detail", "message": fmt.Sprintf("Installing %d packages...", len(missing)),
 	})
 
+	// Enable EPEL + CRB repos on RHEL before installing
+	if currentDistro == distroRHEL {
+		exec.Command("sudo", "dnf", "install", "-y", "-q", "epel-release").Run()
+		exec.Command("sudo", "dnf", "config-manager", "--set-enabled", "crb").Run()
+		exec.Command("sudo", "dnf", "config-manager", "--set-enabled", "powertools").Run()
+	}
+
 	var cmd *exec.Cmd
 	if currentDistro == distroRHEL {
-		args := append([]string{"dnf", "install", "-y", "-q"}, missing...)
+		args := append([]string{"dnf", "install", "-y"}, missing...)
 		cmd = exec.Command("sudo", args...)
 	} else {
 		args := append([]string{"apt-get", "install", "-y", "-qq"}, missing...)
