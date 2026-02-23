@@ -2044,26 +2044,17 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		done("build", "Build successful")
 
-		// 3. stop service, install binary, restart
-		step("install", "Stopping service and installing new binary...")
-		exec.Command("sudo", "systemctl", "stop", "teamoon").Run()
+		// 3. install binary via background script (stop, cp, start)
+		// Must run externally because systemctl stop kills this process
+		step("install", "Installing new binary...")
 		newBin := filepath.Join(srcDir, "teamoon")
-		cpOut, cpErr := exec.Command("sudo", "cp", newBin, "/usr/local/bin/teamoon").CombinedOutput()
-		if cpErr != nil {
-			progress(map[string]any{"type": "step", "name": "install", "message": string(cpOut), "status": "error"})
-			exec.Command("sudo", "systemctl", "start", "teamoon").Run()
-			return fmt.Errorf("install failed: %s", string(cpOut))
-		}
-		exec.Command("sudo", "chmod", "755", "/usr/local/bin/teamoon").Run()
-		done("install", "Binary installed")
-
-		// 4. restart
 		progress(map[string]any{"type": "step", "name": "restart", "message": "Restarting service...", "status": "restarting"})
 
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			exec.Command("sudo", "systemctl", "start", "teamoon").Run()
-		}()
+		script := fmt.Sprintf(
+			"sleep 1 && sudo systemctl stop teamoon && sudo cp %s /usr/local/bin/teamoon && sudo chmod 755 /usr/local/bin/teamoon && sudo systemctl start teamoon",
+			newBin,
+		)
+		exec.Command("bash", "-c", "nohup bash -c '"+script+"' &>/dev/null &").Start()
 
 		return nil
 	})
