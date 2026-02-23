@@ -1916,7 +1916,9 @@ func (s *Server) handleOnboardingMCP(w http.ResponseWriter, r *http.Request) {
 
 func resolveSourceDir(configured string) string {
 	if configured != "" {
-		return configured
+		if _, err := os.Stat(filepath.Join(configured, ".git")); err == nil {
+			return configured
+		}
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "src", "teamoon")
