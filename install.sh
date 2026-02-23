@@ -136,8 +136,16 @@ else
     sudo dnf config-manager --set-enabled crb 2>/dev/null || \
         sudo dnf config-manager --set-enabled powertools 2>/dev/null || true
 
+    # RHEL 9 ships curl-minimal; installing curl conflicts. Use curl-minimal on 9+.
+    RHEL_VER=$(rpm -E %rhel 2>/dev/null || echo 8)
+    if [ "$RHEL_VER" -ge 9 ] 2>/dev/null; then
+        _CURL_PKG="curl-minimal"
+    else
+        _CURL_PKG="curl"
+    fi
+
     PKGS=(
-        git curl wget zip unzip
+        git "$_CURL_PKG" wget zip unzip
         gcc gcc-c++ make cmake
         openssl-devel zlib-devel bzip2-devel readline-devel
         sqlite-devel llvm ncurses-devel xz-devel
