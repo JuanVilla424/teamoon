@@ -495,10 +495,10 @@ function span(cls, text){
 function div(cls, children){ return el("div", cls, children); }
 
 function computeContentKey(v){
-  if(!D) return "";
-  var tasks = D.tasks || [];
-  var logs = D.log_entries || [];
-  var projs = D.projects || [];
+  if(!D && v !== "setup") return "";
+  var tasks = D ? (D.tasks || []) : [];
+  var logs = D ? (D.log_entries || []) : [];
+  var projs = D ? (D.projects || []) : [];
   switch(v){
     case "dashboard":
       var tk = tasks.length + ":";
@@ -2940,7 +2940,6 @@ function renderInitStep(prog, evt){
 }
 
 /* ── Init ── */
-if(getView() === "setup") render();
 api("GET","/api/data", null, function(d){
   D = d;
   render();
@@ -2994,6 +2993,7 @@ function loadSetupStatus(){
   if(setupStatusFetching) return;
   setupStatusFetching = true;
   fetch("/api/onboarding/status").then(function(r){ return r.json(); }).then(function(s){
+    setupStatusFetching = false;
     if(!s || !s.steps) return;
     if(s.steps.config) setupStepDone[2] = true;
     if(s.steps.skills) setupStepDone[3] = true;
@@ -3001,10 +3001,8 @@ function loadSetupStatus(){
     if(s.steps.hooks) setupStepDone[5] = true;
     if(s.steps.mcp) setupStepDone[6] = true;
     setupStatusLoaded = true;
-    var next = nextIncompleteStep();
-    if(next && !setupRunning) setupStep = next;
     if(!setupRunning) render();
-  }).catch(function(){});
+  }).catch(function(){ setupStatusFetching = false; });
 }
 
 function renderSetup(root){
@@ -3171,10 +3169,6 @@ function renderSetupPrereqs(content){
   content.appendChild(actions);
   content.appendChild(prog);
 
-  if(!setupPrereqsAutoChecked && !setupStepDone[1] && setupStatusLoaded && !setupRunning){
-    setupPrereqsAutoChecked = true;
-    btn.click();
-  }
 }
 
 function runPrereqsInstall(prog, actions){
@@ -4374,5 +4368,8 @@ function saveConfigSection(section){
     loadConfig(function(){ render(); });
   });
 }
+
+/* ── Deferred setup init (after SETUP_STEPS defined) ── */
+if(getView() === "setup") render();
 
 })();
