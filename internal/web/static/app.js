@@ -167,6 +167,9 @@ var skillsCatalogOpen = false;
 var skillsCatalogResults = null;
 var skillsCatalogSearch = "";
 var projectAutopilots = [];
+var updateCheckResult = null;
+var updateRunning = false;
+var configSetupSubTab = "prereqs";
 var setupStep = 1;
 var setupStepDone = {};
 var setupStepError = {};
@@ -532,7 +535,7 @@ function computeContentKey(v){
       for(var i=0;i<tasks.length;i++) ck += tasks[i].id + tasks[i].effective_state + (tasks[i].assignee||"") + ",";
       return "cv:" + ck;
     case "config":
-      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogOpen + ":" + (mcpCatalogResults === "loading" ? "ld" : mcpCatalogResults ? mcpCatalogResults.length : "n") + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogOpen + ":" + (skillsCatalogResults === "loading" ? "ld" : skillsCatalogResults ? skillsCatalogResults.length : "n");
+      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogOpen + ":" + (mcpCatalogResults === "loading" ? "ld" : mcpCatalogResults ? mcpCatalogResults.length : "n") + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogOpen + ":" + (skillsCatalogResults === "loading" ? "ld" : skillsCatalogResults ? skillsCatalogResults.length : "n") + ":" + updateRunning;
     case "setup":
       return "s:" + setupStep + ":" + JSON.stringify(setupStepDone) + ":" + JSON.stringify(setupStepError);
     default:
@@ -3458,7 +3461,7 @@ function renderConfig(root){
 
   // Top tab bar: About | General | Templates
   var tabBar = div("config-tabs");
-  ["General","Marketplace","Templates","About"].forEach(function(label){
+  ["General","Marketplace","Templates","Setup","About"].forEach(function(label){
     var key = label.toLowerCase();
     var tb = el("button", "config-tab-btn" + (configTab === key ? " active" : ""), [label]);
     tb.onclick = function(){ configTab = key; configEditing = null; render(); };
@@ -3473,6 +3476,11 @@ function renderConfig(root){
       return;
     }
     renderConfigAbout(root);
+    return;
+  }
+
+  if(configTab === "setup"){
+    renderConfigSetup(root);
     return;
   }
 
@@ -4139,6 +4147,456 @@ function renderConfigAbout(root){
   grid.appendChild(configReadRow("Effort", D.effort));
   sec.appendChild(grid);
   root.appendChild(sec);
+
+  var updSec = div("config-section");
+  updSec.appendChild(el("h3","config-section-title",["Updates"]));
+  var updContent = div("config-update-area");
+  renderUpdateArea(updContent);
+  updSec.appendChild(updContent);
+  root.appendChild(updSec);
+}
+
+function renderUpdateArea(container){
+  var checkBtn = el("button","btn btn-primary btn-sm",["Check for Updates"]);
+  var statusEl = div("update-status");
+  var channelEl = div("update-channel");
+  var actionEl = div("update-action");
+  var progressEl = div("update-progress");
+
+  if(updateRunning) checkBtn.disabled = true;
+
+  checkBtn.onclick = function(){
+    if(updateRunning) return;
+    updateCheckResult = null;
+    statusEl.textContent = "";
+    channelEl.textContent = "";
+    actionEl.textContent = "";
+    progressEl.textContent = "";
+    var restore = btnLoading(checkBtn, "Checking\u2026");
+    api("GET", "/api/update/check", null, function(data){
+      if(restore) restore();
+      updateCheckResult = data;
+      if(data.error){
+        statusEl.textContent = "Error: " + data.error;
+        statusEl.className = "update-status error";
+        return;
+      }
+      // Show current version
+      statusEl.textContent = "Current: " + data.current_version;
+      statusEl.className = "update-status";
+
+      // Channel selector
+      var label = span("","Channel: ");
+      var sel = document.createElement("select");
+      sel.className = "update-channel-select";
+      var optMain = document.createElement("option");
+      optMain.value = "main";
+      optMain.textContent = "main (latest)";
+      sel.appendChild(optMain);
+      var tags = data.tags || [];
+      for(var i = 0; i < tags.length; i++){
+        var opt = document.createElement("option");
+        opt.value = tags[i];
+        opt.textContent = tags[i];
+        if(tags[i] === data.current_tag) opt.textContent += " (current)";
+        sel.appendChild(opt);
+      }
+      // Pre-select: if on a tag, select that tag; else select main
+      if(data.current_tag) sel.value = data.current_tag;
+      else sel.value = "main";
+      channelEl.appendChild(label);
+      channelEl.appendChild(sel);
+
+      // Info line based on selection
+      var infoEl = div("update-info");
+      function updateInfo(){
+        var v = sel.value;
+        if(v === "main"){
+          var b = parseInt(data.behind) || 0;
+          if(b > 0){
+            infoEl.textContent = data.behind + " commits behind main (" + data.remote_commit + ")";
+            infoEl.className = "update-info available";
+          } else {
+            infoEl.textContent = "Already on latest main";
+            infoEl.className = "update-info current";
+          }
+        } else if(v === data.current_tag){
+          infoEl.textContent = "Already on " + v;
+          infoEl.className = "update-info current";
+        } else {
+          infoEl.textContent = "Switch to " + v;
+          infoEl.className = "update-info available";
+        }
+      }
+      sel.onchange = updateInfo;
+      updateInfo();
+      channelEl.appendChild(infoEl);
+
+      // Update button
+      var updateBtn = el("button","btn btn-success btn-sm",["Update Now"]);
+      updateBtn.onclick = function(){ runUpdate(progressEl, updateBtn, checkBtn, sel.value); };
+      actionEl.appendChild(updateBtn);
+    });
+  };
+
+  container.appendChild(checkBtn);
+  container.appendChild(statusEl);
+  container.appendChild(channelEl);
+  container.appendChild(actionEl);
+  container.appendChild(progressEl);
+}
+
+function runUpdate(progressEl, updateBtn, checkBtn, target){
+  if(updateRunning) return;
+  updateRunning = true;
+  progressEl.textContent = "";
+  if(updateBtn) updateBtn.disabled = true;
+  if(checkBtn) checkBtn.disabled = true;
+  var url = "/api/update" + (target ? "?target=" + encodeURIComponent(target) : "");
+
+  streamStepStandalone(url, null, progressEl, function(p, evt){
+    if(evt.type !== "step") return;
+    var cls = "setup-progress-item";
+    var icon = "\u2022";
+    if(evt.status === "done"){ cls += " ok"; icon = "\u2713"; }
+    else if(evt.status === "error"){ cls += " error"; icon = "\u2717"; }
+    else if(evt.status === "restarting"){ cls += " running"; }
+    var item = div(cls);
+    item.appendChild(span("icon", icon));
+    item.appendChild(span("label", evt.name + ": " + evt.message));
+    p.appendChild(item);
+  }, function(status, msg){
+    updateRunning = false;
+    if(status === "success"){
+      progressEl.appendChild(div("setup-status ok",["Update complete. Restarting..."]));
+      showReconnecting(progressEl);
+    } else {
+      progressEl.appendChild(div("setup-status err",[msg || "Update failed"]));
+      if(checkBtn) checkBtn.disabled = false;
+    }
+  });
+}
+
+function showReconnecting(container){
+  var msg = div("update-reconnecting");
+  msg.textContent = "Waiting for service to restart...";
+  container.appendChild(msg);
+  function poll(){
+    fetch("/api/data").then(function(r){
+      if(r.ok) window.location.reload();
+      else setTimeout(poll, 2000);
+    }).catch(function(){ setTimeout(poll, 2000); });
+  }
+  setTimeout(poll, 3000);
+}
+
+/* ── streamStepStandalone — like streamStep but no global setupRunning ── */
+function streamStepStandalone(url, body, progressEl, renderEvent, onDone){
+  var opts = {method:"POST"};
+  if(body){ opts.headers = {"Content-Type":"application/json"}; opts.body = JSON.stringify(body); }
+  fetch(url, opts).then(function(res){
+    if(!res.ok){ res.text().then(function(t){ onDone("error", t); }); return; }
+    var reader = res.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = "";
+    function pump(){
+      reader.read().then(function(result){
+        if(result.done){ onDone("error","Stream ended unexpectedly"); return; }
+        buffer += decoder.decode(result.value, {stream:true});
+        var lines = buffer.split("\n");
+        buffer = lines.pop();
+        for(var i=0;i<lines.length;i++){
+          var line = lines[i].trim();
+          if(line.indexOf("data: ")===0){
+            try{
+              var evt = JSON.parse(line.substring(6));
+              if(evt.done){ onDone(evt.status, evt.message); return; }
+              renderEvent(progressEl, evt);
+            }catch(e){}
+          }
+        }
+        pump();
+      });
+    }
+    pump();
+  }).catch(function(e){ onDone("error", e.message || "Connection error"); });
+}
+
+/* ── Config > Setup Tab ── */
+var CONFIG_SETUP_TABS = [
+  {id:"prereqs", label:"Prerequisites"},
+  {id:"config", label:"Configuration"},
+  {id:"skills", label:"Skills"},
+  {id:"bmad", label:"BMAD"},
+  {id:"hooks", label:"Hooks"},
+  {id:"mcp", label:"MCP Servers"}
+];
+
+function renderConfigSetup(root){
+  var subTabs = div("config-subtabs");
+  CONFIG_SETUP_TABS.forEach(function(tab){
+    var tb = el("button", "config-subtab-btn" + (configSetupSubTab === tab.id ? " active" : ""), [tab.label]);
+    tb.onclick = function(){ configSetupSubTab = tab.id; render(); };
+    subTabs.appendChild(tb);
+  });
+  root.appendChild(subTabs);
+
+  var sec = div("config-section");
+  switch(configSetupSubTab){
+    case "prereqs": renderCfgSetupPrereqs(sec); break;
+    case "config":  renderCfgSetupConfig(sec);  break;
+    case "skills":  renderCfgSetupSkills(sec);  break;
+    case "bmad":    renderCfgSetupBMAD(sec);    break;
+    case "hooks":   renderCfgSetupHooks(sec);   break;
+    case "mcp":     renderCfgSetupMCP(sec);     break;
+  }
+  root.appendChild(sec);
+}
+
+function renderCfgSetupPrereqs(container){
+  container.appendChild(el("h3","config-section-title",["Prerequisites"]));
+  container.appendChild(el("p","config-section-desc",["Check and install required development tools."]));
+  var prog = div("setup-progress");
+  var actions = div("setup-prereqs-actions");
+  var localMissing = [];
+  var running = false;
+
+  var btn = el("button","btn btn-primary btn-sm",["Check Prerequisites"]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    prog.textContent = "";
+    actions.textContent = "";
+    localMissing = [];
+    var restore = btnLoading(btn, "Checking\u2026");
+    streamStepStandalone("/api/onboarding/prereqs", null, prog, function(p, evt){
+      if(evt.type !== "tool") return;
+      var ok = evt.found;
+      var cls = "setup-progress-item " + (ok ? "ok" : (evt.required ? "error" : "skip"));
+      var item = div(cls);
+      item.appendChild(span("icon", ok ? "\u2713" : (evt.required ? "\u2717" : "~")));
+      item.appendChild(span("label", evt.name));
+      item.appendChild(span("version", evt.version || (ok ? "OK" : (evt.required ? "not found" : "optional"))));
+      if(!ok && evt.installable) item.appendChild(span("tag-installable","installable"));
+      p.appendChild(item);
+      if(!ok) localMissing.push(evt);
+    }, function(status, msg){
+      running = false;
+      if(restore) restore();
+      if(status === "success"){
+        prog.appendChild(div("setup-status ok",["All required tools found"]));
+      } else {
+        var installable = localMissing.filter(function(m){ return m.installable; });
+        if(installable.length > 0){
+          var installBtn = el("button","btn btn-success btn-sm",["Install Missing (" + installable.length + ")"]);
+          installBtn.onclick = function(){
+            actions.textContent = "";
+            var installProg = div("setup-progress");
+            installProg.style.marginTop = "16px";
+            container.appendChild(installProg);
+            streamStepStandalone("/api/onboarding/prereqs/install", null, installProg, function(p2, evt2){
+              if(evt2.type !== "install") return;
+              var cls2 = "setup-progress-item " + (evt2.status === "done" ? "ok" : evt2.status === "error" ? "error" : "running");
+              var item2 = div(cls2);
+              item2.appendChild(span("icon", evt2.status === "done" ? "\u2713" : evt2.status === "error" ? "\u2717" : "\u2022"));
+              item2.appendChild(span("label", evt2.name));
+              p2.appendChild(item2);
+            }, function(s2){
+              if(s2 === "success") installProg.appendChild(div("setup-status ok",["Tools installed"]));
+              else installProg.appendChild(div("setup-status err",["Install failed"]));
+            });
+          };
+          actions.appendChild(installBtn);
+        }
+        prog.appendChild(div("setup-status err",[msg || "Missing required tools"]));
+      }
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(actions);
+  container.appendChild(prog);
+}
+
+function renderCfgSetupConfig(container){
+  container.appendChild(el("h3","config-section-title",["Configuration"]));
+  container.appendChild(el("p","config-section-desc",["Set up projects directory, web port, and authentication."]));
+  var running = false;
+
+  var grid = div("config-grid");
+  var projInput = document.createElement("input"); projInput.type = "text"; projInput.className = "config-input"; projInput.value = (configData && configData.projects_dir) || "~/Projects"; projInput.placeholder = "~/Projects";
+  var portInput = document.createElement("input"); portInput.type = "number"; portInput.className = "config-input"; portInput.value = (configData && configData.web_port) || 7777;
+  var pwInput = document.createElement("input"); pwInput.type = "password"; pwInput.className = "config-input"; pwInput.placeholder = "leave blank for no auth";
+  var maxInput = document.createElement("input"); maxInput.type = "number"; maxInput.className = "config-input"; maxInput.value = (configData && configData.max_concurrent) || 3;
+
+  grid.appendChild(configFieldRow("Projects Directory", projInput));
+  grid.appendChild(configFieldRow("Web Port", portInput));
+  grid.appendChild(configFieldRow("Web Password", pwInput));
+  grid.appendChild(configFieldRow("Max Concurrent", maxInput));
+  container.appendChild(grid);
+
+  var statusEl = div("setup-progress");
+  var btn = el("button","btn btn-primary btn-sm",["Save Configuration"]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    var restore = btnLoading(btn, "Saving\u2026");
+    var body = {projects_dir: projInput.value, web_port: parseInt(portInput.value)||7777, web_password: pwInput.value, max_concurrent: parseInt(maxInput.value)||3};
+    api("POST", "/api/onboarding/config", body, function(data){
+      running = false;
+      if(restore) restore();
+      if(data && data.ok){
+        statusEl.textContent = "";
+        statusEl.appendChild(div("setup-status ok",["Configuration saved"]));
+        toast("Configuration saved","success");
+      } else {
+        statusEl.appendChild(div("setup-status err",[(data && data.error) || "Save failed"]));
+      }
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(statusEl);
+
+  if(!configData) loadConfig(function(){ render(); });
+}
+
+function configFieldRow(label, input){
+  var row = div("config-field");
+  row.appendChild(el("label","config-label",[label]));
+  row.appendChild(input);
+  return row;
+}
+
+function renderCfgSetupSkills(container){
+  container.appendChild(el("h3","config-section-title",["Skills"]));
+  container.appendChild(el("p","config-section-desc",["Install Claude Code skills for enhanced capabilities."]));
+  var prog = div("setup-progress");
+  var running = false;
+
+  var btn = el("button","btn btn-primary btn-sm",["Install Skills"]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStepStandalone("/api/onboarding/skills", null, prog, function(p, evt){
+      if(evt.type === "symlink"){ p.appendChild(div("setup-progress-item ok",[span("icon","\u2713"), span("label","Symlink: ~/.agents/skills")])); return; }
+      var cls = "setup-progress-item " + (evt.status === "done" ? "ok" : evt.status === "error" ? "error" : "skip");
+      var item = div(cls);
+      item.appendChild(span("icon", evt.status === "done" ? "\u2713" : evt.status === "error" ? "\u2717" : "~"));
+      item.appendChild(span("label", evt.name || "skill"));
+      if(evt.status === "skipped") item.appendChild(span("version","already installed"));
+      p.appendChild(item);
+    }, function(status){
+      running = false;
+      if(restore) restore();
+      if(status === "success") prog.appendChild(div("setup-status ok",["Skills installed"]));
+      else prog.appendChild(div("setup-status err",["Install failed"]));
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(prog);
+}
+
+function renderCfgSetupBMAD(container){
+  container.appendChild(el("h3","config-section-title",["BMAD Commands"]));
+  container.appendChild(el("p","config-section-desc",["Install BMAD commands for project management workflows."]));
+  var prog = div("setup-progress");
+  var running = false;
+
+  var btn = el("button","btn btn-primary btn-sm",["Install BMAD"]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    var progressBar = null;
+    streamStepStandalone("/api/onboarding/bmad", null, prog, function(p, evt){
+      if(evt.type === "symlink"){ p.appendChild(div("setup-progress-item ok",[span("icon","\u2713"), span("label","Symlink: ~/.claude/commands/bmad")])); return; }
+      if(evt.type === "progress"){
+        if(!progressBar){
+          var wrap = div("setup-progress-bar-wrap");
+          progressBar = div("setup-progress-bar-fill");
+          progressBar.style.width = "0%";
+          wrap.appendChild(progressBar);
+          var counter = div("setup-progress-counter");
+          counter.id = "bmad-counter";
+          p.appendChild(wrap);
+          p.appendChild(counter);
+        }
+        var pct = evt.total > 0 ? Math.round(evt.count/evt.total*100) : 0;
+        progressBar.style.width = pct + "%";
+        var c = document.getElementById("bmad-counter");
+        if(c) c.textContent = evt.count + " / " + evt.total + " files";
+      }
+    }, function(status){
+      running = false;
+      if(restore) restore();
+      if(status === "success") prog.appendChild(div("setup-status ok",["BMAD installed"]));
+      else prog.appendChild(div("setup-status err",["Install failed"]));
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(prog);
+}
+
+function renderCfgSetupHooks(container){
+  container.appendChild(el("h3","config-section-title",["Security Hooks"]));
+  container.appendChild(el("p","config-section-desc",["Install security hooks to prevent destructive operations."]));
+  var prog = div("setup-progress");
+  var running = false;
+
+  var btn = el("button","btn btn-primary btn-sm",["Install Hooks"]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStepStandalone("/api/onboarding/hooks", null, prog, function(p, evt){
+      var item = div("setup-progress-item ok");
+      item.appendChild(span("icon", "\u2713"));
+      item.appendChild(span("label", evt.name || evt.type || "hook"));
+      p.appendChild(item);
+    }, function(status){
+      running = false;
+      if(restore) restore();
+      if(status === "success") prog.appendChild(div("setup-status ok",["Hooks installed"]));
+      else prog.appendChild(div("setup-status err",["Install failed"]));
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(prog);
+}
+
+function renderCfgSetupMCP(container){
+  container.appendChild(el("h3","config-section-title",["MCP Servers"]));
+  container.appendChild(el("p","config-section-desc",["Install MCP servers for documentation, memory, and reasoning."]));
+  var prog = div("setup-progress");
+  var running = false;
+
+  var btn = el("button","btn btn-primary btn-sm",["Install MCP Servers"]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    prog.textContent = "";
+    var restore = btnLoading(btn, "Installing\u2026");
+    streamStepStandalone("/api/onboarding/mcp", null, prog, function(p, evt){
+      var ok = evt.status === "done";
+      var skipped = evt.status === "skipped";
+      var cls = "setup-progress-item " + (ok ? "ok" : skipped ? "skip" : "error");
+      var item = div(cls);
+      item.appendChild(span("icon", ok ? "\u2713" : skipped ? "~" : "\u2717"));
+      item.appendChild(span("label", evt.name || "server"));
+      if(skipped) item.appendChild(span("version","already configured"));
+      p.appendChild(item);
+    }, function(status){
+      running = false;
+      if(restore) restore();
+      if(status === "success") prog.appendChild(div("setup-status ok",["MCP servers installed"]));
+      else prog.appendChild(div("setup-status err",["Install failed"]));
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(prog);
 }
 
 function renderConfigPaths(root){
