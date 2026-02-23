@@ -1557,7 +1557,7 @@ function renderProjectDetail(root){
   cfgGrid.appendChild(mkPdRow("Skeleton", skLine.trim()));
   if(D.config && D.config.spawn){
     cfgGrid.appendChild(mkPdRow("Model", D.config.spawn.model || D.exec_model || "default"));
-    cfgGrid.appendChild(mkPdRow("Max turns", (D.config.spawn.max_turns || 25) + ""));
+    cfgGrid.appendChild(mkPdRow("Max turns", (D.config.spawn.max_turns || 15) + ""));
   }
   cfgSec.appendChild(cfgGrid);
   root.appendChild(cfgSec);
@@ -2510,14 +2510,15 @@ function sendChatMessage(){
                       lastB2.appendChild(stepsDiv);
                     }
                     var stepEl = document.createElement("div");
-                    stepEl.className = "chat-init-step " + (step.status === "ok" ? "ok" : "error");
+                    var stepOk = (step.status === "done" || step.status === "ok");
+                    stepEl.className = "chat-init-step " + (stepOk ? "ok" : (step.status === "running" ? "running" : "error"));
                     var iconSpan = document.createElement("span");
                     iconSpan.className = "step-icon";
-                    iconSpan.textContent = step.status === "ok" ? "\u2713" : "\u2717";
+                    iconSpan.textContent = stepOk ? "\u2713" : (step.status === "running" ? "\u22ef" : "\u2717");
                     stepEl.appendChild(iconSpan);
                     var nameSpan = document.createElement("span");
                     nameSpan.className = "step-name";
-                    nameSpan.textContent = step.name + (step.message && step.status !== "ok" ? ": " + step.message : "");
+                    nameSpan.textContent = step.name + (step.message && !stepOk ? ": " + step.message : "");
                     stepEl.appendChild(nameSpan);
                     stepsDiv.appendChild(stepEl);
                     msgDiv2.scrollTop = msgDiv2.scrollHeight;
@@ -2547,8 +2548,8 @@ function sendChatMessage(){
                 if(evt.result) chatMessages[chatMessages.length-1].content = evt.result;
                 // Strip directives from stored/displayed content
                 var cleanContent = chatMessages[chatMessages.length-1].content
-                  .replace(/\[TASK_CREATE\].*?\[\/TASK_CREATE\]/g, "")
-                  .replace(/\[PROJECT_INIT\].*?\[\/PROJECT_INIT\]/g, "").trim();
+                  .replace(/\[TASK_CREATE\][\s\S]*?\[\/TASK_CREATE\]/g, "")
+                  .replace(/\[PROJECT_INIT\][\s\S]*?\[\/PROJECT_INIT\]/g, "").trim();
                 chatMessages[chatMessages.length-1].content = cleanContent;
                 // Mark all pending tools as done
                 for(var tc=0;tc<chatToolCalls.length;tc++) chatToolCalls[tc].done=true;
@@ -3246,6 +3247,7 @@ function renderSetupConfig(content){
   var fields = [
     {id:"setup-projects-dir", label:"Projects Directory", val:"~/Projects", type:"text"},
     {id:"setup-web-port", label:"Web Dashboard Port", val:"7777", type:"number"},
+    {id:"setup-web-host", label:"Bind Address", val:"localhost", type:"select", options:["localhost","0.0.0.0"]},
     {id:"setup-web-password", label:"Web Password (empty = no auth)", val:"", type:"password"},
     {id:"setup-max-concurrent", label:"Max Concurrent Sessions", val:"3", type:"number"}
   ];
@@ -3253,8 +3255,18 @@ function renderSetupConfig(content){
     var f = fields[i];
     var field = div("setup-form-field");
     field.appendChild(el("label","setup-form-label",[f.label]));
-    var inp = elAttr("input","setup-form-input",{type:f.type, id:f.id, value:f.val, placeholder:f.val});
-    field.appendChild(inp);
+    if(f.type === "select" && f.options){
+      var sel = document.createElement("select"); sel.className = "setup-form-input"; sel.id = f.id;
+      for(var j=0;j<f.options.length;j++){
+        var opt = document.createElement("option"); opt.value = f.options[j]; opt.textContent = f.options[j];
+        if(f.options[j] === f.val) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      field.appendChild(sel);
+    } else {
+      var inp = elAttr("input","setup-form-input",{type:f.type, id:f.id, value:f.val, placeholder:f.val});
+      field.appendChild(inp);
+    }
     form.appendChild(field);
   }
   var btn = el("button","btn btn-primary",[setupStepDone[2] ? "Re-configure" : "Save Configuration"]);
@@ -3263,6 +3275,7 @@ function renderSetupConfig(content){
     var wc = {
       projects_dir: document.getElementById("setup-projects-dir").value || "~/Projects",
       web_port: parseInt(document.getElementById("setup-web-port").value) || 7777,
+      web_host: document.getElementById("setup-web-host").value || "localhost",
       web_password: document.getElementById("setup-web-password").value,
       max_concurrent: parseInt(document.getElementById("setup-max-concurrent").value) || 3
     };
@@ -3566,12 +3579,12 @@ function renderConfigAutopilot(root){
     effortRow.appendChild(effortSel);
     grid.appendChild(effortRow);
 
-    grid.appendChild(configInput("spawn_max_turns","Max Turns", String(c.spawn_max_turns || 25)));
+    grid.appendChild(configInput("spawn_max_turns","Max Turns", String(c.spawn_max_turns || 15)));
     grid.appendChild(configInput("max_concurrent","Max Concurrent Autopilots", String(c.max_concurrent || 3)));
   } else {
     grid.appendChild(configReadRow("Model", c.spawn_model || "(inherit)"));
     grid.appendChild(configReadRow("Effort", c.spawn_effort || "(inherit)"));
-    grid.appendChild(configReadRow("Max Turns", String(c.spawn_max_turns || 25)));
+    grid.appendChild(configReadRow("Max Turns", String(c.spawn_max_turns || 15)));
     grid.appendChild(configReadRow("Max Concurrent", String(c.max_concurrent || 3)));
   }
   sec.appendChild(grid);
@@ -4425,11 +4438,15 @@ function renderCfgSetupConfig(container){
   var grid = div("config-grid");
   var projInput = document.createElement("input"); projInput.type = "text"; projInput.className = "config-input"; projInput.value = (configData && configData.projects_dir) || "~/Projects"; projInput.placeholder = "~/Projects";
   var portInput = document.createElement("input"); portInput.type = "number"; portInput.className = "config-input"; portInput.value = (configData && configData.web_port) || 7777;
+  var hostSelect = document.createElement("select"); hostSelect.className = "config-input";
+  ["localhost","0.0.0.0"].forEach(function(v){ var o = document.createElement("option"); o.value = v; o.textContent = v; if(configData && configData.web_host === v) o.selected = true; hostSelect.appendChild(o); });
+  if(!configData || !configData.web_host) hostSelect.value = "localhost";
   var pwInput = document.createElement("input"); pwInput.type = "password"; pwInput.className = "config-input"; pwInput.placeholder = "leave blank for no auth";
   var maxInput = document.createElement("input"); maxInput.type = "number"; maxInput.className = "config-input"; maxInput.value = (configData && configData.max_concurrent) || 3;
 
   grid.appendChild(configFieldRow("Projects Directory", projInput));
   grid.appendChild(configFieldRow("Web Port", portInput));
+  grid.appendChild(configFieldRow("Bind Address", hostSelect));
   grid.appendChild(configFieldRow("Web Password", pwInput));
   grid.appendChild(configFieldRow("Max Concurrent", maxInput));
   container.appendChild(grid);
@@ -4440,7 +4457,7 @@ function renderCfgSetupConfig(container){
     if(running) return;
     running = true;
     var restore = btnLoading(btn, "Saving\u2026");
-    var body = {projects_dir: projInput.value, web_port: parseInt(portInput.value)||7777, web_password: pwInput.value, max_concurrent: parseInt(maxInput.value)||3};
+    var body = {projects_dir: projInput.value, web_port: parseInt(portInput.value)||7777, web_host: hostSelect.value || "localhost", web_password: pwInput.value, max_concurrent: parseInt(maxInput.value)||3};
     api("POST", "/api/onboarding/config", body, function(data){
       running = false;
       if(restore) restore();
@@ -4637,9 +4654,16 @@ function renderConfigServer(root){
   var grid = div("config-grid");
   if(editing){
     grid.appendChild(configInput("web_port","Port", String(c.web_port || 7777)));
+    var hostField = div("config-field");
+    hostField.appendChild(el("label","config-label",["Bind Address"]));
+    var hostSel = document.createElement("select"); hostSel.className = "config-input"; hostSel.id = "cfg-web_host";
+    ["localhost","0.0.0.0"].forEach(function(v){ var o = document.createElement("option"); o.value = v; o.textContent = v; if(c.web_host === v) o.selected = true; hostSel.appendChild(o); });
+    hostField.appendChild(hostSel);
+    grid.appendChild(hostField);
     grid.appendChild(configInput("web_password","Password", c.web_password || "", "password"));
   } else {
     grid.appendChild(configReadRow("Port", String(c.web_port || 7777)));
+    grid.appendChild(configReadRow("Bind Address", c.web_host || "localhost"));
     grid.appendChild(configReadRow("Password", c.web_password, true));
   }
   sec.appendChild(grid);
@@ -4811,6 +4835,7 @@ function saveConfigSection(section){
     c.refresh_interval_sec = parseInt(document.getElementById("cfg-refresh_interval_sec").value) || 30;
   } else if(section === "server"){
     c.web_port = parseInt(document.getElementById("cfg-web_port").value) || 7777;
+    c.web_host = document.getElementById("cfg-web_host").value || "localhost";
     c.web_password = document.getElementById("cfg-web_password").value;
   } else if(section === "budget"){
     c.budget_monthly = parseFloat(document.getElementById("cfg-budget_monthly").value) || 0;

@@ -31,6 +31,7 @@ type stepStatus struct {
 type WebConfig struct {
 	ProjectsDir   string `json:"projects_dir"`
 	WebPort       int    `json:"web_port"`
+	WebHost       string `json:"web_host"`
 	WebPassword   string `json:"web_password"`
 	MaxConcurrent int    `json:"max_concurrent"`
 }

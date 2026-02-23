@@ -12,6 +12,11 @@ BMAD_SRC := $(BMAD_PKG)/.claude/commands/bmad
 BMAD_MANIFEST := $(BMAD_PKG)/.bmad/_cfg/manifest.yaml
 BMAD_ASSETS := internal/onboarding/assets/bmad
 
+DISTRO_FAMILY := $(shell \
+	if [ -f /etc/debian_version ]; then echo debian; \
+	elif [ -f /etc/redhat-release ] || [ -f /etc/rocky-release ]; then echo rhel; \
+	else echo unknown; fi)
+
 sync-bmad:
 	@if [ -f "$(BMAD_MANIFEST)" ] && [ -d "$(BMAD_SRC)" ]; then \
 		BMAD_VER=$$(python3 -c "import yaml; print(yaml.safe_load(open('$(BMAD_MANIFEST)'))['installation']['version'])" 2>/dev/null || echo "unknown"); \
@@ -31,6 +36,26 @@ install: build
 	sudo chmod 755 /usr/local/bin/$(BINARY)
 	@sudo touch /var/log/teamoon.log 2>/dev/null || true
 	@sudo chown $(shell whoami):$(shell whoami) /var/log/teamoon.log 2>/dev/null || true
+	@CURRENT_USER=$$(whoami); \
+	HOME_DIR=$$(eval echo ~$$CURRENT_USER); \
+	if [ "$(DISTRO_FAMILY)" = "rhel" ]; then \
+		ENV_PATH="/etc/sysconfig/teamoon"; \
+	else \
+		ENV_PATH="$$HOME_DIR/.config/teamoon/.env"; \
+	fi; \
+	printf '[Unit]\nDescription=Teamoon - AI-powered project management and autopilot task engine\nAfter=network.target\n\n[Service]\nType=simple\nUser=%s\nGroup=%s\nExecStart=/usr/local/bin/teamoon serve\nRestart=always\nRestartSec=5\nWorkingDirectory=%s\nEnvironment=HOME=%s\nEnvironmentFile=-%s\n\n[Install]\nWantedBy=multi-user.target\n' \
+		"$$CURRENT_USER" "$$CURRENT_USER" "$$HOME_DIR" "$$HOME_DIR" "$$ENV_PATH" \
+		> teamoon.service
+	@if [ "$(DISTRO_FAMILY)" = "rhel" ]; then \
+		if command -v restorecon >/dev/null 2>&1; then \
+			sudo restorecon -v /usr/local/bin/$(BINARY) 2>/dev/null || true; \
+			sudo restorecon -v /var/log/teamoon.log 2>/dev/null || true; \
+		fi; \
+		if [ ! -f /etc/sysconfig/teamoon ]; then \
+			printf '# teamoon environment\n' | sudo tee /etc/sysconfig/teamoon >/dev/null; \
+			sudo chmod 640 /etc/sysconfig/teamoon; \
+		fi; \
+	fi
 	sudo cp teamoon.service /etc/systemd/system/
 	sudo systemctl daemon-reload
 	sudo systemctl enable teamoon

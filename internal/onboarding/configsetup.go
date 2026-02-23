@@ -40,6 +40,11 @@ func setupConfig() error {
 		cfg.WebPort = p
 	}
 
+	hostStr := ask("Bind address (localhost or 0.0.0.0)", cfg.WebHost)
+	if hostStr == "localhost" || hostStr == "0.0.0.0" || hostStr == "127.0.0.1" {
+		cfg.WebHost = hostStr
+	}
+
 	cfg.WebPassword = ask("Web password (empty = no auth)", cfg.WebPassword)
 
 	concStr := ask("Max concurrent autopilot sessions", strconv.Itoa(cfg.MaxConcurrent))
@@ -82,6 +87,9 @@ func saveConfigWeb(wc WebConfig) error {
 	}
 	if wc.WebPort > 0 && wc.WebPort < 65536 {
 		cfg.WebPort = wc.WebPort
+	}
+	if wc.WebHost != "" {
+		cfg.WebHost = wc.WebHost
 	}
 	cfg.WebPassword = wc.WebPassword
 	if wc.MaxConcurrent > 0 {

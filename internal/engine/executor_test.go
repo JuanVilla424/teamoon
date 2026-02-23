@@ -28,8 +28,8 @@ func TestBuildSpawnArgs_Default(t *testing.T) {
 	if !containsArg(args, "--max-turns") {
 		t.Error("missing --max-turns flag")
 	}
-	if !containsArgValue(args, "--max-turns", "25") {
-		t.Error("max-turns should be 25")
+	if !containsArgValue(args, "--max-turns", "15") {
+		t.Error("max-turns should be 15")
 	}
 
 	// Should NOT have --model or --effort (empty in default config)
