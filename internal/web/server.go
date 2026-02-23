@@ -172,6 +172,8 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/skills/list", s.authWrap(s.handleSkillsList))
 	mux.HandleFunc("/api/skills/catalog", s.authWrap(s.handleSkillsCatalog))
 	mux.HandleFunc("/api/skills/install", s.authWrap(s.handleSkillsInstall))
+	mux.HandleFunc("/api/update/check", s.authWrap(s.handleUpdateCheck))
+	mux.HandleFunc("/api/update", s.authWrap(s.handleUpdate))
 
 	addr := fmt.Sprintf(":%d", s.cfg.WebPort)
 	srv := &http.Server{Addr: addr, Handler: mux}

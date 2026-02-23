@@ -1321,6 +1321,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"skeleton":            cfg.Skeleton,
 		"max_concurrent":      cfg.MaxConcurrent,
 		"project_skeletons":   cfg.ProjectSkeletons,
+		"source_dir":          cfg.SourceDir,
 	})
 }
 
@@ -1908,4 +1909,155 @@ func (s *Server) handleOnboardingHooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOnboardingMCP(w http.ResponseWriter, r *http.Request) {
 	s.sseOnboarding(w, r, onboarding.StreamMCP)
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	srcDir := cfg.SourceDir
+	if srcDir == "" {
+		home, _ := os.UserHomeDir()
+		srcDir = filepath.Join(home, "Projects", "teamoon")
+	}
+
+	// Fetch all (branches + tags)
+	exec.Command("git", "-C", srcDir, "fetch", "--all", "--tags").Run()
+
+	// Current version: check for tag on HEAD, fallback to branch
+	currentTag := ""
+	tagOut, err := exec.Command("git", "-C", srcDir, "describe", "--tags", "--exact-match", "HEAD").Output()
+	if err == nil {
+		currentTag = strings.TrimSpace(string(tagOut))
+	}
+	localOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--short", "HEAD").Output()
+	localCommit := strings.TrimSpace(string(localOut))
+	branchOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	currentBranch := strings.TrimSpace(string(branchOut))
+
+	// Get tags sorted by version (newest first)
+	tagsOut, _ := exec.Command("git", "-C", srcDir, "tag", "--sort=-v:refname").Output()
+	var tags []string
+	for _, t := range strings.Split(strings.TrimSpace(string(tagsOut)), "\n") {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+
+	// Check if main has newer commits
+	remoteOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--short", "origin/main").Output()
+	remoteCommit := strings.TrimSpace(string(remoteOut))
+	behindOut, _ := exec.Command("git", "-C", srcDir, "rev-list", "--count", "HEAD..origin/main").Output()
+	behind := strings.TrimSpace(string(behindOut))
+
+	currentVersion := currentTag
+	if currentVersion == "" {
+		currentVersion = currentBranch + "@" + localCommit
+	}
+
+	writeJSON(w, map[string]any{
+		"current_version": currentVersion,
+		"current_tag":     currentTag,
+		"current_branch":  currentBranch,
+		"local_commit":    localCommit,
+		"remote_commit":   remoteCommit,
+		"behind":          behind,
+		"tags":            tags,
+	})
+}
+
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	// Read target from query or body
+	target := r.URL.Query().Get("target")
+	if target == "" {
+		target = "main"
+	}
+
+	s.sseOnboarding(w, r, func(progress onboarding.ProgressFunc) error {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		srcDir := cfg.SourceDir
+		if srcDir == "" {
+			home, _ := os.UserHomeDir()
+			srcDir = filepath.Join(home, "Projects", "teamoon")
+		}
+
+		step := func(name, msg string) {
+			progress(map[string]any{"type": "step", "name": name, "message": msg, "status": "running"})
+		}
+		done := func(name, msg string) {
+			progress(map[string]any{"type": "step", "name": name, "message": msg, "status": "done"})
+		}
+
+		// 1. fetch + checkout target
+		step("fetch", "Fetching latest...")
+		exec.Command("git", "-C", srcDir, "fetch", "--all", "--tags").Run()
+		done("fetch", "Fetched")
+
+		if target == "main" {
+			step("checkout", "Switching to main...")
+			out, err := exec.Command("git", "-C", srcDir, "checkout", "main").CombinedOutput()
+			if err != nil {
+				progress(map[string]any{"type": "step", "name": "checkout", "message": string(out), "status": "error"})
+				return fmt.Errorf("checkout failed: %s", string(out))
+			}
+			step("pull", "Pulling latest from main...")
+			out, err = exec.Command("git", "-C", srcDir, "pull", "origin", "main").CombinedOutput()
+			if err != nil {
+				progress(map[string]any{"type": "step", "name": "pull", "message": string(out), "status": "error"})
+				return fmt.Errorf("pull failed: %s", string(out))
+			}
+			done("pull", strings.TrimSpace(string(out)))
+		} else {
+			// Checkout specific tag
+			step("checkout", "Switching to "+target+"...")
+			out, err := exec.Command("git", "-C", srcDir, "checkout", target).CombinedOutput()
+			if err != nil {
+				progress(map[string]any{"type": "step", "name": "checkout", "message": string(out), "status": "error"})
+				return fmt.Errorf("checkout %s failed: %s", target, string(out))
+			}
+			done("checkout", "On "+target)
+		}
+
+		// 2. make build
+		step("build", "Building new binary...")
+		cmd := exec.Command("make", "-C", srcDir, "build")
+		cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"))
+		buildOut, buildErr := cmd.CombinedOutput()
+		if buildErr != nil {
+			progress(map[string]any{"type": "step", "name": "build", "message": string(buildOut), "status": "error"})
+			return fmt.Errorf("build failed: %s", string(buildOut))
+		}
+		done("build", "Build successful")
+
+		// 3. install binary
+		step("install", "Installing new binary...")
+		newBin := filepath.Join(srcDir, "teamoon")
+		cpOut, cpErr := exec.Command("sudo", "cp", newBin, "/usr/local/bin/teamoon").CombinedOutput()
+		if cpErr != nil {
+			progress(map[string]any{"type": "step", "name": "install", "message": string(cpOut), "status": "error"})
+			return fmt.Errorf("install failed: %s", string(cpOut))
+		}
+		exec.Command("sudo", "chmod", "755", "/usr/local/bin/teamoon").Run()
+		done("install", "Binary installed")
+
+		// 4. restart — send event then restart in goroutine
+		progress(map[string]any{"type": "step", "name": "restart", "message": "Restarting service...", "status": "restarting"})
+
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			exec.Command("sudo", "systemctl", "restart", "teamoon").Run()
+		}()
+
+		return nil
+	})
 }
