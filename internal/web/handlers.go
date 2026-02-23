@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -512,12 +513,15 @@ func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 	}
 	cmd := exec.Command("claude", args...)
 	cmd.Env = env
+	var planStderr bytes.Buffer
+	cmd.Stderr = &planStderr
 
 	out, err := cmd.Output()
 	if err != nil {
+		stderrMsg := planStderr.String()
 		s.store.logBuf.Add(logs.LogEntry{
 			Time: time.Now(), TaskID: t.ID, Project: t.Project,
-			Message: "Plan generation failed: " + err.Error(), Level: logs.LevelError,
+			Message: fmt.Sprintf("Plan generation failed: %v — stderr: %s", err, stderrMsg), Level: logs.LevelError,
 		})
 		s.clearGenerating(t.ID)
 		s.refreshAndBroadcast()
@@ -1071,7 +1075,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	if waitErr := cmd.Wait(); waitErr != nil {
 		errMsg := stderrBuf.String()
 		log.Printf("[chat] claude exited with error: %v", waitErr)
-		os.WriteFile("/tmp/teamoon-chat-stderr.log", []byte(errMsg), 0644)
+		if errMsg != "" {
+			log.Printf("[chat] claude stderr: %s", errMsg)
+		}
 		// Send error to client if no result was already sent
 		if displayResult == "" {
 			errData, _ := json.Marshal(map[string]any{"error": "Claude exited with error: " + waitErr.Error()})
@@ -1082,8 +1088,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse directives from response
+	// Parse directives from response — check both streaming text and final result
 	responseText := fullResponse.String()
+	if displayResult != "" && !strings.Contains(responseText, displayResult) {
+		responseText = responseText + "\n" + displayResult
+	}
 
 	// Parse PROJECT_INIT directive (must run before TASK_CREATE)
 	// (?s) makes . match newlines — LLM often emits multiline JSON between tags

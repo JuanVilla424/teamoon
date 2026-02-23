@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -112,6 +113,7 @@ func Add(project, description, priority string) (Task, error) {
 	if err := saveStore(store); err != nil {
 		return Task{}, err
 	}
+	log.Printf("[queue] task #%d created: project=%s desc=%q", task.ID, task.Project, task.Description)
 	notifyWebhook("task_created", task)
 	return task, nil
 }
@@ -132,6 +134,7 @@ func MarkDone(id int) error {
 			if err := saveStore(store); err != nil {
 				return err
 			}
+			log.Printf("[queue] task #%d marked done", id)
 			notifyWebhook("task_done", store.Tasks[i])
 			return nil
 		}
@@ -187,6 +190,7 @@ func Archive(id int) error {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].State = StateArchived
 			store.Tasks[i].Done = true
+			log.Printf("[queue] task #%d archived", id)
 			return saveStore(store)
 		}
 	}
@@ -218,6 +222,7 @@ func UpdateState(id int, state TaskState) error {
 			if state == StateDone {
 				store.Tasks[i].Done = true
 			}
+			log.Printf("[queue] task #%d state -> %s", id, state)
 			return saveStore(store)
 		}
 	}
@@ -236,6 +241,7 @@ func SetPlanFile(id int, path string) error {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].PlanFile = path
 			store.Tasks[i].State = StatePlanned
+			log.Printf("[queue] task #%d plan set: %s", id, path)
 			return saveStore(store)
 		}
 	}
@@ -256,6 +262,7 @@ func ResetPlan(id int) error {
 			store.Tasks[i].PlanFile = ""
 			store.Tasks[i].BlockReason = ""
 			store.Tasks[i].Done = false
+			log.Printf("[queue] task #%d plan reset", id)
 			return saveStore(store)
 		}
 	}
@@ -277,6 +284,7 @@ func SetBlockReason(id int, reason string) error {
 			if err := saveStore(store); err != nil {
 				return err
 			}
+			log.Printf("[queue] task #%d blocked: %s", id, reason)
 			notifyWebhook("task_blocked", store.Tasks[i])
 			return nil
 		}
@@ -295,6 +303,7 @@ func ToggleAutoPilot(id int) error {
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].AutoPilot = !store.Tasks[i].AutoPilot
+			log.Printf("[queue] task #%d autopilot=%v", id, store.Tasks[i].AutoPilot)
 			return saveStore(store)
 		}
 	}
