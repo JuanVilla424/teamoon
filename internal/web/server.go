@@ -175,11 +175,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/update/check", s.authWrap(s.handleUpdateCheck))
 	mux.HandleFunc("/api/update", s.authWrap(s.handleUpdate))
 
-	host := s.cfg.WebHost
-	if host == "" {
-		host = "localhost"
-	}
-	addr := fmt.Sprintf("%s:%d", host, s.cfg.WebPort)
+	addr := fmt.Sprintf("%s:%d", s.cfg.WebHost, s.cfg.WebPort)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {

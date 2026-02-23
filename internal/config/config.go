@@ -80,7 +80,7 @@ func DefaultConfig() Config {
 		ContextLimit:       0,
 		WebEnabled:         false,
 		WebPort:            7777,
-		WebHost:            "localhost",
+		WebHost:            "",
 		WebPassword:        "",
 		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 15, StepTimeoutMin: 4},
 		Skeleton:           DefaultSkeleton(),
