@@ -1126,20 +1126,24 @@ a:hover { color: var(--text) }
 }
 .config-input:focus { border-color: var(--glass-focus); box-shadow: 0 0 0 3px var(--accent-glow) }
 .config-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px }
-.config-tabs { display: flex; gap: 0; margin-bottom: 28px; border-bottom: 1px solid var(--glass) }
+.config-tabs { display: flex; gap: 0; margin-bottom: 28px; border-bottom: 1px solid var(--glass); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none }
+.config-tabs::-webkit-scrollbar { display: none }
 .config-tab-btn {
   background: none; border: none; border-bottom: 2px solid transparent;
   color: var(--text-muted); font-size: 14px; font-weight: 500;
   padding: 12px 20px; cursor: pointer; transition: all var(--fast) var(--spring); margin-bottom: -1px;
+  white-space: nowrap; flex-shrink: 0;
 }
 .config-tab-btn:hover { color: var(--text-secondary) }
 .config-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent) }
-.config-subtabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 1px solid var(--glass) }
+.config-subtabs { display: flex; gap: 0; margin-bottom: 20px; border-bottom: 1px solid var(--glass); overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none }
+.config-subtabs::-webkit-scrollbar { display: none }
 .config-subtab-btn {
   background: none; border: none; border-bottom: 2px solid transparent;
   color: var(--text-faint); font-family: var(--mono); font-size: 12px; font-weight: 600;
   padding: 10px 16px; cursor: pointer; transition: all var(--fast) var(--spring);
   text-transform: uppercase; letter-spacing: .3px; margin-bottom: -1px;
+  white-space: nowrap; flex-shrink: 0;
 }
 .config-subtab-btn:hover { color: var(--text-muted) }
 .config-subtab-btn.active { color: var(--accent); border-bottom-color: var(--accent) }
@@ -1251,6 +1255,24 @@ a:hover { color: var(--text) }
 .setup-complete { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 48px 24px; text-align: center }
 .setup-complete-icon { font-size: 48px; line-height: 1 }
 .setup-complete-msg { font-size: 16px; color: var(--text-secondary); max-width: 400px; line-height: 1.6 }
+
+/* ── Config Update Area ── */
+.config-update-area { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 }
+.update-status { font-size: 13px; color: var(--text-secondary); padding: 4px 0 }
+.update-status.available { color: var(--accent) }
+.update-status.current { color: #22c55e }
+.update-status.error { color: #ef4444 }
+.update-action { display: flex; gap: 8px }
+.update-progress { display: flex; flex-direction: column; gap: 4px }
+.update-reconnecting { font-size: 13px; color: var(--text-secondary); padding: 8px 0; animation: pulse 1.5s infinite }
+.update-channel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); padding: 4px 0 }
+.update-channel-select { background: var(--surface); color: var(--text-primary); border: 1px solid var(--glass); border-radius: 6px; padding: 4px 8px; font-size: 13px; font-family: inherit }
+.update-channel-select:focus { border-color: var(--accent); outline: none }
+.update-info { font-size: 12px; padding: 2px 0; width: 100% }
+.update-info.available { color: var(--accent) }
+.update-info.current { color: #22c55e }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.5 } }
+.config-section-desc { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px }
 
 /* ── Responsive: Tablet ── */
 @media (max-width: 1200px) {

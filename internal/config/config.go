@@ -66,6 +66,7 @@ type Config struct {
 	ProjectSkeletons   map[string]SkeletonConfig      `json:"project_skeletons,omitempty"`
 	MaxConcurrent      int                            `json:"max_concurrent"`
 	MCPServers         map[string]MCPServer           `json:"mcp_servers,omitempty"`
+	SourceDir          string                         `json:"source_dir,omitempty"`
 }
 
 func DefaultConfig() Config {
@@ -83,6 +84,7 @@ func DefaultConfig() Config {
 		Skeleton:           DefaultSkeleton(),
 		MaxConcurrent:      3,
 		MCPServers:         nil,
+		SourceDir:          filepath.Join(home, "Projects", "teamoon"),
 	}
 }
 
