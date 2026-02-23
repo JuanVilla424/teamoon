@@ -352,6 +352,15 @@ CFGEOF
     ok "config written to $CONFIG_FILE"
 else
     ok "config already exists at $CONFIG_FILE"
+    # Ensure source_dir points to install location
+    if command -v jq &>/dev/null; then
+        CURRENT_SRC=$(jq -r '.source_dir // ""' "$CONFIG_FILE")
+        if [ -n "$CURRENT_SRC" ] && [ ! -d "$CURRENT_SRC/.git" ]; then
+            info "updating source_dir to $INSTALL_DIR"
+            jq --arg sd "$INSTALL_DIR" '.source_dir = $sd' "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+            ok "source_dir updated"
+        fi
+    fi
 fi
 
 # ── done ─────────────────────────────────────────────────
