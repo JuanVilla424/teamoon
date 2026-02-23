@@ -63,7 +63,7 @@ type spawnResult struct {
 func BuildSpawnArgs(cfg config.Config, prompt string, addDirs []string) ([]string, func()) {
 	maxTurns := cfg.Spawn.MaxTurns
 	if maxTurns <= 0 {
-		maxTurns = 25
+		maxTurns = 15
 	}
 	args := []string{
 		"-p", prompt,

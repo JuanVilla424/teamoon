@@ -9,8 +9,9 @@ Group=cloud-agent
 ExecStart=/usr/local/bin/teamoon serve
 Restart=always
 RestartSec=5
-EnvironmentFile=/home/cloud-agent/Projects/teamoon/.env
 WorkingDirectory=/home/cloud-agent
+Environment=HOME=/home/cloud-agent
+EnvironmentFile=-/home/cloud-agent/.config/teamoon/.env
 
 [Install]
 WantedBy=multi-user.target
