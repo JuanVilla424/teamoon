@@ -361,15 +361,16 @@ step "teamoon"
 
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "updating existing clone at $INSTALL_DIR"
-    git -C "$INSTALL_DIR" fetch origin "$BRANCH" --quiet
-    git -C "$INSTALL_DIR" checkout "$BRANCH" --quiet 2>/dev/null || true
+    git -C "$INSTALL_DIR" remote set-branches origin '*'
+    git -C "$INSTALL_DIR" fetch origin --quiet
+    git -C "$INSTALL_DIR" checkout "$BRANCH" --quiet 2>/dev/null || git -C "$INSTALL_DIR" checkout -b "$BRANCH" "origin/$BRANCH" --quiet
     git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH" --quiet
-    ok "updated to latest"
+    ok "updated to latest ($BRANCH)"
 else
     info "cloning teamoon to $INSTALL_DIR"
     mkdir -p "$(dirname "$INSTALL_DIR")"
     git clone --branch "$BRANCH" --depth 1 "$REPO" "$INSTALL_DIR" --quiet
-    ok "cloned"
+    ok "cloned ($BRANCH)"
 fi
 
 info "building"
