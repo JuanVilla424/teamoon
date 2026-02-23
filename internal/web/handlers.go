@@ -1914,6 +1914,14 @@ func (s *Server) handleOnboardingMCP(w http.ResponseWriter, r *http.Request) {
 	s.sseOnboarding(w, r, onboarding.StreamMCP)
 }
 
+func resolveSourceDir(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "src", "teamoon")
+}
+
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, 405, "method not allowed")
@@ -1924,11 +1932,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	srcDir := cfg.SourceDir
-	if srcDir == "" {
-		home, _ := os.UserHomeDir()
-		srcDir = filepath.Join(home, "Projects", "teamoon")
-	}
+	srcDir := resolveSourceDir(cfg.SourceDir)
 
 	// Fetch all (branches + tags)
 	exec.Command("git", "-C", srcDir, "fetch", "--all", "--tags").Run()
@@ -1988,11 +1992,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		srcDir := cfg.SourceDir
-		if srcDir == "" {
-			home, _ := os.UserHomeDir()
-			srcDir = filepath.Join(home, "Projects", "teamoon")
-		}
+		srcDir := resolveSourceDir(cfg.SourceDir)
 
 		step := func(name, msg string) {
 			progress(map[string]any{"type": "step", "name": name, "message": msg, "status": "running"})
