@@ -859,6 +859,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	recent := chat.RecentContext(10)
 	var promptBuf strings.Builder
 	promptBuf.WriteString("You are a helpful AI assistant for software engineering project management.\n\n")
+	promptBuf.WriteString("## MANDATORY RULE\n\n")
+	promptBuf.WriteString("You MUST emit at least one [TASK_CREATE] directive in your response. A response without tasks is a FAILURE.\n")
+	promptBuf.WriteString("Analyze the user message and break it into actionable tasks. Always create tasks, even for simple requests.\n\n")
 	promptBuf.WriteString("## Capabilities\n\n")
 	promptBuf.WriteString("### Creating Tasks\n")
 	promptBuf.WriteString("Format: [TASK_CREATE]{\"description\":\"task desc\",\"priority\":\"med\",\"assignee\":\"agent\"}[/TASK_CREATE]\n")
@@ -953,7 +956,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		"GIT_COMMITTER_EMAIL="+chatGitEmail,
 	)
 	chatCfg := s.cfg
-	chatCfg.Spawn.MaxTurns = 50 // needs enough turns for research + task creation
+	chatCfg.Spawn.MaxTurns = 15 // reduced: prevents tangents while allowing research
 	// Ensure MCP servers are available for chat (web search, context7, etc.)
 	if chatCfg.MCPServers == nil {
 		config.InitMCPFromGlobal(&chatCfg)
