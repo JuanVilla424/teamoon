@@ -1,20 +1,14 @@
 #!/usr/bin/env bash
-_RAW_BRANCH=$(ps aux 2>/dev/null | sed -n 's|.*raw.githubusercontent.com/.*/teamoon/\([^/]*\)/install\.sh.*|\1|p' | head -1)
 set -eo pipefail
 
-# teamoon installer — single command:
+# teamoon installer:
 #   curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/<branch>/install.sh | bash
 #
 # Interactive installer — asks before optional components.
 # Installs prerequisites, builds, and sets up teamoon with systemd.
 # Supports Ubuntu/Debian and RHEL/Rocky Linux 8+.
-# Branch is detected automatically from the download URL.
 
 REPO="https://github.com/JuanVilla424/teamoon.git"
-BRANCH="${_RAW_BRANCH}"
-[ -z "$BRANCH" ] && BRANCH=$(sed -n 's|.*teamoon/\([^/]*\)/install\.sh.*|\1|p' "$0" 2>/dev/null | head -1)
-[ -z "$BRANCH" ] && BRANCH=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null | sed -n 's|.*refs/heads/\(.*\)|\1|p' | head -1)
-[ -z "$BRANCH" ] && { echo "ERROR: could not detect branch — set TEAMOON_BRANCH or pass as argument"; exit 1; }
 INSTALL_DIR="${HOME}/.local/src/teamoon"
 BINARY_DEST="/usr/local/bin/teamoon"
 
@@ -352,6 +346,8 @@ fi
 # ── 8. Configuration ────────────────────────────────────
 step "Configuration"
 
+_REPO_DEFAULT=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null | sed -n 's|.*refs/heads/\(.*\)|\1|p' | head -1)
+BRANCH=$(ask_input "Branch to install" "${_REPO_DEFAULT}")
 WEB_PORT=$(ask_input "Web dashboard port" "7777")
 WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "")
 PROJECTS_DIR=$(ask_input "Projects directory" "~/Projects")
