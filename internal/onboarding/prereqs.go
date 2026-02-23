@@ -181,21 +181,32 @@ func StreamPrereqsInstall(progress ProgressFunc) error {
 
 // ── Check functions ─────────────────────────────────────
 
-// keySystemPackages are the ones we check to determine if the system packages group is installed.
-var keySystemPackages = []string{"build-essential", "libssl-dev", "jq", "shellcheck", "yamllint"}
+var keySystemPackagesByDistro = map[distroFamily][]string{
+	distroDebian: {"build-essential", "libssl-dev", "jq", "shellcheck"},
+	distroRHEL:   {"gcc", "openssl-devel", "jq", "ShellCheck"},
+}
 
 func checkSystemPackages() (string, bool) {
+	pkgs, ok := keySystemPackagesByDistro[currentDistro]
+	if !ok {
+		return "unknown distro, skipping check", true
+	}
 	missing := 0
-	for _, pkg := range keySystemPackages {
-		cmd := exec.Command("dpkg", "-s", pkg)
+	for _, pkg := range pkgs {
+		var cmd *exec.Cmd
+		if currentDistro == distroRHEL {
+			cmd = exec.Command("rpm", "-q", pkg)
+		} else {
+			cmd = exec.Command("dpkg", "-s", pkg)
+		}
 		if err := cmd.Run(); err != nil {
 			missing++
 		}
 	}
 	if missing > 0 {
-		return fmt.Sprintf("%d/%d key packages missing", missing, len(keySystemPackages)), false
+		return fmt.Sprintf("%d/%d key packages missing", missing, len(pkgs)), false
 	}
-	return fmt.Sprintf("%d key packages OK", len(keySystemPackages)), true
+	return fmt.Sprintf("%d key packages OK", len(pkgs)), true
 }
 
 func checkGo() (string, bool) {
@@ -314,24 +325,51 @@ func checkClaude() (string, bool) {
 
 // ── Install functions ───────────────────────────────────
 
-var allSystemPackages = []string{
-	"git", "curl", "wget", "zip", "unzip",
-	"build-essential", "gcc", "g++", "make", "cmake",
-	"libssl-dev", "zlib1g-dev", "libbz2-dev", "libreadline-dev",
-	"libsqlite3-dev", "llvm", "libncursesw5-dev", "xz-utils",
-	"tk-dev", "libxml2-dev", "libxmlsec1-dev", "libffi-dev", "liblzma-dev",
-	"libgdbm-dev", "libnss3-dev", "libgdbm-compat-dev", "uuid-dev",
-	"jq", "htop", "tree", "tmux",
-	"shellcheck", "yamllint", "pre-commit",
-	"ca-certificates", "gnupg", "lsb-release", "apt-transport-https",
-	"software-properties-common", "pkg-config",
+var allSystemPackagesByDistro = map[distroFamily][]string{
+	distroDebian: {
+		"git", "curl", "wget", "zip", "unzip",
+		"build-essential", "gcc", "g++", "make", "cmake",
+		"libssl-dev", "zlib1g-dev", "libbz2-dev", "libreadline-dev",
+		"libsqlite3-dev", "llvm", "libncursesw5-dev", "xz-utils",
+		"tk-dev", "libxml2-dev", "libxmlsec1-dev", "libffi-dev", "liblzma-dev",
+		"libgdbm-dev", "libnss3-dev", "libgdbm-compat-dev", "uuid-dev",
+		"jq", "htop", "tree", "tmux",
+		"shellcheck",
+		"ca-certificates", "gnupg", "lsb-release", "apt-transport-https",
+		"software-properties-common", "pkg-config",
+	},
+	distroRHEL: {
+		"git", "curl", "wget", "zip", "unzip",
+		"gcc", "gcc-c++", "make", "cmake",
+		"openssl-devel", "zlib-devel", "bzip2-devel", "readline-devel",
+		"sqlite-devel", "llvm", "ncurses-devel", "xz-devel",
+		"tk-devel", "libxml2-devel", "libffi-devel",
+		"gdbm-devel", "nss-devel", "libuuid-devel",
+		"jq", "htop", "tree", "tmux",
+		"ShellCheck",
+		"ca-certificates", "gnupg2",
+		"dnf-plugins-core", "pkgconf-pkg-config",
+		"python3-pip",
+	},
 }
 
 func installSystemPackages(progress ProgressFunc) error {
-	// Find which are missing
+	pkgs, ok := allSystemPackagesByDistro[currentDistro]
+	if !ok {
+		progress(map[string]any{
+			"type": "detail", "message": "Unknown distro, skipping package install",
+		})
+		return nil
+	}
+
 	var missing []string
-	for _, pkg := range allSystemPackages {
-		cmd := exec.Command("dpkg", "-s", pkg)
+	for _, pkg := range pkgs {
+		var cmd *exec.Cmd
+		if currentDistro == distroRHEL {
+			cmd = exec.Command("rpm", "-q", pkg)
+		} else {
+			cmd = exec.Command("dpkg", "-s", pkg)
+		}
 		if err := cmd.Run(); err != nil {
 			missing = append(missing, pkg)
 		}
@@ -344,11 +382,25 @@ func installSystemPackages(progress ProgressFunc) error {
 		"type": "detail", "message": fmt.Sprintf("Installing %d packages...", len(missing)),
 	})
 
-	args := append([]string{"apt-get", "install", "-y", "-qq"}, missing...)
-	cmd := exec.Command("sudo", args...)
+	// Enable EPEL + CRB repos on RHEL before installing
+	if currentDistro == distroRHEL {
+		exec.Command("sudo", "dnf", "install", "-y", "-q", "epel-release").Run()
+		exec.Command("sudo", "dnf", "config-manager", "--set-enabled", "crb").Run()
+		exec.Command("sudo", "dnf", "config-manager", "--set-enabled", "powertools").Run()
+	}
+
+	var cmd *exec.Cmd
+	if currentDistro == distroRHEL {
+		args := append([]string{"dnf", "install", "-y"}, missing...)
+		cmd = exec.Command("sudo", args...)
+	} else {
+		args := append([]string{"apt-get", "install", "-y", "-qq"}, missing...)
+		cmd = exec.Command("sudo", args...)
+	}
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("apt install failed: %s — %s", err, trimOutput(out))
+		return fmt.Errorf("package install failed: %s — %s", err, trimOutput(out))
 	}
 	return nil
 }
@@ -385,19 +437,30 @@ func installGo(progress ProgressFunc) error {
 		return fmt.Errorf("extract failed: %s — %s", err, trimOutput(out))
 	}
 
-	// Ensure PATH in bashrc
+	// Ensure PATH in shell profile
 	home, _ := os.UserHomeDir()
-	bashrc := filepath.Join(home, ".bashrc")
-	content, _ := os.ReadFile(bashrc)
-	if !strings.Contains(string(content), "/usr/local/go/bin") {
-		f, err := os.OpenFile(bashrc, os.O_APPEND|os.O_WRONLY, 0644)
-		if err == nil {
-			f.WriteString("\nexport PATH=$PATH:/usr/local/go/bin:$HOME/go/bin\n")
-			f.Close()
-		}
-	}
+	appendToShellProfile(home, "export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin")
 
 	return nil
+}
+
+// appendToShellProfile appends a line to .bashrc and also .bash_profile on RHEL.
+func appendToShellProfile(home, line string) {
+	files := []string{filepath.Join(home, ".bashrc")}
+	if currentDistro == distroRHEL {
+		files = append(files, filepath.Join(home, ".bash_profile"))
+	}
+	for _, f := range files {
+		content, _ := os.ReadFile(f)
+		if strings.Contains(string(content), line) {
+			continue
+		}
+		fh, err := os.OpenFile(f, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+		if err == nil {
+			fh.WriteString("\n" + line + "\n")
+			fh.Close()
+		}
+	}
 }
 
 const nvmVersion = "0.40.1"
@@ -446,18 +509,11 @@ func installPython(progress ProgressFunc) error {
 			return fmt.Errorf("pyenv install failed: %s — %s", err, trimOutput(out))
 		}
 
-		// Add to bashrc if not present
-		bashrc := filepath.Join(home, ".bashrc")
-		content, _ := os.ReadFile(bashrc)
-		if !strings.Contains(string(content), "PYENV_ROOT") {
-			f, err := os.OpenFile(bashrc, os.O_APPEND|os.O_WRONLY, 0644)
-			if err == nil {
-				f.WriteString("\nexport PYENV_ROOT=\"$HOME/.pyenv\"\n")
-				f.WriteString("[[ -d $PYENV_ROOT/bin ]] && export PATH=\"$PYENV_ROOT/bin:$PATH\"\n")
-				f.WriteString("eval \"$(pyenv init -)\"\n")
-				f.Close()
-			}
-		}
+		// Add to shell profiles
+		appendToShellProfile(home, `export PYENV_ROOT="$HOME/.pyenv"`)
+		appendToShellProfile(home, `[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"`)
+		appendToShellProfile(home, `eval "$(pyenv init -)"`)
+
 	}
 
 	// Install Python 3.11
@@ -488,8 +544,14 @@ func installRust(progress ProgressFunc) error {
 }
 
 func installGh(progress ProgressFunc) error {
-	progress(map[string]any{"type": "detail", "message": "Adding GitHub CLI apt repository"})
+	if currentDistro == distroRHEL {
+		return installGhRHEL(progress)
+	}
+	return installGhDebian(progress)
+}
 
+func installGhDebian(progress ProgressFunc) error {
+	progress(map[string]any{"type": "detail", "message": "Adding GitHub CLI apt repository"})
 	script := `
 		sudo mkdir -p -m 755 /etc/apt/keyrings
 		tmpkey=$(mktemp)
@@ -505,6 +567,20 @@ func installGh(progress ProgressFunc) error {
 	cmd := exec.Command("bash", "-c", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gh install failed: %s — %s", err, trimOutput(out))
+	}
+	return nil
+}
+
+func installGhRHEL(progress ProgressFunc) error {
+	progress(map[string]any{"type": "detail", "message": "Adding GitHub CLI dnf repository"})
+	script := `
+		sudo dnf install -y 'dnf-command(config-manager)' 2>/dev/null || true
+		sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+		sudo dnf install -y gh
+	`
+	cmd := exec.Command("bash", "-c", script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh install failed (RHEL): %s — %s", err, trimOutput(out))
 	}
 	return nil
 }

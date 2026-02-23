@@ -175,7 +175,11 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/update/check", s.authWrap(s.handleUpdateCheck))
 	mux.HandleFunc("/api/update", s.authWrap(s.handleUpdate))
 
-	addr := fmt.Sprintf(":%d", s.cfg.WebPort)
+	host := s.cfg.WebHost
+	if host == "" {
+		host = "localhost"
+	}
+	addr := fmt.Sprintf("%s:%d", host, s.cfg.WebPort)
 	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
@@ -185,7 +189,7 @@ func (s *Server) Start(ctx context.Context) {
 		srv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("[web] listening on http://localhost%s", addr)
+	log.Printf("[web] listening on http://%s", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("[web] server error: %v", err)
 	}

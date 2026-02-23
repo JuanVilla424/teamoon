@@ -59,6 +59,7 @@ type Config struct {
 	ContextLimit       int                   `json:"context_limit"`
 	WebEnabled         bool                  `json:"web_enabled"`
 	WebPort            int                   `json:"web_port"`
+	WebHost            string                `json:"web_host"`
 	WebPassword        string                `json:"web_password"`
 	WebhookURL         string                `json:"webhook_url,omitempty"`
 	Spawn              SpawnConfig                    `json:"spawn"`
@@ -79,8 +80,9 @@ func DefaultConfig() Config {
 		ContextLimit:       0,
 		WebEnabled:         false,
 		WebPort:            7777,
+		WebHost:            "localhost",
 		WebPassword:        "",
-		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 25, StepTimeoutMin: 5},
+		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 15, StepTimeoutMin: 4},
 		Skeleton:           DefaultSkeleton(),
 		MaxConcurrent:      3,
 		MCPServers:         nil,

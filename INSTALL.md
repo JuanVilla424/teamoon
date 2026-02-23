@@ -2,8 +2,8 @@
 
 ### Prerequisites
 
-- Ubuntu/Debian-based system
-- sudo access
+- Ubuntu/Debian-based system **or** RHEL / Rocky Linux 8+
+- sudo access (non-root user recommended)
 
 ---
 
@@ -118,6 +118,75 @@ make install
 ```
 
 `make install` compiles the binary, copies it to `/usr/local/bin/teamoon`, sets up the systemd service, and starts it.
+
+---
+
+## 🐧 RHEL / Rocky Linux 8+ Install
+
+### Prerequisites
+
+- RHEL 8 or 9, Rocky Linux 8 or 9, AlmaLinux 8 or 9
+- sudo access (non-root user recommended)
+- `dnf` package manager
+
+### Quick Install (recommended)
+
+Same single command — the installer auto-detects the distro:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/main/install.sh | bash
+```
+
+### Manual — System Packages
+
+```bash
+sudo dnf install -y \
+  git curl wget zip unzip \
+  gcc gcc-c++ make cmake \
+  openssl-devel zlib-devel bzip2-devel readline-devel \
+  sqlite-devel llvm ncurses-devel xz-devel \
+  tk-devel libxml2-devel libffi-devel \
+  gdbm-devel nss-devel libuuid-devel \
+  jq htop tree tmux \
+  ShellCheck yamllint \
+  ca-certificates gnupg2 redhat-lsb-core \
+  dnf-plugins-core pkgconf-pkg-config
+```
+
+### Manual — GitHub CLI on RHEL
+
+```bash
+sudo dnf install -y 'dnf-command(config-manager)'
+sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+sudo dnf install -y gh
+gh auth login
+```
+
+### SELinux Notes
+
+teamoon writes logs to `/var/log/teamoon.log`. On RHEL with SELinux enforcing, restore the file context after creation:
+
+```bash
+sudo restorecon -v /var/log/teamoon.log
+sudo restorecon -v /usr/local/bin/teamoon
+```
+
+The `make install` target and `install.sh` do this automatically.
+
+### firewalld
+
+If firewalld is running, open the web dashboard port (default 7777):
+
+```bash
+sudo firewall-cmd --permanent --add-port=7777/tcp
+sudo firewall-cmd --reload
+```
+
+The installer does this automatically when firewalld is active.
+
+### Environment File
+
+On RHEL, the systemd service reads `/etc/sysconfig/teamoon` for environment variables (the RHEL convention). The installer creates this file automatically.
 
 ---
 

@@ -190,8 +190,8 @@ Configuration is stored at `~/.config/teamoon/config.json`.
 | ------------------ | ------ | ------- | ---------------------------------------------- |
 | `model`            | string | `""`    | Claude model override (empty = default)        |
 | `effort`           | string | `""`    | Effort level override (empty = default)        |
-| `max_turns`        | int    | `25`    | Max agentic turns per step                     |
-| `step_timeout_min` | int    | `5`     | Max minutes per step before timeout (0 = none) |
+| `max_turns`        | int    | `15`    | Max agentic turns per step                     |
+| `step_timeout_min` | int    | `4`     | Max minutes per step before timeout (0 = none) |
 
 ### Skeleton Settings (`skeleton`)
 
