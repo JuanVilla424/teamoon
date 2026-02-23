@@ -347,9 +347,9 @@ fi
 step "Configuration"
 
 _REPO_DEFAULT=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null | sed -n 's|.*refs/heads/\(.*\)|\1|p' | head -1)
-BRANCH=$(ask_input "Branch to install" "${_REPO_DEFAULT}")
+BRANCH=$(ask_input "Branch to install [main, prod, test, dev]" "${_REPO_DEFAULT}")
 WEB_PORT=$(ask_input "Web dashboard port" "7777")
-WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "")
+WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "localhost")
 PROJECTS_DIR=$(ask_input "Projects directory" "~/Projects")
 
 # Expand ~ for mkdir
