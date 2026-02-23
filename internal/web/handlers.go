@@ -981,7 +981,16 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		writeErr(w, 500, err.Error())
+		// Send SSE-formatted error so the frontend stream pump can handle it
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		if f, ok := w.(http.Flusher); ok {
+			errData, _ := json.Marshal(map[string]any{"error": "Failed to start claude: " + err.Error()})
+			fmt.Fprintf(w, "data: %s\n\n", errData)
+			doneData, _ := json.Marshal(map[string]any{"done": true})
+			fmt.Fprintf(w, "data: %s\n\n", doneData)
+			f.Flush()
+		}
 		return
 	}
 
@@ -1060,6 +1069,14 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		errMsg := stderrBuf.String()
 		log.Printf("[chat] claude exited with error: %v", waitErr)
 		os.WriteFile("/tmp/teamoon-chat-stderr.log", []byte(errMsg), 0644)
+		// Send error to client if no result was already sent
+		if displayResult == "" {
+			errData, _ := json.Marshal(map[string]any{"error": "Claude exited with error: " + waitErr.Error()})
+			fmt.Fprintf(w, "data: %s\n\n", errData)
+			doneData, _ := json.Marshal(map[string]any{"done": true})
+			fmt.Fprintf(w, "data: %s\n\n", doneData)
+			flusher.Flush()
+		}
 	}
 
 	// Parse directives from response

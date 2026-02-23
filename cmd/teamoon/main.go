@@ -15,6 +15,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/onboarding"
+	"github.com/JuanVilla424/teamoon/internal/pathutil"
 	"github.com/JuanVilla424/teamoon/internal/queue"
 	"github.com/JuanVilla424/teamoon/internal/web"
 )
@@ -25,6 +26,8 @@ var (
 )
 
 func main() {
+	pathutil.AugmentPath()
+
 	dashboard.Version = version
 	dashboard.BuildNum = buildNum
 	web.Version = version
