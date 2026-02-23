@@ -2044,23 +2044,25 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		done("build", "Build successful")
 
-		// 3. install binary
-		step("install", "Installing new binary...")
+		// 3. stop service, install binary, restart
+		step("install", "Stopping service and installing new binary...")
+		exec.Command("sudo", "systemctl", "stop", "teamoon").Run()
 		newBin := filepath.Join(srcDir, "teamoon")
 		cpOut, cpErr := exec.Command("sudo", "cp", newBin, "/usr/local/bin/teamoon").CombinedOutput()
 		if cpErr != nil {
 			progress(map[string]any{"type": "step", "name": "install", "message": string(cpOut), "status": "error"})
+			exec.Command("sudo", "systemctl", "start", "teamoon").Run()
 			return fmt.Errorf("install failed: %s", string(cpOut))
 		}
 		exec.Command("sudo", "chmod", "755", "/usr/local/bin/teamoon").Run()
 		done("install", "Binary installed")
 
-		// 4. restart — send event then restart in goroutine
+		// 4. restart
 		progress(map[string]any{"type": "step", "name": "restart", "message": "Restarting service...", "status": "restarting"})
 
 		go func() {
 			time.Sleep(500 * time.Millisecond)
-			exec.Command("sudo", "systemctl", "restart", "teamoon").Run()
+			exec.Command("sudo", "systemctl", "start", "teamoon").Run()
 		}()
 
 		return nil
