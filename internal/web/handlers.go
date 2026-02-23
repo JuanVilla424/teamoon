@@ -1086,10 +1086,16 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	responseText := fullResponse.String()
 
 	// Parse PROJECT_INIT directive (must run before TASK_CREATE)
-	initRe := regexp.MustCompile(`\[PROJECT_INIT\](.*?)\[/PROJECT_INIT\]`)
+	// (?s) makes . match newlines — LLM often emits multiline JSON between tags
+	initRe := regexp.MustCompile(`(?s)\[PROJECT_INIT\](.*?)\[/PROJECT_INIT\]`)
 	if initMatch := initRe.FindStringSubmatch(responseText); len(initMatch) >= 2 {
 		var initReq projectinit.InitRequest
-		if err := json.Unmarshal([]byte(initMatch[1]), &initReq); err == nil && initReq.Name != "" {
+		initJSON := strings.TrimSpace(initMatch[1])
+		if err := json.Unmarshal([]byte(initJSON), &initReq); err != nil {
+			log.Printf("[chat] [PROJECT_INIT] JSON parse error: %v — raw: %q", err, initMatch[1])
+		} else if initReq.Name == "" {
+			log.Printf("[chat] [PROJECT_INIT] missing 'name' field — raw: %q", initMatch[1])
+		} else if err == nil && initReq.Name != "" {
 			if initReq.Type == "" {
 				initReq.Type = "python"
 			}
@@ -1120,12 +1126,16 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse task creation directives
-	taskDirectiveRe := regexp.MustCompile(`\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
+	// (?s) makes . match newlines — LLM often emits multiline JSON between tags
+	taskDirectiveRe := regexp.MustCompile(`(?s)\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
 	matches := taskDirectiveRe.FindAllStringSubmatch(responseText, -1)
 	var createdTasks []map[string]any
 
+	log.Printf("[chat] directive scan: found %d [TASK_CREATE] block(s), project=%q", len(matches), req.Project)
+
 	if len(matches) > 0 && req.Project == "" {
 		// GUARD: refuse to create tasks without a project
+		log.Printf("[chat] skipping %d task directives: no project context", len(matches))
 		errData, _ := json.Marshal(map[string]any{
 			"error": "Cannot create tasks without a project. Select an existing project or create a new one first.",
 		})
@@ -1142,15 +1152,18 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			Priority    string `json:"priority"`
 			Assignee    string `json:"assignee"`
 		}
-		for _, m := range matches {
+		for i, m := range matches {
 			if len(m) < 2 {
 				continue
 			}
+			raw := strings.TrimSpace(m[1])
 			var td taskDirective
-			if err := json.Unmarshal([]byte(m[1]), &td); err != nil {
+			if err := json.Unmarshal([]byte(raw), &td); err != nil {
+				log.Printf("[chat] [TASK_CREATE][%d] JSON parse error: %v — raw: %q", i, err, raw)
 				continue
 			}
 			if td.Description == "" {
+				log.Printf("[chat] [TASK_CREATE][%d] empty description — raw: %q", i, raw)
 				continue
 			}
 			if td.Priority == "" {
@@ -1161,6 +1174,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			}
 			t, err := queue.Add(req.Project, td.Description, td.Priority)
 			if err != nil {
+				log.Printf("[chat] [TASK_CREATE][%d] queue.Add error: %v", i, err)
 				continue
 			}
 			queue.UpdateAssignee(t.ID, td.Assignee)
@@ -1174,6 +1188,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				"assignee":    td.Assignee,
 			})
 		}
+
+		log.Printf("[chat] directive result: %d task(s) created out of %d found, project=%q",
+			len(createdTasks), len(matches), req.Project)
 
 		// Send tasks_created SSE event
 		if len(createdTasks) > 0 {
@@ -1316,6 +1333,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"context_limit":       cfg.ContextLimit,
 		"web_enabled":         cfg.WebEnabled,
 		"web_port":            cfg.WebPort,
+		"web_host":            cfg.WebHost,
 		"web_password":        pw,
 		"webhook_url":         cfg.WebhookURL,
 		"spawn_model":         cfg.Spawn.Model,
@@ -1341,6 +1359,7 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		ContextLimit       int                   `json:"context_limit"`
 		WebEnabled         bool                  `json:"web_enabled"`
 		WebPort            int                   `json:"web_port"`
+		WebHost            string                `json:"web_host"`
 		WebPassword        string                `json:"web_password"`
 		WebhookURL         string                `json:"webhook_url"`
 		SpawnModel         *string               `json:"spawn_model,omitempty"`
@@ -1374,6 +1393,9 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	cfg.WebEnabled = req.WebEnabled
 	if req.WebPort > 0 {
 		cfg.WebPort = req.WebPort
+	}
+	if req.WebHost != "" {
+		cfg.WebHost = req.WebHost
 	}
 	// Only update password if not masked
 	if req.WebPassword != "***" {

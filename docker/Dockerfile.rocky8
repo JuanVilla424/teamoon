@@ -1,0 +1,15 @@
+FROM rockylinux:8
+
+RUN dnf install -y sudo bash curl && dnf clean all
+
+ARG USERNAME=testuser
+RUN useradd -m -s /bin/bash ${USERNAME} && \
+    echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+USER ${USERNAME}
+WORKDIR /home/${USERNAME}
+
+COPY --chown=${USERNAME}:${USERNAME} install.sh /home/${USERNAME}/install.sh
+RUN chmod +x /home/${USERNAME}/install.sh
+
+CMD ["/bin/bash"]
