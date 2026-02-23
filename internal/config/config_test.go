@@ -23,8 +23,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Spawn.MaxTurns != 15 {
 		t.Errorf("Spawn.MaxTurns should be 15, got %d", cfg.Spawn.MaxTurns)
 	}
-	if cfg.WebHost != "localhost" {
-		t.Errorf("WebHost should be 'localhost', got %s", cfg.WebHost)
+	if cfg.WebHost != "" {
+		t.Errorf("WebHost should be empty by default, got %s", cfg.WebHost)
 	}
 	if cfg.Spawn.Model != "" {
 		t.Errorf("Spawn.Model should be empty, got %s", cfg.Spawn.Model)
