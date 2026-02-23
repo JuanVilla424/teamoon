@@ -348,7 +348,7 @@ fi
 step "Configuration"
 
 WEB_PORT=$(ask_input "Web dashboard port" "7777")
-WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "localhost")
+WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "")
 PROJECTS_DIR=$(ask_input "Projects directory" "~/Projects")
 
 # Expand ~ for mkdir
