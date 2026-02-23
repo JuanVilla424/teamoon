@@ -171,6 +171,8 @@ var setupStep = 1;
 var setupStepDone = {};
 var setupStepError = {};
 var setupRunning = false;
+var setupStatusFetching = false;
+var setupStatusLoaded = false;
 
 /* ── BMAD Agent Map ── */
 var agentMap = {
@@ -539,9 +541,9 @@ function computeContentKey(v){
 }
 
 function render(){
-  if(!D) return;
-  updateTopbar();
   var v = getView();
+  if(!D && v !== "setup") return;
+  if(D) updateTopbar();
   var nav = document.querySelectorAll("#dock a");
   for(var i=0;i<nav.length;i++){
     nav[i].classList.toggle("active", nav[i].getAttribute("data-view") === v);
@@ -2408,12 +2410,21 @@ function sendChatMessage(){
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({message:msg, project:chatProject})
   }).then(function(res){
+    if(!res.ok && !res.headers.get("content-type")?.startsWith("text/event-stream")){
+      chatMessages[chatMessages.length-1].content = "Error: server returned " + res.status;
+      chatLoading = false; chatCounter++; render();
+      return;
+    }
     var reader = res.body.getReader();
     var decoder = new TextDecoder();
     var buffer = "";
+    var gotDone = false;
     function pump(){
       reader.read().then(function(result){
         if(result.done){
+          if(!gotDone){
+            chatMessages[chatMessages.length-1].content = chatMessages[chatMessages.length-1].content || "No response from Claude. Check that claude is installed and authenticated.";
+          }
           chatLoading = false;
           chatCounter++;
           render();
@@ -2524,8 +2535,12 @@ function sendChatMessage(){
               }
               if(evt.error && !evt.project_init){
                 toast(evt.error, "error");
+                if(!chatMessages[chatMessages.length-1].content){
+                  chatMessages[chatMessages.length-1].content = "Error: " + evt.error;
+                }
               }
               if(evt.done){
+                gotDone = true;
                 if(evt.result) chatMessages[chatMessages.length-1].content = evt.result;
                 // Strip directives from stored/displayed content
                 var cleanContent = chatMessages[chatMessages.length-1].content
@@ -2925,6 +2940,7 @@ function renderInitStep(prog, evt){
 }
 
 /* ── Init ── */
+if(getView() === "setup") render();
 api("GET","/api/data", null, function(d){
   D = d;
   render();
@@ -2960,7 +2976,39 @@ function checkOnboarding(){
   }).catch(function(){});
 }
 
+function nextIncompleteStep(){
+  for(var i=0;i<SETUP_STEPS.length;i++){
+    if(!setupStepDone[SETUP_STEPS[i].id]) return SETUP_STEPS[i].id;
+  }
+  return 0;
+}
+
+function allSetupDone(){
+  for(var i=0;i<SETUP_STEPS.length;i++){
+    if(!setupStepDone[SETUP_STEPS[i].id]) return false;
+  }
+  return true;
+}
+
+function loadSetupStatus(){
+  if(setupStatusFetching) return;
+  setupStatusFetching = true;
+  fetch("/api/onboarding/status").then(function(r){ return r.json(); }).then(function(s){
+    if(!s || !s.steps) return;
+    if(s.steps.config) setupStepDone[2] = true;
+    if(s.steps.skills) setupStepDone[3] = true;
+    if(s.steps.bmad) setupStepDone[4] = true;
+    if(s.steps.hooks) setupStepDone[5] = true;
+    if(s.steps.mcp) setupStepDone[6] = true;
+    setupStatusLoaded = true;
+    var next = nextIncompleteStep();
+    if(next && !setupRunning) setupStep = next;
+    if(!setupRunning) render();
+  }).catch(function(){});
+}
+
 function renderSetup(root){
+  loadSetupStatus();
   var container = div("setup-container");
 
   // Sidebar
@@ -3002,20 +3050,35 @@ function renderSetup(root){
 
   // Main area
   var main = div("setup-main");
-  var step = SETUP_STEPS[setupStep - 1];
-  main.appendChild(el("div","setup-title",[step.name]));
-  main.appendChild(el("div","setup-desc",[step.desc]));
 
-  var content = div("setup-content");
-  switch(setupStep){
-    case 1: renderSetupPrereqs(content); break;
-    case 2: renderSetupConfig(content); break;
-    case 3: renderSetupSkills(content); break;
-    case 4: renderSetupBMAD(content); break;
-    case 5: renderSetupHooks(content); break;
-    case 6: renderSetupMCP(content); break;
+  if(allSetupDone()){
+    main.appendChild(el("div","setup-title",["Setup Complete"]));
+    main.appendChild(el("div","setup-desc",["All steps have been completed. Your environment is ready."]));
+    var content = div("setup-content");
+    var doneWrap = div("setup-complete");
+    doneWrap.appendChild(el("div","setup-complete-icon",["\u2705"]));
+    doneWrap.appendChild(el("div","setup-complete-msg",["teamoon is fully configured and ready to use."]));
+    var goBtn = el("button","btn btn-primary",["Go to Dashboard"]);
+    goBtn.onclick = function(){ location.hash = "dashboard"; };
+    doneWrap.appendChild(goBtn);
+    content.appendChild(doneWrap);
+    main.appendChild(content);
+  } else {
+    var step = SETUP_STEPS[setupStep - 1];
+    main.appendChild(el("div","setup-title",[step.name]));
+    main.appendChild(el("div","setup-desc",[step.desc]));
+
+    var content = div("setup-content");
+    switch(setupStep){
+      case 1: renderSetupPrereqs(content); break;
+      case 2: renderSetupConfig(content); break;
+      case 3: renderSetupSkills(content); break;
+      case 4: renderSetupBMAD(content); break;
+      case 5: renderSetupHooks(content); break;
+      case 6: renderSetupMCP(content); break;
+    }
+    main.appendChild(content);
   }
-  main.appendChild(content);
   container.appendChild(main);
   root.appendChild(container);
 }
@@ -3089,6 +3152,8 @@ function renderSetupPrereqs(content){
         setupStepDone[1] = true;
         delete setupStepError[1];
         prog.appendChild(div("setup-status ok",["All required tools found"]));
+        var ns = nextIncompleteStep();
+        if(ns) setTimeout(function(){ setupStep = ns; render(); }, 800);
       } else {
         setupStepError[1] = true;
         var installable = prereqsMissing.filter(function(m){ return m.installable; });
@@ -3105,6 +3170,11 @@ function renderSetupPrereqs(content){
   content.appendChild(btn);
   content.appendChild(actions);
   content.appendChild(prog);
+
+  if(!setupPrereqsAutoChecked && !setupStepDone[1] && setupStatusLoaded && !setupRunning){
+    setupPrereqsAutoChecked = true;
+    btn.click();
+  }
 }
 
 function runPrereqsInstall(prog, actions){
@@ -3165,6 +3235,8 @@ function runPrereqsInstall(prog, actions){
       setupStepDone[1] = true;
       delete setupStepError[1];
       installProg.appendChild(div("setup-status ok",["All tools installed successfully"]));
+      var ns = nextIncompleteStep();
+      if(ns) setTimeout(function(){ setupStep = ns; render(); }, 800);
     } else {
       installProg.appendChild(div("setup-status err",[msg || "Some tools failed to install"]));
     }
@@ -3203,6 +3275,8 @@ function renderSetupConfig(content){
         setupStepDone[2] = true;
         delete setupStepError[2];
         toast("Configuration saved","success");
+        var ns = nextIncompleteStep();
+        if(ns) setTimeout(function(){ setupStep = ns; render(); }, 600);
       } else {
         setupStepError[2] = true;
         toast("Failed to save configuration","error");
@@ -3253,6 +3327,8 @@ function renderSetupSkills(content){
         setupStepDone[3] = true;
         delete setupStepError[3];
         prog.appendChild(div("setup-status ok",["All skills installed"]));
+        var ns = nextIncompleteStep();
+        if(ns) setTimeout(function(){ setupStep = ns; render(); }, 800);
       } else {
         setupStepError[3] = true;
         prog.appendChild(div("setup-status err",[msg || "Some skills failed"]));
@@ -3297,6 +3373,8 @@ function renderSetupBMAD(content){
         setupStepDone[4] = true;
         delete setupStepError[4];
         prog.appendChild(div("setup-status ok",["BMAD commands installed"]));
+        var ns = nextIncompleteStep();
+        if(ns) setTimeout(function(){ setupStep = ns; render(); }, 800);
       } else {
         setupStepError[4] = true;
         prog.appendChild(div("setup-status err",[msg || "BMAD installation failed"]));
@@ -3325,6 +3403,8 @@ function renderSetupHooks(content){
         setupStepDone[5] = true;
         delete setupStepError[5];
         prog.appendChild(div("setup-status ok",["Security hooks installed"]));
+        var ns = nextIncompleteStep();
+        if(ns) setTimeout(function(){ setupStep = ns; render(); }, 800);
       } else {
         setupStepError[5] = true;
         prog.appendChild(div("setup-status err",[msg || "Hooks installation failed"]));
@@ -3356,6 +3436,7 @@ function renderSetupMCP(content){
         setupStepDone[6] = true;
         delete setupStepError[6];
         prog.appendChild(div("setup-status ok",["MCP servers installed"]));
+        if(allSetupDone()) setTimeout(function(){ render(); }, 800);
       } else {
         setupStepError[6] = true;
         prog.appendChild(div("setup-status err",[msg || "MCP installation failed"]));
