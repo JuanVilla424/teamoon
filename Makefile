@@ -28,8 +28,7 @@ build: sync-bmad
 install: build
 	-sudo systemctl stop teamoon 2>/dev/null
 	sudo cp $(BUILD_DIR)/$(BINARY) /usr/local/bin/$(BINARY)
-	sudo chgrp input /usr/local/bin/$(BINARY)
-	sudo chmod g+s /usr/local/bin/$(BINARY)
+	sudo chmod 755 /usr/local/bin/$(BINARY)
 	@sudo touch /var/log/teamoon.log 2>/dev/null || true
 	@sudo chown $(shell whoami):$(shell whoami) /var/log/teamoon.log 2>/dev/null || true
 	sudo cp teamoon.service /etc/systemd/system/

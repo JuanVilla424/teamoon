@@ -199,7 +199,13 @@ func checkSystemPackages() (string, bool) {
 }
 
 func checkGo() (string, bool) {
-	out := getVersion("go")
+	// Go uses "go version" not "go --version"
+	cmd := exec.Command("go", "version")
+	raw, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	out := strings.TrimSpace(strings.SplitN(string(raw), "\n", 2)[0])
 	if out == "" {
 		return "", false
 	}
@@ -208,15 +214,15 @@ func checkGo() (string, bool) {
 	for _, p := range parts {
 		if strings.HasPrefix(p, "go") && len(p) > 2 {
 			ver := strings.TrimPrefix(p, "go")
-			// Check >= 1.24
+			// Check >= 1.21
 			segs := strings.SplitN(ver, ".", 3)
 			if len(segs) >= 2 {
 				minor := 0
 				fmt.Sscanf(segs[1], "%d", &minor)
-				if minor >= 24 {
+				if minor >= 21 {
 					return ver, true
 				}
-				return ver + " (need >= 1.24)", false
+				return ver + " (need >= 1.21)", false
 			}
 			return ver, true
 		}
