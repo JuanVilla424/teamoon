@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# teamoon installer — single command:
-#   curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/main/install.sh | bash
+# teamoon installer:
+#   curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/<branch>/install.sh | bash
 #
 # Interactive installer — asks before optional components.
 # Installs prerequisites, builds, and sets up teamoon with systemd.
 # Supports Ubuntu/Debian and RHEL/Rocky Linux 8+.
 
 REPO="https://github.com/JuanVilla424/teamoon.git"
-BRANCH="main"
 INSTALL_DIR="${HOME}/.local/src/teamoon"
 BINARY_DEST="/usr/local/bin/teamoon"
 
@@ -347,6 +346,8 @@ fi
 # ── 8. Configuration ────────────────────────────────────
 step "Configuration"
 
+_REPO_DEFAULT=$(git ls-remote --symref "$REPO" HEAD 2>/dev/null | sed -n 's|.*refs/heads/\(.*\)|\1|p' | head -1)
+BRANCH=$(ask_input "Branch to install [main, prod, test, dev]" "${_REPO_DEFAULT}")
 WEB_PORT=$(ask_input "Web dashboard port" "7777")
 WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "localhost")
 PROJECTS_DIR=$(ask_input "Projects directory" "~/Projects")
@@ -360,15 +361,16 @@ step "teamoon"
 
 if [ -d "$INSTALL_DIR/.git" ]; then
     info "updating existing clone at $INSTALL_DIR"
-    git -C "$INSTALL_DIR" fetch origin "$BRANCH" --quiet
-    git -C "$INSTALL_DIR" checkout "$BRANCH" --quiet 2>/dev/null || true
+    git -C "$INSTALL_DIR" remote set-branches origin '*'
+    git -C "$INSTALL_DIR" fetch origin --quiet
+    git -C "$INSTALL_DIR" checkout "$BRANCH" --quiet 2>/dev/null || git -C "$INSTALL_DIR" checkout -b "$BRANCH" "origin/$BRANCH" --quiet
     git -C "$INSTALL_DIR" reset --hard "origin/$BRANCH" --quiet
-    ok "updated to latest"
+    ok "updated to latest ($BRANCH)"
 else
     info "cloning teamoon to $INSTALL_DIR"
     mkdir -p "$(dirname "$INSTALL_DIR")"
     git clone --branch "$BRANCH" --depth 1 "$REPO" "$INSTALL_DIR" --quiet
-    ok "cloned"
+    ok "cloned ($BRANCH)"
 fi
 
 info "building"
