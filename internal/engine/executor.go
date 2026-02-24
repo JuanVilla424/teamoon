@@ -152,11 +152,15 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 			return
 		}
 
-		if reason := CheckGuardrails(); reason != "" {
-			emit(logs.LevelWarn, "Guardrail: "+reason, agent)
-			queue.UpdateState(task.ID, queue.StatePlanned)
-			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned, Message: "guardrail"})
-			return
+		for reason := CheckGuardrails(); reason != ""; reason = CheckGuardrails() {
+			emit(logs.LevelWarn, "Guardrail: "+reason+", waiting 2m...", agent)
+			select {
+			case <-ctx.Done():
+				queue.UpdateState(task.ID, queue.StatePlanned)
+				send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned, Message: "stopped"})
+				return
+			case <-time.After(2 * time.Minute):
+			}
 		}
 
 		success := false
@@ -258,7 +262,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 			reason := fmt.Sprintf("Step %d '%s' failed after %d attempts", step.Number, step.Title, maxRetries)
 			emit(logs.LevelError, "FAILED: "+reason, agent)
 			queue.SetFailReason(task.ID, reason)
-			send(TaskStateMsg{TaskID: task.ID, State: queue.StateFailed, Message: reason})
+			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: reason})
 			return
 		}
 	}
