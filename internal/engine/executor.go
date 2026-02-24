@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,7 +169,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 				emit(logs.LevelWarn, fmt.Sprintf("Step %d/%d: retry %d/%d", step.Number, total, retry, maxRetries-1), agent)
 			}
 
-			prompt := buildStepPrompt(task, p, step, retry, recoveryCtx, strings.Join(stepSummaries, "\n"))
+			prompt := buildStepPrompt(task, p, step, retry, recoveryCtx, strings.Join(stepSummaries, "\n"), cfg)
 			res, err := spawnClaude(ctx, task.Project, prompt, send, task.ID, addDirs, agent, cfg)
 			lastRes = res
 
@@ -223,7 +224,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 			if retry < maxRetries-1 {
 				emit(logs.LevelWarn, fmt.Sprintf("Step %d/%d failed (exit %d, %d denials), analyzing...",
 					step.Number, total, res.ExitCode, len(res.Denials)), agent)
-				recoveryPrompt := buildRecoveryPrompt(task, step, res.Output, res.ExitCode)
+				recoveryPrompt := buildRecoveryPrompt(task, step, res.Output, res.ExitCode, cfg)
 				recRes, _ := spawnClaude(ctx, task.Project, recoveryPrompt, send, task.ID, addDirs, agent, cfg)
 				// Feed recovery analysis as context to next retry
 				recoveryCtx = failInfo.String()
@@ -262,9 +263,8 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 	send(TaskStateMsg{TaskID: task.ID, State: queue.StateDone})
 }
 
-func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string) string {
-	home, _ := os.UserHomeDir()
-	projectPath := filepath.Join(home, "Projects", task.Project)
+func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string, cfg config.Config) string {
+	projectPath := filepath.Join(cfg.ProjectsDir, task.Project)
 
 	var sb strings.Builder
 	if step.Agent != "" {
@@ -275,7 +275,7 @@ func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, re
 	sb.WriteString(fmt.Sprintf("Task: %s\n", task.Description))
 	sb.WriteString(fmt.Sprintf("Project: %s\n", task.Project))
 	sb.WriteString(fmt.Sprintf("Working directory: %s\n", projectPath))
-	sb.WriteString(fmt.Sprintf("Projects root: %s\n\n", filepath.Join(home, "Projects")))
+	sb.WriteString(fmt.Sprintf("Projects root: %s\n\n", cfg.ProjectsDir))
 
 	// Inject project context files if present
 	for _, cf := range []struct {
@@ -335,9 +335,8 @@ func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, re
 	return sb.String()
 }
 
-func buildRecoveryPrompt(task queue.Task, step plan.Step, output string, exitCode int) string {
-	home, _ := os.UserHomeDir()
-	projectPath := filepath.Join(home, "Projects", task.Project)
+func buildRecoveryPrompt(task queue.Task, step plan.Step, output string, exitCode int, cfg config.Config) string {
+	projectPath := filepath.Join(cfg.ProjectsDir, task.Project)
 	truncated := output
 	if len(truncated) > 1000 {
 		truncated = truncated[len(truncated)-1000:]
@@ -358,10 +357,10 @@ func buildRecoveryPrompt(task queue.Task, step plan.Step, output string, exitCod
 }
 
 func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg), taskID int, addDirs []string, agent string, cfg config.Config) (spawnResult, error) {
-	home, _ := os.UserHomeDir()
-	projectPath := filepath.Join(home, "Projects", project)
+	projectPath := filepath.Join(cfg.ProjectsDir, project)
 
 	if _, err := os.Stat(projectPath); err != nil {
+		home, _ := os.UserHomeDir()
 		projectPath = home
 	}
 
@@ -423,6 +422,9 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 	for scanner.Scan() {
 		line := scanner.Text()
 		fullOutput.WriteString(line + "\n")
+		if cfg.Debug {
+			log.Printf("[debug][autopilot] raw: %s", line)
+		}
 
 		var event streamEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
@@ -435,8 +437,10 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 				for _, c := range event.Message.Content {
 					if c.Type == "tool_use" && c.Name != "" {
 						toolsUsed = append(toolsUsed, c.Name)
+						log.Printf("[autopilot] tool_use: %s", c.Name)
 					}
 					if c.Type == "text" && c.Text != "" {
+						log.Printf("[autopilot] %s", c.Text)
 						send(LogMsg{Entry: logs.LogEntry{
 							Time:    time.Now(),
 							TaskID:  taskID,

@@ -465,11 +465,11 @@ func (m Model) generatePlan(t queue.Task) tea.Cmd {
 				"### Step 2: [title]\n[detailed instructions]\nVerify: [concrete verification]\n\n"+
 				"(2-5 steps total, each independently executable)\n\n"+
 				"## Dependencies\n"+
-				"- /home/cloud-agent/Projects/{other-project-name} (only if steps need to access files outside the main project directory)\n"+
+				"- %s/{other-project-name} (only if steps need to access files outside the main project directory)\n"+
 				"(Omit this section entirely if no external directories are needed)\n\n"+
 				"## Constraints\n- [constraints]\n\n"+
 				"Output ONLY the markdown plan.",
-			desc, proj, desc,
+			desc, proj, desc, m.cfg.ProjectsDir,
 		)
 
 		env := filterEnv(os.Environ(), "CLAUDECODE")

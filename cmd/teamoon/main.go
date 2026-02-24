@@ -34,18 +34,24 @@ func main() {
 	web.Version = version
 	web.BuildNum = buildNum
 
+	var debugFlag bool
+
 	rootCmd := &cobra.Command{
 		Use:     "teamoon",
-		Short:   "Cloud development dashboard",
+		Short:   "AI-powered task autopilot",
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
 				return fmt.Errorf("config: %w", err)
 			}
+			if debugFlag {
+				cfg.Debug = true
+			}
 
 			engineMgr := engine.NewManager()
 			logBuf := logs.NewRingBuffer(100)
+			logBuf.SetDebug(cfg.Debug)
 			if f := logBuf.File(); f != nil {
 				log.SetOutput(f)
 			}
@@ -130,9 +136,13 @@ func main() {
 				return fmt.Errorf("config: %w", err)
 			}
 			cfg.WebEnabled = true
+			if debugFlag {
+				cfg.Debug = true
+			}
 
 			engineMgr := engine.NewManager()
 			logBuf := logs.NewRingBuffer(100)
+			logBuf.SetDebug(cfg.Debug)
 			if f := logBuf.File(); f != nil {
 				log.SetOutput(f)
 			}
@@ -157,6 +167,8 @@ func main() {
 			return onboarding.Run()
 		},
 	}
+
+	rootCmd.PersistentFlags().BoolVar(&debugFlag, "debug", false, "Enable debug logging")
 
 	taskCmd.AddCommand(taskAddCmd, taskDoneCmd, taskListCmd)
 	rootCmd.AddCommand(taskCmd, serveCmd, initCmd)

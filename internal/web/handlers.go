@@ -477,7 +477,7 @@ func buildSkeletonPrompt(sk config.SkeletonConfig) string {
 func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 	sk := config.SkeletonFor(s.cfg, t.Project)
 	skeletonBlock := buildSkeletonPrompt(sk)
-	prompt := plangen.BuildPlanPrompt(t, skeletonBlock)
+	prompt := plangen.BuildPlanPrompt(t, skeletonBlock, s.cfg.ProjectsDir)
 
 	s.store.logBuf.Add(logs.LogEntry{
 		Time: time.Now(), TaskID: t.ID, Project: t.Project,
@@ -907,6 +907,16 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	promptBuf.WriteString("Each task should be specific, actionable, and informed by your research.\n")
 	promptBuf.WriteString("Make tasks granular enough for an AI agent to execute in a single session.\n")
 	promptBuf.WriteString("Assign all tasks to \"agent\" unless the user says otherwise.\n\n")
+	promptBuf.WriteString("## Document Handling\n\n")
+	promptBuf.WriteString("When the user mentions a document, file, or resource (e.g. 'the requirements doc', 'the API spec', 'config file'):\n")
+	promptBuf.WriteString("1. Use Glob and Read tools to search for it in the project directory\n")
+	promptBuf.WriteString("2. Try common patterns: exact name, partial matches, common extensions (.md, .yaml, .json, .txt, .pdf)\n")
+	promptBuf.WriteString("3. If you CANNOT find the document after searching, STOP and ask the user for the exact path. Do NOT guess or fabricate content.\n")
+	promptBuf.WriteString("4. Once found, read and use its content to inform your response and task creation.\n\n")
+	promptBuf.WriteString("## Task Reminder\n\n")
+	promptBuf.WriteString("At the END of EVERY response, remind the user to create tasks if they haven't already.\n")
+	promptBuf.WriteString("Example: \"Would you like me to create tasks for this? Let me know the priority and I'll set them up.\"\n")
+	promptBuf.WriteString("If you already created tasks, summarize them and ask if the user wants to adjust priorities or add more.\n\n")
 	promptBuf.WriteString("## Formatting\n")
 	promptBuf.WriteString("When organizing tasks by phases, use collapsible HTML sections.\n")
 	promptBuf.WriteString("CRITICAL: Use HTML lists inside <details>, NOT markdown lists (markdown is not parsed inside HTML blocks).\n")
@@ -927,9 +937,8 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Project != "" {
-		home, _ := os.UserHomeDir()
 		promptBuf.WriteString(fmt.Sprintf("Working on project: %s (path: %s)\n\n",
-			req.Project, fmt.Sprintf("%s/Projects/%s", home, req.Project)))
+			req.Project, filepath.Join(s.cfg.ProjectsDir, req.Project)))
 	}
 	if len(recent) > 1 {
 		promptBuf.WriteString("Conversation history:\n")
@@ -944,7 +953,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	home, _ := os.UserHomeDir()
 	projectPath := home
 	if req.Project != "" {
-		pp := fmt.Sprintf("%s/Projects/%s", home, req.Project)
+		pp := filepath.Join(s.cfg.ProjectsDir, req.Project)
 		if _, err := os.Stat(pp); err == nil {
 			projectPath = pp
 		}
@@ -1032,6 +1041,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	var displayResult string
 	for scanner.Scan() {
 		line := scanner.Text()
+		if s.cfg.Debug {
+			log.Printf("[debug][chat] raw: %s", line)
+		}
 		var evt streamEvt
 		if err := json.Unmarshal([]byte(line), &evt); err != nil {
 			continue
@@ -1042,11 +1054,13 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				for _, c := range evt.Message.Content {
 					if c.Type == "text" && c.Text != "" {
 						fullResponse.WriteString(c.Text)
+						log.Printf("[chat] response: %s", c.Text)
 						tokenData, _ := json.Marshal(map[string]string{"token": c.Text})
 						fmt.Fprintf(w, "data: %s\n\n", tokenData)
 						flusher.Flush()
 					}
 					if c.Type == "tool_use" && c.Name != "" {
+						log.Printf("[chat] tool_use: %s", c.Name)
 						toolData, _ := json.Marshal(map[string]string{"tool_use": c.Name})
 						fmt.Fprintf(w, "data: %s\n\n", toolData)
 						flusher.Flush()
@@ -1054,6 +1068,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case "user":
+			log.Printf("[chat] tool_done")
 			toolDoneData, _ := json.Marshal(map[string]bool{"tool_done": true})
 			fmt.Fprintf(w, "data: %s\n\n", toolDoneData)
 			flusher.Flush()
