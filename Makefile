@@ -1,4 +1,4 @@
-VERSION := 1.0.39
+VERSION := 1.1.0
 BINARY := teamoon
 BUILD_DIR := .
 
