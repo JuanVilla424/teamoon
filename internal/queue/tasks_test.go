@@ -144,7 +144,7 @@ func TestUpdateState(t *testing.T) {
 
 	task, _ := Add("proj", "desc", "med")
 
-	for _, state := range []TaskState{StatePlanned, StateRunning, StateBlocked, StateDone} {
+	for _, state := range []TaskState{StatePlanned, StateRunning, StateFailed, StateDone} {
 		if err := UpdateState(task.ID, state); err != nil {
 			t.Fatalf("UpdateState(%s): %v", state, err)
 		}
@@ -200,7 +200,7 @@ func TestResetPlan(t *testing.T) {
 
 	task, _ := Add("proj", "desc", "med")
 	_ = SetPlanFile(task.ID, "/tmp/plan.md")
-	_ = SetBlockReason(task.ID, "some reason")
+	_ = SetFailReason(task.ID, "some reason")
 
 	if err := ResetPlan(task.ID); err != nil {
 		t.Fatal(err)
@@ -213,28 +213,28 @@ func TestResetPlan(t *testing.T) {
 	if all[0].PlanFile != "" {
 		t.Errorf("expected empty PlanFile, got %s", all[0].PlanFile)
 	}
-	if all[0].BlockReason != "" {
-		t.Errorf("expected empty BlockReason, got %s", all[0].BlockReason)
+	if all[0].FailReason != "" {
+		t.Errorf("expected empty FailReason, got %s", all[0].FailReason)
 	}
 	if all[0].Done {
 		t.Error("expected Done=false after reset")
 	}
 }
 
-func TestSetBlockReason(t *testing.T) {
+func TestSetFailReason(t *testing.T) {
 	setupTestEnv(t)
 
 	task, _ := Add("proj", "desc", "med")
-	if err := SetBlockReason(task.ID, "build failed"); err != nil {
+	if err := SetFailReason(task.ID, "build failed"); err != nil {
 		t.Fatal(err)
 	}
 
 	all, _ := ListAll()
-	if all[0].BlockReason != "build failed" {
-		t.Errorf("expected 'build failed', got %s", all[0].BlockReason)
+	if all[0].FailReason != "build failed" {
+		t.Errorf("expected 'build failed', got %s", all[0].FailReason)
 	}
-	if all[0].State != StateBlocked {
-		t.Errorf("expected state blocked, got %s", all[0].State)
+	if all[0].State != StateFailed {
+		t.Errorf("expected state failed, got %s", all[0].State)
 	}
 }
 
@@ -368,7 +368,7 @@ func TestEffectiveState(t *testing.T) {
 		{"empty state not done", Task{State: "", Done: false}, StatePending},
 		{"empty state done", Task{State: "", Done: true}, StateDone},
 		{"explicit running", Task{State: StateRunning}, StateRunning},
-		{"explicit blocked", Task{State: StateBlocked}, StateBlocked},
+		{"explicit failed", Task{State: StateFailed}, StateFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

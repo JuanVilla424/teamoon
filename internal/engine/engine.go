@@ -79,7 +79,7 @@ func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send fu
 			Message: "claude CLI not found in PATH",
 			Level:   logs.LevelError,
 		}})
-		send(TaskStateMsg{TaskID: task.ID, State: queue.StateBlocked, Message: "claude CLI not found"})
+		send(TaskStateMsg{TaskID: task.ID, State: queue.StateFailed, Message: "claude CLI not found"})
 		close(r.done)
 		return
 	}
