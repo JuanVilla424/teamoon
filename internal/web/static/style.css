@@ -561,7 +561,6 @@ a:hover { color: var(--text) }
 .task-state.pending { background: var(--glass); color: var(--text-faint) }
 .task-state.planned { background: var(--info-soft); color: var(--info) }
 .task-state.running { background: var(--success-soft); color: var(--success) }
-.task-state.failed { background: var(--danger-soft); color: var(--danger) }
 .task-state.done { background: var(--card-bg); color: var(--text-faint) }
 .task-state.generating { background: var(--warning-soft); color: var(--warning) }
 .task-pri { font-size: 10px; font-weight: 700; font-family: var(--mono); letter-spacing: .3px }
@@ -802,7 +801,6 @@ a:hover { color: var(--text) }
 .pd-task-count.running { color: var(--success); background: var(--success-soft) }
 .pd-task-count.pending { color: var(--text-muted) }
 .pd-task-count.done { color: var(--text-faint) }
-.pd-task-count.failed { color: var(--danger); background: var(--danger-soft) }
 .pd-progress-bar { height: 6px; border-radius: 3px; background: var(--card-bg-hover); margin-bottom: 4px; overflow: hidden }
 .pd-progress-fill { height: 100%; border-radius: 3px; background: var(--primary); transition: width .3s }
 .pd-progress-label { font-size: 11px; color: var(--text-faint); font-family: var(--mono); margin-bottom: 10px; display: block }
@@ -1169,8 +1167,6 @@ a:hover { color: var(--text) }
 .canvas-card::before { display: none }
 .canvas-card.pri-high,.canvas-card.pri-med,.canvas-card.pri-low { border-left: none }
 .canvas-card.dragging { opacity: .35; transform: scale(.97) }
-.canvas-card.is-failed { border-color: rgba(244,63,94,.2) }
-.canvas-card-failed-overlay { position: absolute; inset: 0; background: rgba(244,63,94,.03); pointer-events: none; border-radius: var(--r-md) }
 .canvas-card-inner { padding: 12px 14px }
 .canvas-card-labels { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-bottom: 8px }
 .canvas-label { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: var(--r-full); letter-spacing: .3px; line-height: 1.4; white-space: nowrap; font-family: var(--mono) }
@@ -1185,7 +1181,6 @@ a:hover { color: var(--text) }
 .canvas-card-id { font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--text-faint); flex-shrink: 0 }
 .canvas-card-date { font-size: 11px; color: var(--text-faint); font-family: var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .canvas-card-plan-icon { font-size: 12px; color: var(--info); flex-shrink: 0 }
-.canvas-card-failed-icon { font-size: 13px; color: var(--danger); flex-shrink: 0 }
 .canvas-empty { text-align: center; color: var(--text-faint); font-style: italic; padding: 32px 14px; font-size: 13px; border: 1px dashed var(--glass); border-radius: var(--r-md); margin: 4px }
 .canvas-agent-badge { font-size: 10px; margin-left: auto; font-weight: 500; white-space: nowrap; font-family: var(--mono) }
 
@@ -1194,7 +1189,6 @@ a:hover { color: var(--text) }
 .state-badge.state-planned { background: var(--info-soft); color: var(--info) }
 .state-badge.state-running { background: var(--success-soft); color: var(--success) }
 .state-badge.state-generating { background: var(--warning-soft); color: var(--warning) }
-.state-badge.state-failed { background: var(--danger-soft); color: var(--danger) }
 .state-badge.state-done { background: var(--card-bg); color: var(--text-faint) }
 .priority-badge { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: var(--r-full); text-transform: uppercase; letter-spacing: .3px; font-family: var(--mono) }
 .priority-badge.pri-high { background: var(--danger-soft); color: var(--danger) }
