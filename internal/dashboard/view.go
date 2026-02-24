@@ -153,11 +153,6 @@ func (m Model) renderCost(width int, barWidth int) string {
 	var b strings.Builder
 	b.WriteString(panelTitleStyle.Render("USAGE") + "\n")
 
-	plan := "—"
-	if m.cost.PlanCost > 0 {
-		plan = fmt.Sprintf("$%.0f/mo", m.cost.PlanCost)
-	}
-	b.WriteString(fmt.Sprintf("  Plan:       %s\n", costStyle.Render(plan)))
 	b.WriteString(fmt.Sprintf("  Today:      %d sessions\n", m.cost.SessionsToday))
 	b.WriteString(fmt.Sprintf("              %s output\n", formatNum(m.cost.OutputToday)))
 	b.WriteString(fmt.Sprintf("  This Week:  %d sessions\n", m.cost.SessionsWeek))

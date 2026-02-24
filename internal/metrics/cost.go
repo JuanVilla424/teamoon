@@ -1,9 +1,5 @@
 package metrics
 
-import (
-	"github.com/JuanVilla424/teamoon/internal/config"
-)
-
 // Claude API pricing per million tokens (Feb 2026)
 type modelPricing struct {
 	Input      float64
@@ -42,7 +38,6 @@ func tokenCost(s TokenSummary) float64 {
 }
 
 type CostSummary struct {
-	PlanCost      float64 `json:"plan_cost"`
 	CostToday     float64 `json:"cost_today"`
 	CostWeek      float64 `json:"cost_week"`
 	CostMonth     float64 `json:"cost_month"`
@@ -54,9 +49,8 @@ type CostSummary struct {
 	OutputMonth   int     `json:"output_month"`
 }
 
-func CalculateCost(today, week, month TokenSummary, cfg config.Config) CostSummary {
+func CalculateCost(today, week, month TokenSummary) CostSummary {
 	return CostSummary{
-		PlanCost:      cfg.BudgetMonthly,
 		CostToday:     tokenCost(today),
 		CostWeek:      tokenCost(week),
 		CostMonth:     tokenCost(month),
