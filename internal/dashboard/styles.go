@@ -59,7 +59,7 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("51"))
 
-	blockedTagStyle = lipgloss.NewStyle().
+	failedTagStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("196"))
 

@@ -30,7 +30,7 @@ sync-bmad:
 build: sync-bmad
 	go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) ./cmd/teamoon/
 
-install: build
+install: build check-deps
 	-sudo systemctl stop teamoon 2>/dev/null
 	sudo cp $(BUILD_DIR)/$(BINARY) /usr/local/bin/$(BINARY)
 	sudo chmod 755 /usr/local/bin/$(BINARY)
@@ -60,6 +60,16 @@ install: build
 	sudo systemctl daemon-reload
 	sudo systemctl enable teamoon
 	sudo systemctl restart teamoon
+
+check-deps:
+	@command -v expect >/dev/null 2>&1 || { \
+		echo "Installing expect (required for claude /usage)..."; \
+		if [ "$(DISTRO_FAMILY)" = "rhel" ]; then \
+			sudo dnf install -y expect 2>/dev/null || sudo yum install -y expect; \
+		else \
+			sudo apt-get install -y expect; \
+		fi; \
+	}
 
 service: install
 

@@ -262,8 +262,8 @@ func formatStateTag(t queue.Task, isRunning bool, isGenerating bool) string {
 		return plannedTagStyle.Render("PLN")
 	case queue.StateRunning:
 		return runningTagStyle.Render("RUN")
-	case queue.StateBlocked:
-		return blockedTagStyle.Render("BLK")
+	case queue.StateFailed:
+		return failedTagStyle.Render("FAIL")
 	case queue.StateDone:
 		return inactiveStyle.Render("DON")
 	default:
@@ -439,7 +439,7 @@ func (m Model) renderDetailOverlay(w, h int) string {
 			b.WriteString(activeStyle.Render(line) + "\n")
 		case strings.Contains(line, "[WARN]") || strings.Contains(line, "retry") || strings.Contains(line, "failed"):
 			b.WriteString(medStyle.Render(line) + "\n")
-		case strings.Contains(line, "[ERR ]") || strings.Contains(line, "BLOCKED"):
+		case strings.Contains(line, "[ERR ]") || strings.Contains(line, "FAILED:"):
 			b.WriteString(staleStyle.Render(line) + "\n")
 		case strings.HasPrefix(strings.TrimSpace(line), "──"):
 			b.WriteString(mdDimStyle.Render(line) + "\n")

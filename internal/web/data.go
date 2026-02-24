@@ -39,7 +39,7 @@ type WebProject struct {
 	TaskPending      int    `json:"task_pending"`
 	TaskRunning      int    `json:"task_running"`
 	TaskDone         int    `json:"task_done"`
-	TaskBlocked      int    `json:"task_blocked"`
+	TaskFailed       int    `json:"task_failed"`
 }
 
 type LogEntryJSON struct {
@@ -58,6 +58,7 @@ type DataSnapshot struct {
 	Month      metrics.TokenSummary  `json:"month"`
 	Cost       metrics.CostSummary   `json:"cost"`
 	Session    metrics.SessionContext `json:"session"`
+	Usage      metrics.ClaudeUsage   `json:"usage"`
 	Tasks      []WebTask             `json:"tasks"`
 	Projects   []WebProject          `json:"projects"`
 	LogEntries []LogEntryJSON        `json:"log_entries"`
@@ -89,6 +90,7 @@ func (s *Store) Refresh() {
 	today, week, month, _ := metrics.ScanTokens(s.cfg.ClaudeDir)
 	session := metrics.ScanActiveSession(s.cfg.ClaudeDir, s.cfg.ContextLimit)
 	cost := metrics.CalculateCost(today, week, month, s.cfg)
+	usage := metrics.GetUsage()
 	projs := projects.Scan(s.cfg.ProjectsDir)
 	activeTasks, _ := queue.ListActive()
 
@@ -115,7 +117,7 @@ func (s *Store) Refresh() {
 	}
 
 	// Count tasks per project
-	type projCounts struct{ total, pending, running, done, blocked int }
+	type projCounts struct{ total, pending, running, done, failed int }
 	projTaskCounts := make(map[string]*projCounts)
 	for _, wt := range webTasks {
 		pc := projTaskCounts[wt.Project]
@@ -131,8 +133,8 @@ func (s *Store) Refresh() {
 			pc.running++
 		case "done":
 			pc.done++
-		case "blocked":
-			pc.blocked++
+		case "failed":
+			pc.failed++
 		}
 	}
 
@@ -171,7 +173,7 @@ func (s *Store) Refresh() {
 			wp.TaskPending = pc.pending
 			wp.TaskRunning = pc.running
 			wp.TaskDone = pc.done
-			wp.TaskBlocked = pc.blocked
+			wp.TaskFailed = pc.failed
 		}
 		webProjects[i] = wp
 	}
@@ -207,6 +209,7 @@ func (s *Store) Refresh() {
 		Month:      month,
 		Cost:       cost,
 		Session:    session,
+		Usage:      usage,
 		Tasks:      webTasks,
 		Projects:   webProjects,
 		LogEntries: logJSON,
