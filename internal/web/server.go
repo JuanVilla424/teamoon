@@ -12,6 +12,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/logs"
+	"github.com/JuanVilla424/teamoon/internal/metrics"
 	"github.com/JuanVilla424/teamoon/internal/plan"
 	"github.com/JuanVilla424/teamoon/internal/plangen"
 	"github.com/JuanVilla424/teamoon/internal/queue"
@@ -95,6 +96,7 @@ func (s *Server) RecoverAndResume() {
 }
 
 func (s *Server) Start(ctx context.Context) {
+	metrics.StartUsageFetcher(s.cfg.ProjectsDir)
 	s.store.Refresh()
 	s.RecoverAndResume()
 
