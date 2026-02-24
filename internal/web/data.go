@@ -89,7 +89,7 @@ func NewStore(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *
 func (s *Store) Refresh() {
 	today, week, month, _ := metrics.ScanTokens(s.cfg.ClaudeDir)
 	session := metrics.ScanActiveSession(s.cfg.ClaudeDir, s.cfg.ContextLimit)
-	cost := metrics.CalculateCost(today, week, month, s.cfg)
+	cost := metrics.CalculateCost(today, week, month)
 	usage := metrics.GetUsage()
 	projs := projects.Scan(s.cfg.ProjectsDir)
 	activeTasks, _ := queue.ListActive()
