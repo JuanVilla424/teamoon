@@ -71,7 +71,8 @@ func loadStore() (TaskStore, error) {
 		}
 		return store, err
 	}
-	// Migrate legacy "blocked" → "failed" and "block_reason" → "fail_reason"
+	// Migrate legacy states from disk
+	data = bytes.ReplaceAll(data, []byte(`"state": "blocked"`), []byte(`"state": "failed"`))
 	data = bytes.ReplaceAll(data, []byte(`"state":"blocked"`), []byte(`"state":"failed"`))
 	data = bytes.ReplaceAll(data, []byte(`"block_reason"`), []byte(`"fail_reason"`))
 	err = json.Unmarshal(data, &store)
@@ -291,6 +292,24 @@ func SetFailReason(id int, reason string) error {
 			log.Printf("[queue] task #%d failed: %s", id, reason)
 			notifyWebhook("task_failed", store.Tasks[i])
 			return nil
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
+func ResetFailReason(id int) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].FailReason = ""
+			log.Printf("[queue] task #%d fail_reason cleared", id)
+			return saveStore(store)
 		}
 	}
 	return fmt.Errorf("task #%d not found", id)

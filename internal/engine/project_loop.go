@@ -52,6 +52,12 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 			log.Printf("[debug][autopilot] selected task #%d (%s) state=%s from %d candidates", task.ID, task.Description, queue.EffectiveState(task), len(tasks))
 		}
 		state := queue.EffectiveState(task)
+
+		if reason := CheckGuardrails(cfg); reason != "" {
+			emit(logs.LevelWarn, fmt.Sprintf("Guardrail stopped %s: %s", project, reason))
+			return
+		}
+
 		skeleton := config.SkeletonFor(cfg, project)
 
 		// Plan if pending
@@ -141,6 +147,6 @@ func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Co
 		mgr.Stop(task.ID)
 		return
 	case <-taskDone:
-		// Task finished (done or blocked), continue loop
+		// Task finished (done or failed), continue loop
 	}
 }

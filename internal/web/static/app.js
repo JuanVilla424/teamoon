@@ -362,9 +362,16 @@ function api(method, path, body, cb){
   var opts = {method: method, headers: {"Content-Type":"application/json"}};
   if(body) opts.body = JSON.stringify(body);
   fetch(path, opts)
-    .then(function(r){ return r.json(); })
-    .then(function(d){ if(cb) cb(d); })
-    .catch(function(e){ console.error(e); });
+    .then(function(r){
+      return r.json().then(function(d){ return {ok: r.ok, data: d}; });
+    })
+    .then(function(res){
+      if(cb) cb(res.data, res.ok);
+    })
+    .catch(function(e){
+      console.error(e);
+      if(cb) cb({error: e.message}, false);
+    });
 }
 
 /* ── MCP Catalog helpers ── */
@@ -822,6 +829,33 @@ function renderDashboard(root){
   var todayCost = c.cost_today || 0;
   costCard.appendChild(mkValue(monthCost > 0 ? "$" + fmtCost(monthCost) : "$0.00"));
   costCard.appendChild(mkSub("this month \u00b7 $" + fmtCost(todayCost) + " today"));
+  var planCost = c.plan_cost || 0;
+  if (planCost > 0) {
+    var budgetPct = Math.min((monthCost / planCost) * 100, 100);
+    var barColor = budgetPct >= 95 ? "red" : budgetPct >= 75 ? "yellow" : "green";
+    var bar = div("progress");
+    var fill = div("progress-fill " + barColor);
+    fill.style.width = budgetPct.toFixed(1) + "%";
+    bar.appendChild(fill);
+    costCard.appendChild(bar);
+    var budgetLabel = div("usage-bar-label");
+    budgetLabel.textContent = "$" + fmtCost(monthCost) + " / $" + fmtCost(planCost) + " budget";
+    costCard.appendChild(budgetLabel);
+  }
+  var weeklyUse = (D.usage && D.usage.week_all) ? D.usage.week_all.utilization : 0;
+  if (weeklyUse > 0) {
+    var wColor = weeklyUse >= 90 ? "red" : weeklyUse >= 60 ? "yellow" : "green";
+    var wBar = div("progress");
+    var wFill = div("progress-fill " + wColor);
+    wFill.style.width = Math.min(weeklyUse, 100).toFixed(1) + "%";
+    wBar.appendChild(wFill);
+    costCard.appendChild(wBar);
+    var wLabel = div("usage-bar-label");
+    wLabel.textContent = Math.round(weeklyUse) + "% weekly usage";
+    var sessUse = (D.usage && D.usage.session) ? D.usage.session.utilization : 0;
+    if (sessUse > 0) wLabel.textContent += " \u00b7 " + Math.round(sessUse) + "% session";
+    costCard.appendChild(wLabel);
+  }
   bento.appendChild(costCard);
 
   // Context card (tall)
@@ -1161,7 +1195,7 @@ function renderTaskDetail(parent, t){
 
   // REPLAN — enabled when has_plan and not running/generating
   var rpKey = "replan:" + t.id;
-  var replanEnabled = t.has_plan && s !== "running" && s !== "generating" && !loadingActions[rpKey];
+  var replanEnabled = (s === "failed" || t.has_plan) && s !== "running" && s !== "generating" && !loadingActions[rpKey];
   var replanBtn = el("button", "btn");
   if(loadingActions[rpKey]){
     replanBtn.disabled = true;
@@ -1701,37 +1735,62 @@ function taskPlanOnly(id, btn){
   var key = "autopilot:" + id;
   if(loadingActions[key]) return;
   loadingActions[key] = true;
-  btnLoading(btn);
-  api("POST","/api/tasks/autopilot",{id:id, run:false}, function(){ delete loadingActions[key]; scheduleActivePoll(); });
+  var restore = btnLoading(btn);
+  api("POST","/api/tasks/autopilot",{id:id, run:false}, function(d, ok){
+    delete loadingActions[key];
+    if(restore) restore();
+    if(!ok){ toast("Plan generation failed: " + (d.error || "unknown error"), "error"); return; }
+    scheduleActivePoll();
+  });
 }
 function taskAutopilot(id, btn){
   var key = "autopilot:" + id;
   if(loadingActions[key]) return;
   loadingActions[key] = true;
-  btnLoading(btn);
-  api("POST","/api/tasks/autopilot",{id:id}, function(){ delete loadingActions[key]; scheduleActivePoll(); });
+  var restore = btnLoading(btn);
+  api("POST","/api/tasks/autopilot",{id:id}, function(d, ok){
+    delete loadingActions[key];
+    if(restore) restore();
+    if(!ok){ toast("Retry failed: " + (d.error || "unknown error"), "error"); return; }
+    scheduleActivePoll();
+  });
 }
 function taskDone(id, btn){
   var key = "done:" + id;
   if(loadingActions[key]) return;
   loadingActions[key] = true;
-  btnLoading(btn);
-  api("POST","/api/tasks/done",{id:id}, function(){ delete loadingActions[key]; selectedTaskID=0; });
+  var restore = btnLoading(btn);
+  api("POST","/api/tasks/done",{id:id}, function(d, ok){
+    delete loadingActions[key];
+    if(restore) restore();
+    if(!ok){ toast("Mark done failed: " + (d.error || "unknown error"), "error"); return; }
+    selectedTaskID = 0;
+  });
 }
 function taskArchive(id, btn){
   var key = "archive:" + id;
   if(loadingActions[key]) return;
   loadingActions[key] = true;
-  btnLoading(btn);
-  api("POST","/api/tasks/archive",{id:id}, function(){ delete loadingActions[key]; selectedTaskID=0; });
+  var restore = btnLoading(btn);
+  api("POST","/api/tasks/archive",{id:id}, function(d, ok){
+    delete loadingActions[key];
+    if(restore) restore();
+    if(!ok){ toast("Archive failed: " + (d.error || "unknown error"), "error"); return; }
+    selectedTaskID = 0;
+  });
 }
 function taskReplan(id, btn){
   var key = "replan:" + id;
   if(loadingActions[key]) return;
   loadingActions[key] = true;
-  btnLoading(btn);
+  var restore = btnLoading(btn);
   delete planCache[id];
-  api("POST","/api/tasks/replan",{id:id}, function(){ delete loadingActions[key]; });
+  api("POST","/api/tasks/replan",{id:id}, function(d, ok){
+    delete loadingActions[key];
+    if(restore) restore();
+    if(!ok){ toast("Replan failed: " + (d.error || "unknown error"), "error"); return; }
+    scheduleActivePoll();
+  });
 }
 function taskStop(id){
   api("POST","/api/tasks/stop",{id:id}, function(){});

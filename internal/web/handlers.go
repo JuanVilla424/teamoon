@@ -216,11 +216,26 @@ func (s *Server) handleTaskAutopilot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"status": "stopped"})
 
 	case queue.StateFailed:
-		p, err := plan.ParsePlan(plan.PlanPath(found.ID))
-		if err != nil {
-			writeErr(w, 500, err.Error())
+		if !plan.PlanExists(found.ID) {
+			// Failed during plan generation — no plan on disk. Reset and re-generate.
+			if err := queue.ResetPlan(found.ID); err != nil {
+				writeErr(w, 500, "reset failed: "+err.Error())
+				return
+			}
+			autoRun := req.Run == nil || *req.Run
+			s.setGenerating(found.ID)
+			s.refreshAndBroadcast()
+			go s.generatePlanAsync(found, autoRun)
+			writeJSON(w, map[string]string{"status": "generating"})
 			return
 		}
+		// Failed during execution — plan exists, clear fail reason and resume.
+		p, err := plan.ParsePlan(plan.PlanPath(found.ID))
+		if err != nil {
+			writeErr(w, 500, "plan parse error: "+err.Error())
+			return
+		}
+		queue.ResetFailReason(found.ID)
 		queue.UpdateState(found.ID, queue.StateRunning)
 		s.store.engineMgr.Start(found, p, s.cfg, s.webSend(found.ID))
 		s.refreshAndBroadcast()

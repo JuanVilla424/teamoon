@@ -58,6 +58,7 @@ type DataSnapshot struct {
 	Month      metrics.TokenSummary  `json:"month"`
 	Cost       metrics.CostSummary   `json:"cost"`
 	Session    metrics.SessionContext `json:"session"`
+	Usage      metrics.ClaudeUsage   `json:"usage"`
 	Tasks      []WebTask             `json:"tasks"`
 	Projects   []WebProject          `json:"projects"`
 	LogEntries []LogEntryJSON        `json:"log_entries"`
@@ -89,6 +90,7 @@ func (s *Store) Refresh() {
 	today, week, month, _ := metrics.ScanTokens(s.cfg.ClaudeDir)
 	session := metrics.ScanActiveSession(s.cfg.ClaudeDir, s.cfg.ContextLimit)
 	cost := metrics.CalculateCost(today, week, month, s.cfg)
+	usage := metrics.GetUsage()
 	projs := projects.Scan(s.cfg.ProjectsDir)
 	activeTasks, _ := queue.ListActive()
 
@@ -207,6 +209,7 @@ func (s *Store) Refresh() {
 		Month:      month,
 		Cost:       cost,
 		Session:    session,
+		Usage:      usage,
 		Tasks:      webTasks,
 		Projects:   webProjects,
 		LogEntries: logJSON,

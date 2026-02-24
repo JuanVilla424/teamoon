@@ -152,6 +152,13 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 			return
 		}
 
+		if reason := CheckGuardrails(cfg); reason != "" {
+			emit(logs.LevelWarn, "Guardrail: "+reason, agent)
+			queue.UpdateState(task.ID, queue.StatePlanned)
+			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned, Message: "guardrail"})
+			return
+		}
+
 		success := false
 		var recoveryCtx string
 		var lastRes spawnResult
@@ -247,9 +254,9 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 		}
 
 		if !success {
-			// Layer 3: Meta-cognitive — block task
+			// Layer 3: Meta-cognitive — fail task
 			reason := fmt.Sprintf("Step %d '%s' failed after %d attempts", step.Number, step.Title, maxRetries)
-			emit(logs.LevelError, "BLOCKED: "+reason, agent)
+			emit(logs.LevelError, "FAILED: "+reason, agent)
 			queue.SetFailReason(task.ID, reason)
 			send(TaskStateMsg{TaskID: task.ID, State: queue.StateFailed, Message: reason})
 			return
