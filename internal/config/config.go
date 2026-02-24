@@ -68,6 +68,7 @@ type Config struct {
 	MaxConcurrent      int                            `json:"max_concurrent"`
 	MCPServers         map[string]MCPServer           `json:"mcp_servers,omitempty"`
 	SourceDir          string                         `json:"source_dir,omitempty"`
+	Debug              bool                           `json:"debug,omitempty"`
 }
 
 func DefaultConfig() Config {

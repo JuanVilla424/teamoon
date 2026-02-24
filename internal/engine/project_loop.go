@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -47,6 +48,9 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 		}
 
 		task := tasks[0]
+		if cfg.Debug {
+			log.Printf("[debug][autopilot] selected task #%d (%s) state=%s from %d candidates", task.ID, task.Description, queue.EffectiveState(task), len(tasks))
+		}
 		state := queue.EffectiveState(task)
 		skeleton := config.SkeletonFor(cfg, project)
 

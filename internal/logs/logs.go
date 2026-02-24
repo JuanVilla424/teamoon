@@ -23,7 +23,8 @@ func taskLogPath(taskID int) string {
 type LogLevel int
 
 const (
-	LevelInfo LogLevel = iota
+	LevelDebug   LogLevel = -1
+	LevelInfo    LogLevel = iota
 	LevelSuccess
 	LevelWarn
 	LevelError
@@ -45,6 +46,13 @@ type RingBuffer struct {
 	size    int
 	cap     int
 	file    *os.File
+	debug   bool
+}
+
+func (r *RingBuffer) SetDebug(on bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.debug = on
 }
 
 func NewRingBuffer(capacity int) *RingBuffer {
@@ -87,13 +95,19 @@ var levelTag = [...]string{"INFO", " OK ", "WARN", "ERR "}
 func (r *RingBuffer) Add(e LogEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Skip debug entries unless debug mode is on
+	if e.Level == LevelDebug && !r.debug {
+		return
+	}
 	r.entries[r.head] = e
 	r.head = (r.head + 1) % r.cap
 	if r.size < r.cap {
 		r.size++
 	}
 	tag := "INFO"
-	if int(e.Level) < len(levelTag) {
+	if e.Level == LevelDebug {
+		tag = "DBG "
+	} else if int(e.Level) < len(levelTag) {
 		tag = levelTag[e.Level]
 	}
 	msg := strings.ReplaceAll(e.Message, "\n", " ")
@@ -182,6 +196,8 @@ func parseLogLine(line string) LogEntry {
 		e.Level = LevelWarn
 	case "ERR":
 		e.Level = LevelError
+	case "DBG":
+		e.Level = LevelDebug
 	default:
 		e.Level = LevelInfo
 	}

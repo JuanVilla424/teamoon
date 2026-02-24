@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -421,6 +422,9 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 	for scanner.Scan() {
 		line := scanner.Text()
 		fullOutput.WriteString(line + "\n")
+		if cfg.Debug {
+			log.Printf("[debug][autopilot] raw: %s", line)
+		}
 
 		var event streamEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
@@ -433,8 +437,10 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 				for _, c := range event.Message.Content {
 					if c.Type == "tool_use" && c.Name != "" {
 						toolsUsed = append(toolsUsed, c.Name)
+						log.Printf("[autopilot] tool_use: %s", c.Name)
 					}
 					if c.Type == "text" && c.Text != "" {
+						log.Printf("[autopilot] %s", c.Text)
 						send(LogMsg{Entry: logs.LogEntry{
 							Time:    time.Now(),
 							TaskID:  taskID,

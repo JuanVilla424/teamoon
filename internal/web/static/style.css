@@ -461,7 +461,7 @@ a:hover { color: var(--text) }
   margin-top: 0;
 }
 .tl-node.selected .tl-expand {
-  max-height: 2000px;
+  max-height: 5000px;
   opacity: 1;
   margin-top: 12px;
 }
@@ -584,7 +584,7 @@ a:hover { color: var(--text) }
   border: 1px solid rgba(20,184,166,.12);
   border-radius: var(--r-md);
   padding: 16px;
-  flex: 1; min-height: 240px;
+  min-height: 240px; max-height: calc(100vh - 320px);
   overflow-y: auto;
   font-family: var(--mono); font-size: 13px; line-height: 1.8;
   scroll-behavior: smooth;
