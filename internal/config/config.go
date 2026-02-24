@@ -55,7 +55,6 @@ type Config struct {
 	ProjectsDir        string                `json:"projects_dir"`
 	ClaudeDir          string                `json:"claude_dir"`
 	RefreshIntervalSec int                   `json:"refresh_interval_sec"`
-	BudgetMonthly      float64               `json:"budget_monthly"`
 	ContextLimit       int                   `json:"context_limit"`
 	WebEnabled         bool                  `json:"web_enabled"`
 	WebPort            int                   `json:"web_port"`
@@ -77,7 +76,6 @@ func DefaultConfig() Config {
 		ProjectsDir:        filepath.Join(home, "Projects"),
 		ClaudeDir:          filepath.Join(home, ".claude"),
 		RefreshIntervalSec: 30,
-		BudgetMonthly:      0,
 		ContextLimit:       0,
 		WebEnabled:         false,
 		WebPort:            7777,

@@ -152,7 +152,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 			return
 		}
 
-		if reason := CheckGuardrails(cfg); reason != "" {
+		if reason := CheckGuardrails(); reason != "" {
 			emit(logs.LevelWarn, "Guardrail: "+reason, agent)
 			queue.UpdateState(task.ID, queue.StatePlanned)
 			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned, Message: "guardrail"})

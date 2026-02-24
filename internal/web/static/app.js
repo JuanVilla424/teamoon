@@ -1,3 +1,18 @@
+/* ── Theme Init (before any rendering) ── */
+(function initTheme() {
+  var saved = localStorage.getItem("teamoon-theme");
+  if (saved) {
+    document.documentElement.setAttribute("data-theme", saved);
+  } else if (window.matchMedia("(prefers-color-scheme: light)").matches) {
+    document.documentElement.setAttribute("data-theme", "light");
+  }
+  var meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) {
+    var theme = document.documentElement.getAttribute("data-theme");
+    meta.content = theme === "light" ? "#f5f5f5" : "#050505";
+  }
+})();
+
 (function(){
 "use strict";
 
@@ -741,6 +756,20 @@ function render(){
 
 window.addEventListener("hashchange", render);
 
+/* ── Theme Toggle ── */
+document.getElementById("theme-toggle").addEventListener("click", function() {
+  var current = document.documentElement.getAttribute("data-theme");
+  var next = current === "light" ? "dark" : "light";
+  if (next === "dark") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", next);
+  }
+  localStorage.setItem("teamoon-theme", next);
+  var meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = next === "light" ? "#f5f5f5" : "#050505";
+});
+
 /* ── Topbar ── */
 function updateTopbar(){
   var ver = document.getElementById("sb-version");
@@ -829,19 +858,6 @@ function renderDashboard(root){
   var todayCost = c.cost_today || 0;
   costCard.appendChild(mkValue(monthCost > 0 ? "$" + fmtCost(monthCost) : "$0.00"));
   costCard.appendChild(mkSub("this month \u00b7 $" + fmtCost(todayCost) + " today"));
-  var planCost = c.plan_cost || 0;
-  if (planCost > 0) {
-    var budgetPct = Math.min((monthCost / planCost) * 100, 100);
-    var barColor = budgetPct >= 95 ? "red" : budgetPct >= 75 ? "yellow" : "green";
-    var bar = div("progress");
-    var fill = div("progress-fill " + barColor);
-    fill.style.width = budgetPct.toFixed(1) + "%";
-    bar.appendChild(fill);
-    costCard.appendChild(bar);
-    var budgetLabel = div("usage-bar-label");
-    budgetLabel.textContent = "$" + fmtCost(monthCost) + " / $" + fmtCost(planCost) + " budget";
-    costCard.appendChild(budgetLabel);
-  }
   var weeklyUse = (D.usage && D.usage.week_all) ? D.usage.week_all.utilization : 0;
   if (weeklyUse > 0) {
     var wColor = weeklyUse >= 90 ? "red" : weeklyUse >= 60 ? "yellow" : "green";
@@ -3577,7 +3593,7 @@ function renderConfig(root){
 
   // Sub-tab bar: Paths | Server | Budget | Autopilot
   var subTabs = div("config-subtabs");
-  [["Paths","paths"],["Server","server"],["Budget","budget"],["Autopilot","autopilot"]].forEach(function(pair){
+  [["Paths","paths"],["Server","server"],["Limits","limits"],["Autopilot","autopilot"]].forEach(function(pair){
     var tb = el("button", "config-subtab-btn" + (configSubTab === pair[1] ? " active" : ""), [pair[0]]);
     tb.onclick = function(){ configSubTab = pair[1]; configEditing = null; render(); };
     subTabs.appendChild(tb);
@@ -3587,7 +3603,7 @@ function renderConfig(root){
   switch(configSubTab){
     case "paths":  renderConfigPaths(root); break;
     case "server": renderConfigServer(root); break;
-    case "budget": renderConfigBudget(root); break;
+    case "limits": renderConfigLimits(root); break;
     case "autopilot": renderConfigAutopilot(root); break;
   }
 }
@@ -4730,26 +4746,24 @@ function renderConfigServer(root){
   root.appendChild(sec);
 }
 
-function renderConfigBudget(root){
+function renderConfigLimits(root){
   var c = configData;
-  var editing = configEditing === "budget";
+  var editing = configEditing === "limits";
   var sec = div("config-section");
   var hdr = div("section-header");
-  hdr.appendChild(el("h3","config-section-title",["Budget & Limits"]));
+  hdr.appendChild(el("h3","config-section-title",["Limits"]));
   if(!editing){
-    hdr.appendChild(iconBtn("pencil","Edit",function(){ configEditing = "budget"; render(); }));
+    hdr.appendChild(iconBtn("pencil","Edit",function(){ configEditing = "limits"; render(); }));
   }
   sec.appendChild(hdr);
   var grid = div("config-grid");
   if(editing){
-    grid.appendChild(configInput("budget_monthly","Monthly Budget ($)", String(c.budget_monthly || 0)));
     grid.appendChild(configInput("context_limit","Context Limit (tokens)", String(c.context_limit || 0)));
   } else {
-    grid.appendChild(configReadRow("Monthly Budget", "$" + (c.budget_monthly || 0)));
     grid.appendChild(configReadRow("Context Limit", (c.context_limit || 0) + " tokens"));
   }
   sec.appendChild(grid);
-  if(editing) sec.appendChild(configEditActions("budget"));
+  if(editing) sec.appendChild(configEditActions("limits"));
   root.appendChild(sec);
 }
 
@@ -4896,8 +4910,7 @@ function saveConfigSection(section){
     c.web_port = parseInt(document.getElementById("cfg-web_port").value) || 7777;
     c.web_host = document.getElementById("cfg-web_host").value || "localhost";
     c.web_password = document.getElementById("cfg-web_password").value;
-  } else if(section === "budget"){
-    c.budget_monthly = parseFloat(document.getElementById("cfg-budget_monthly").value) || 0;
+  } else if(section === "limits"){
     c.context_limit = parseInt(document.getElementById("cfg-context_limit").value) || 0;
   }
   var saveBtn = document.querySelector(".config-actions .btn-primary");

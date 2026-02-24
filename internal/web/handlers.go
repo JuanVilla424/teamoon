@@ -1368,7 +1368,6 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"projects_dir":        cfg.ProjectsDir,
 		"claude_dir":          cfg.ClaudeDir,
 		"refresh_interval_sec": cfg.RefreshIntervalSec,
-		"budget_monthly":      cfg.BudgetMonthly,
 		"context_limit":       cfg.ContextLimit,
 		"web_enabled":         cfg.WebEnabled,
 		"web_port":            cfg.WebPort,
@@ -1394,7 +1393,6 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		ProjectsDir        string                `json:"projects_dir"`
 		ClaudeDir          string                `json:"claude_dir"`
 		RefreshIntervalSec int                   `json:"refresh_interval_sec"`
-		BudgetMonthly      float64               `json:"budget_monthly"`
 		ContextLimit       int                   `json:"context_limit"`
 		WebEnabled         bool                  `json:"web_enabled"`
 		WebPort            int                   `json:"web_port"`
@@ -1427,7 +1425,6 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	if req.RefreshIntervalSec > 0 {
 		cfg.RefreshIntervalSec = req.RefreshIntervalSec
 	}
-	cfg.BudgetMonthly = req.BudgetMonthly
 	cfg.ContextLimit = req.ContextLimit
 	cfg.WebEnabled = req.WebEnabled
 	if req.WebPort > 0 {
