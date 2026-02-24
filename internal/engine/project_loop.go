@@ -53,9 +53,14 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 		}
 		state := queue.EffectiveState(task)
 
-		if reason := CheckGuardrails(); reason != "" {
-			emit(logs.LevelWarn, fmt.Sprintf("Guardrail stopped %s: %s", project, reason))
-			return
+		for reason := CheckGuardrails(); reason != ""; reason = CheckGuardrails() {
+			emit(logs.LevelWarn, fmt.Sprintf("Guardrail: %s, waiting 2m...", reason))
+			select {
+			case <-ctx.Done():
+				emit(logs.LevelWarn, fmt.Sprintf("Project autopilot stopped for %s", project))
+				return
+			case <-time.After(2 * time.Minute):
+			}
 		}
 
 		skeleton := config.SkeletonFor(cfg, project)
@@ -68,11 +73,6 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 			if planErr != nil {
 				emit(logs.LevelError, fmt.Sprintf("Plan failed for task #%d: %v", task.ID, planErr))
 				queue.SetFailReason(task.ID, "plan generation failed: "+planErr.Error())
-				if !task.Optional {
-					emit(logs.LevelError, fmt.Sprintf("Chain stopped for %s: task #%d failed", project, task.ID))
-					return
-				}
-				emit(logs.LevelWarn, fmt.Sprintf("Optional task #%d failed, continuing chain", task.ID))
 				continue
 			}
 			// Notify UI that plan is ready (PLN state)
@@ -91,24 +91,9 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 			if parseErr != nil {
 				emit(logs.LevelError, fmt.Sprintf("Plan parse failed for task #%d: %v", task.ID, parseErr))
 				queue.SetFailReason(task.ID, "plan parse failed: "+parseErr.Error())
-				if !task.Optional {
-					emit(logs.LevelError, fmt.Sprintf("Chain stopped for %s: task #%d failed", project, task.ID))
-					return
-				}
-				emit(logs.LevelWarn, fmt.Sprintf("Optional task #%d failed, continuing chain", task.ID))
 				continue
 			}
 			runOneTask(ctx, task, p, cfg, send, mgr, emit)
-		}
-
-		// Check if the task failed after execution — stop chain for non-optional
-		updated, _ := queue.GetTask(task.ID)
-		if queue.EffectiveState(updated) == queue.StateFailed {
-			if !task.Optional {
-				emit(logs.LevelError, fmt.Sprintf("Chain stopped for %s: task #%d failed", project, task.ID))
-				return
-			}
-			emit(logs.LevelWarn, fmt.Sprintf("Optional task #%d failed, continuing chain", task.ID))
 		}
 
 		// Small delay between tasks
@@ -129,7 +114,7 @@ func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Co
 	wrappedSend := func(msg tea.Msg) {
 		send(msg)
 		if tsm, ok := msg.(TaskStateMsg); ok {
-			if tsm.TaskID == task.ID && (tsm.State == queue.StateDone || tsm.State == queue.StateFailed) {
+			if tsm.TaskID == task.ID && (tsm.State == queue.StateDone || tsm.State == queue.StatePending) {
 				select {
 				case taskDone <- struct{}{}:
 				default:
@@ -147,6 +132,6 @@ func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Co
 		mgr.Stop(task.ID)
 		return
 	case <-taskDone:
-		// Task finished (done or failed), continue loop
+		// Task finished (done or back to pending), continue loop
 	}
 }

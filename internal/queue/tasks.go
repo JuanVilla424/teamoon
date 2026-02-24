@@ -18,10 +18,9 @@ import (
 type TaskState string
 
 const (
-	StatePending TaskState = "pending"
-	StatePlanned TaskState = "planned"
-	StateRunning TaskState = "running"
-	StateFailed  TaskState = "failed"
+	StatePending  TaskState = "pending"
+	StatePlanned  TaskState = "planned"
+	StateRunning  TaskState = "running"
 	StateDone     TaskState = "done"
 	StateArchived TaskState = "archived"
 )
@@ -72,8 +71,10 @@ func loadStore() (TaskStore, error) {
 		return store, err
 	}
 	// Migrate legacy states from disk
-	data = bytes.ReplaceAll(data, []byte(`"state": "blocked"`), []byte(`"state": "failed"`))
-	data = bytes.ReplaceAll(data, []byte(`"state":"blocked"`), []byte(`"state":"failed"`))
+	data = bytes.ReplaceAll(data, []byte(`"state": "blocked"`), []byte(`"state": "pending"`))
+	data = bytes.ReplaceAll(data, []byte(`"state":"blocked"`), []byte(`"state":"pending"`))
+	data = bytes.ReplaceAll(data, []byte(`"state": "failed"`), []byte(`"state": "pending"`))
+	data = bytes.ReplaceAll(data, []byte(`"state":"failed"`), []byte(`"state":"pending"`))
 	data = bytes.ReplaceAll(data, []byte(`"block_reason"`), []byte(`"fail_reason"`))
 	err = json.Unmarshal(data, &store)
 	return store, err
@@ -285,12 +286,12 @@ func SetFailReason(id int, reason string) error {
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].FailReason = reason
-			store.Tasks[i].State = StateFailed
+			store.Tasks[i].State = StatePending
 			if err := saveStore(store); err != nil {
 				return err
 			}
-			log.Printf("[queue] task #%d failed: %s", id, reason)
-			notifyWebhook("task_failed", store.Tasks[i])
+			log.Printf("[queue] task #%d back to pending: %s", id, reason)
+			notifyWebhook("task_retry", store.Tasks[i])
 			return nil
 		}
 	}

@@ -263,9 +263,6 @@ func (m Model) handleAutopilotKey() (tea.Model, tea.Cmd) {
 		queue.UpdateState(t.ID, queue.StatePlanned)
 		return m, fetchData(m.cfg)
 
-	case queue.StateFailed:
-		queue.UpdateState(t.ID, queue.StatePlanned)
-		return m, m.startAutopilot(t)
 	}
 
 	return m, nil
@@ -513,7 +510,7 @@ func (m Model) startAutopilot(t queue.Task) tea.Cmd {
 		if err != nil {
 			return engine.TaskStateMsg{
 				TaskID:  task.ID,
-				State:   queue.StateFailed,
+				State:   queue.StatePending,
 				Message: "plan parse error: " + err.Error(),
 			}
 		}

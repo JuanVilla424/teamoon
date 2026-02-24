@@ -180,6 +180,9 @@ func StartUsageFetcher(projectDir string) {
 				usageMu.Lock()
 				if err == nil {
 					usageCache = u
+					log.Printf("[usage] session=%.0f%% week_all=%.0f%% week_sonnet=%.0f%% session_resets=%q week_resets=%q",
+						u.Session.Utilization, u.WeekAll.Utilization, u.WeekSonnet.Utilization,
+						u.Session.ResetsAt, u.WeekAll.ResetsAt)
 				} else {
 					log.Printf("[usage] fetch failed: %v", err)
 				}

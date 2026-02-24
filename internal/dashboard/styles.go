@@ -59,10 +59,6 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("51"))
 
-	failedTagStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("196"))
-
 	plannedTagStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("33"))
 
