@@ -262,8 +262,8 @@ func formatStateTag(t queue.Task, isRunning bool, isGenerating bool) string {
 		return plannedTagStyle.Render("PLN")
 	case queue.StateRunning:
 		return runningTagStyle.Render("RUN")
-	case queue.StateBlocked:
-		return blockedTagStyle.Render("BLK")
+	case queue.StateFailed:
+		return blockedTagStyle.Render("FAIL")
 	case queue.StateDone:
 		return inactiveStyle.Render("DON")
 	default:

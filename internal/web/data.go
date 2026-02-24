@@ -39,7 +39,7 @@ type WebProject struct {
 	TaskPending      int    `json:"task_pending"`
 	TaskRunning      int    `json:"task_running"`
 	TaskDone         int    `json:"task_done"`
-	TaskBlocked      int    `json:"task_blocked"`
+	TaskFailed       int    `json:"task_failed"`
 }
 
 type LogEntryJSON struct {
@@ -115,7 +115,7 @@ func (s *Store) Refresh() {
 	}
 
 	// Count tasks per project
-	type projCounts struct{ total, pending, running, done, blocked int }
+	type projCounts struct{ total, pending, running, done, failed int }
 	projTaskCounts := make(map[string]*projCounts)
 	for _, wt := range webTasks {
 		pc := projTaskCounts[wt.Project]
@@ -131,8 +131,8 @@ func (s *Store) Refresh() {
 			pc.running++
 		case "done":
 			pc.done++
-		case "blocked":
-			pc.blocked++
+		case "failed":
+			pc.failed++
 		}
 	}
 
@@ -171,7 +171,7 @@ func (s *Store) Refresh() {
 			wp.TaskPending = pc.pending
 			wp.TaskRunning = pc.running
 			wp.TaskDone = pc.done
-			wp.TaskBlocked = pc.blocked
+			wp.TaskFailed = pc.failed
 		}
 		webProjects[i] = wp
 	}

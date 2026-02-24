@@ -21,7 +21,7 @@ const (
 	StatePending TaskState = "pending"
 	StatePlanned TaskState = "planned"
 	StateRunning TaskState = "running"
-	StateBlocked TaskState = "blocked"
+	StateFailed  TaskState = "failed"
 	StateDone     TaskState = "done"
 	StateArchived TaskState = "archived"
 )
@@ -34,9 +34,10 @@ type Task struct {
 	CreatedAt   time.Time `json:"created_at"`
 	State       TaskState `json:"state,omitempty"`
 	PlanFile    string    `json:"plan_file,omitempty"`
-	BlockReason string    `json:"block_reason,omitempty"`
+	FailReason  string    `json:"fail_reason,omitempty"`
 	Done        bool      `json:"done"`
 	AutoPilot   bool      `json:"auto_pilot"`
+	Optional    bool      `json:"optional,omitempty"`
 	Assignee    string    `json:"assignee,omitempty"`
 }
 
@@ -70,6 +71,9 @@ func loadStore() (TaskStore, error) {
 		}
 		return store, err
 	}
+	// Migrate legacy "blocked" → "failed" and "block_reason" → "fail_reason"
+	data = bytes.ReplaceAll(data, []byte(`"state":"blocked"`), []byte(`"state":"failed"`))
+	data = bytes.ReplaceAll(data, []byte(`"block_reason"`), []byte(`"fail_reason"`))
 	err = json.Unmarshal(data, &store)
 	return store, err
 }
@@ -260,7 +264,7 @@ func ResetPlan(id int) error {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].State = StatePending
 			store.Tasks[i].PlanFile = ""
-			store.Tasks[i].BlockReason = ""
+			store.Tasks[i].FailReason = ""
 			store.Tasks[i].Done = false
 			log.Printf("[queue] task #%d plan reset", id)
 			return saveStore(store)
@@ -269,7 +273,7 @@ func ResetPlan(id int) error {
 	return fmt.Errorf("task #%d not found", id)
 }
 
-func SetBlockReason(id int, reason string) error {
+func SetFailReason(id int, reason string) error {
 	storeMu.Lock()
 	defer storeMu.Unlock()
 
@@ -279,13 +283,13 @@ func SetBlockReason(id int, reason string) error {
 	}
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
-			store.Tasks[i].BlockReason = reason
-			store.Tasks[i].State = StateBlocked
+			store.Tasks[i].FailReason = reason
+			store.Tasks[i].State = StateFailed
 			if err := saveStore(store); err != nil {
 				return err
 			}
-			log.Printf("[queue] task #%d blocked: %s", id, reason)
-			notifyWebhook("task_blocked", store.Tasks[i])
+			log.Printf("[queue] task #%d failed: %s", id, reason)
+			notifyWebhook("task_failed", store.Tasks[i])
 			return nil
 		}
 	}

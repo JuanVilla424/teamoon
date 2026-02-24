@@ -263,7 +263,7 @@ func (m Model) handleAutopilotKey() (tea.Model, tea.Cmd) {
 		queue.UpdateState(t.ID, queue.StatePlanned)
 		return m, fetchData(m.cfg)
 
-	case queue.StateBlocked:
+	case queue.StateFailed:
 		queue.UpdateState(t.ID, queue.StatePlanned)
 		return m, m.startAutopilot(t)
 	}
@@ -348,8 +348,8 @@ func (m Model) handleViewDetail() (tea.Model, tea.Cmd) {
 	if t.PlanFile != "" {
 		lines = append(lines, fmt.Sprintf("  Plan: %s", t.PlanFile))
 	}
-	if t.BlockReason != "" {
-		lines = append(lines, fmt.Sprintf("  Block: %s", t.BlockReason))
+	if t.FailReason != "" {
+		lines = append(lines, fmt.Sprintf("  Fail: %s", t.FailReason))
 	}
 	lines = append(lines, "")
 	lines = append(lines, "  ── Autopilot Log ──")
@@ -513,7 +513,7 @@ func (m Model) startAutopilot(t queue.Task) tea.Cmd {
 		if err != nil {
 			return engine.TaskStateMsg{
 				TaskID:  task.ID,
-				State:   queue.StateBlocked,
+				State:   queue.StateFailed,
 				Message: "plan parse error: " + err.Error(),
 			}
 		}

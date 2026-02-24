@@ -215,7 +215,7 @@ func (s *Server) handleTaskAutopilot(w http.ResponseWriter, r *http.Request) {
 		s.refreshAndBroadcast()
 		writeJSON(w, map[string]string{"status": "stopped"})
 
-	case queue.StateBlocked:
+	case queue.StateFailed:
 		p, err := plan.ParsePlan(plan.PlanPath(found.ID))
 		if err != nil {
 			writeErr(w, 500, err.Error())
@@ -224,7 +224,7 @@ func (s *Server) handleTaskAutopilot(w http.ResponseWriter, r *http.Request) {
 		queue.UpdateState(found.ID, queue.StateRunning)
 		s.store.engineMgr.Start(found, p, s.cfg, s.webSend(found.ID))
 		s.refreshAndBroadcast()
-		writeJSON(w, map[string]string{"status": "resumed"})
+		writeJSON(w, map[string]string{"status": "retried"})
 
 	default:
 		writeJSON(w, map[string]string{"status": "no_action"})
