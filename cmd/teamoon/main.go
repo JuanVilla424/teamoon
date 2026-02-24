@@ -36,7 +36,7 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Use:     "teamoon",
-		Short:   "Cloud development dashboard",
+		Short:   "AI-powered task autopilot",
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()

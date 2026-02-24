@@ -477,7 +477,7 @@ func buildSkeletonPrompt(sk config.SkeletonConfig) string {
 func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 	sk := config.SkeletonFor(s.cfg, t.Project)
 	skeletonBlock := buildSkeletonPrompt(sk)
-	prompt := plangen.BuildPlanPrompt(t, skeletonBlock)
+	prompt := plangen.BuildPlanPrompt(t, skeletonBlock, s.cfg.ProjectsDir)
 
 	s.store.logBuf.Add(logs.LogEntry{
 		Time: time.Now(), TaskID: t.ID, Project: t.Project,
@@ -927,9 +927,8 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Project != "" {
-		home, _ := os.UserHomeDir()
 		promptBuf.WriteString(fmt.Sprintf("Working on project: %s (path: %s)\n\n",
-			req.Project, fmt.Sprintf("%s/Projects/%s", home, req.Project)))
+			req.Project, filepath.Join(s.cfg.ProjectsDir, req.Project)))
 	}
 	if len(recent) > 1 {
 		promptBuf.WriteString("Conversation history:\n")
@@ -944,7 +943,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	home, _ := os.UserHomeDir()
 	projectPath := home
 	if req.Project != "" {
-		pp := fmt.Sprintf("%s/Projects/%s", home, req.Project)
+		pp := filepath.Join(s.cfg.ProjectsDir, req.Project)
 		if _, err := os.Stat(pp); err == nil {
 			projectPath = pp
 		}
