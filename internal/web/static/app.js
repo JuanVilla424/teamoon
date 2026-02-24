@@ -897,20 +897,23 @@ function renderDashboard(root){
   ctxCard.appendChild(mkMetricRow(["Month: "+fmtNum(totalMonth) + " \u00b7 $" + fmtCost(c.cost_month||0)]));
   bento.appendChild(ctxCard);
 
-  // Queue summary card (wide)
-  var running=0,pendingC=0,failedC=0,planned=0;
+  // Queue summary card (wide) — only active tasks (not done/archived)
+  var running=0,pendingC=0,planned=0,doneC=0;
   for(var i=0;i<tasks.length;i++){
     var s=tasks[i].effective_state;
-    if(s==="running")running++;else if(s==="pending"||s==="generating")pendingC++;
-    else if(s==="failed")failedC++;else if(s==="planned")planned++;
+    if(s==="running")running++;
+    else if(s==="pending"||s==="generating")pendingC++;
+    else if(s==="planned")planned++;
+    else if(s==="done")doneC++;
   }
+  var activeCount = running + pendingC + planned;
   var qCard = div("card bento-wide card-clickable");
   qCard.onclick = function(){ location.hash = "queue"; };
   var qLabel = div("card-label");
   var qDot = span("label-dot"); qDot.style.background = "var(--accent)";
   qLabel.appendChild(qDot);
   qLabel.appendChild(txt("Queue"));
-  qLabel.appendChild(span("view-count", String(tasks.length)));
+  qLabel.appendChild(span("view-count", String(activeCount)));
   qCard.appendChild(qLabel);
 
   var mkQStat = function(dotColor, label, val){
@@ -924,9 +927,9 @@ function renderDashboard(root){
   if(running) qCard.appendChild(mkQStat("var(--success)", "Running", running));
   if(planned) qCard.appendChild(mkQStat("var(--info)", "Planned", planned));
   if(pendingC) qCard.appendChild(mkQStat("var(--text-muted)", "Pending", pendingC));
-  if(failedC) qCard.appendChild(mkQStat("var(--danger)", "Failed", failedC));
-  if(!running && !planned && !pendingC && !failedC){
-    qCard.appendChild(div("empty", ["No active tasks"]));
+  if(doneC) qCard.appendChild(mkQStat("var(--success)", "Done", doneC));
+  if(!activeCount && !doneC){
+    qCard.appendChild(div("empty", ["No tasks"]));
   }
   bento.appendChild(qCard);
 
@@ -1075,7 +1078,7 @@ function renderTaskDetail(parent, t){
   var headerCard = div("detail-card detail-header");
   var headerTop = div("detail-header-top");
   headerTop.appendChild(span("detail-title-id", "#" + t.id));
-  var editable = (t.effective_state === "pending" || t.effective_state === "planned" || t.effective_state === "failed");
+  var editable = (t.effective_state === "pending" || t.effective_state === "planned");
   if(editable){
     var editBtn = iconBtn("pencil", "Edit description", function(){});
     editBtn.onclick = function(){
@@ -1183,14 +1186,14 @@ function renderTaskDetail(parent, t){
   // Divider: PLAN | execution group
   actions.appendChild(div("detail-actions-divider"));
 
-  // RUN — enabled for planned, failed
-  var runEnabled = (s === "planned" || s === "failed") && !loadingActions[apKey];
+  // RUN — enabled for planned
+  var runEnabled = (s === "planned") && !loadingActions[apKey];
   var runBtn = el("button", "btn" + (runEnabled ? " btn-success" : ""));
-  if(loadingActions[apKey] && (s === "planned" || s === "failed")){
+  if(loadingActions[apKey] && s === "planned"){
     runBtn.disabled = true;
     var rsp = document.createElement("span"); rsp.className = "btn-spinner"; runBtn.appendChild(rsp);
   } else {
-    runBtn.textContent = s === "failed" ? "Retry" : "Run";
+    runBtn.textContent = "Run";
     runBtn.disabled = !runEnabled;
     if(runEnabled) runBtn.onclick = function(){ taskAutopilot(t.id, this); };
   }
@@ -1211,7 +1214,7 @@ function renderTaskDetail(parent, t){
 
   // REPLAN — enabled when has_plan and not running/generating
   var rpKey = "replan:" + t.id;
-  var replanEnabled = (s === "failed" || t.has_plan) && s !== "running" && s !== "generating" && !loadingActions[rpKey];
+  var replanEnabled = t.has_plan && s !== "running" && s !== "generating" && !loadingActions[rpKey];
   var replanBtn = el("button", "btn");
   if(loadingActions[rpKey]){
     replanBtn.disabled = true;
@@ -1542,7 +1545,6 @@ function renderProjectDetail(root){
   if(p.task_pending > 0) taskSummary.appendChild(span("pd-task-count pending", p.task_pending + " pending"));
   if(p.task_running > 0) taskSummary.appendChild(span("pd-task-count running", p.task_running + " running"));
   if(p.task_done > 0) taskSummary.appendChild(span("pd-task-count done", p.task_done + " done"));
-  if(p.task_failed > 0) taskSummary.appendChild(span("pd-task-count failed", p.task_failed + " failed"));
   taskSec.appendChild(taskSummary);
 
   // Progress bar
@@ -1564,7 +1566,6 @@ function renderProjectDetail(root){
     {label:"Pending", state:"pending", open:allTasks.length < 30},
     {label:"Planned", state:"planned", open:true},
     {label:"Done", state:"done", open:false},
-    {label:"Failed", state:"failed", open:true}
   ];
   for(var g=0;g<groups.length;g++){
     var grp = groups[g];
@@ -2249,7 +2250,6 @@ function stateLabel(s){
     case "pending": return "OFF";
     case "planned": return "PLN";
     case "running": return "RUN";
-    case "failed": return "FAIL";
     case "done": return "DONE";
     default: return s ? s.toUpperCase().substring(0,4) : "\u2014";
   }
@@ -2816,11 +2816,7 @@ function makeCanvasCol(title, colId, tasks){
 
 function makeCanvasCard(t, colId){
   var priClass = "pri-" + (t.priority || "med");
-  var isFailed = (t.effective_state === "failed");
-  var card = el("div","canvas-card " + priClass + (isFailed ? " is-failed" : ""));
-
-  // Failed overlay
-  if(isFailed) card.appendChild(el("div","canvas-card-failed-overlay"));
+  var card = el("div","canvas-card " + priClass);
 
   // Draggable
   card.setAttribute("draggable","true");
@@ -2870,11 +2866,6 @@ function makeCanvasCard(t, colId){
     var planIcon = span("canvas-card-plan-icon","\u2713");
     planIcon.title = "Has plan";
     footer.appendChild(planIcon);
-  }
-  if(isFailed){
-    var failIcon = span("canvas-card-failed-icon","\u26A0");
-    failIcon.title = t.fail_reason ? "Failed: "+t.fail_reason : "Failed";
-    footer.appendChild(failIcon);
   }
   if(t.effective_state === "running"){
     var lastAg = getLastAgentForTask(t.id);
