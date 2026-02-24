@@ -362,11 +362,9 @@ func ListAutopilotPending(project string) ([]Task, error) {
 		}
 	}
 
+	// FIFO order: process tasks in creation order (by ID).
+	// Priority is informational only; it does not affect execution order.
 	sort.Slice(result, func(i, j int) bool {
-		ri, rj := priorityRank(result[i].Priority), priorityRank(result[j].Priority)
-		if ri != rj {
-			return ri > rj
-		}
 		return result[i].ID < result[j].ID
 	})
 
