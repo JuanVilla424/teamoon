@@ -88,10 +88,10 @@ func BuildSkeletonPrompt(sk config.SkeletonConfig) string {
 }
 
 // BuildPlanPrompt builds the full prompt for plan generation.
-func BuildPlanPrompt(t queue.Task, skeletonBlock string) string {
+func BuildPlanPrompt(t queue.Task, skeletonBlock, projectsDir string) string {
 	return fmt.Sprintf(
 		"You may read files to understand the codebase, then create a plan.\n"+
-			"Project path: /home/cloud-agent/Projects/%s\n\n"+
+			"Project path: %s/%s\n\n"+
 			"TASK: %s\n\n"+
 			"INSTRUCTIONS:\n"+
 			"1. FIRST read CLAUDE.md in the project root for project-specific guidelines\n"+
@@ -136,14 +136,14 @@ func BuildPlanPrompt(t queue.Task, skeletonBlock string) string {
 			"- NEVER create .md files (SUMMARY.md, ANALYSIS.md, etc.) — output the plan as a text message only\n"+
 			"- NEVER include steps that say 'invoke party mode' or 'load workflow' — the autopilot system handles orchestration\n"+
 			"- Be concise and direct. No preamble.",
-		t.Project, t.Description, skeletonBlock, t.Description,
+		projectsDir, t.Project, t.Description, skeletonBlock, t.Description,
 	)
 }
 
 // GeneratePlan runs claude to generate a plan synchronously and saves it.
 func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config) (plan.Plan, error) {
 	skeletonBlock := BuildSkeletonPrompt(sk)
-	prompt := BuildPlanPrompt(t, skeletonBlock)
+	prompt := BuildPlanPrompt(t, skeletonBlock, cfg.ProjectsDir)
 
 	env := filterEnv(os.Environ(), "CLAUDECODE")
 	gitName := engine.GenerateName()

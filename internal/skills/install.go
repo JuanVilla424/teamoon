@@ -35,6 +35,8 @@ var defaultSkills = []struct {
 	{"vercel-labs/agent-skills@vercel-composition-patterns", "vercel-composition-patterns"},
 	{"vercel-labs/agent-skills@vercel-react-native-skills", "vercel-react-native-skills"},
 	{"vercel-labs/agent-browser@agent-browser", "agent-browser"},
+	// UI/UX Design (1)
+	{"nextlevelbuilder/ui-ux-pro-max-skill@ui-ux-pro-max", "ui-ux-pro-max"},
 }
 
 func Install() error {

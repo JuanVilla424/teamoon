@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -47,19 +48,31 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 		}
 
 		task := tasks[0]
+		if cfg.Debug {
+			log.Printf("[debug][autopilot] selected task #%d (%s) state=%s from %d candidates", task.ID, task.Description, queue.EffectiveState(task), len(tasks))
+		}
 		state := queue.EffectiveState(task)
 		skeleton := config.SkeletonFor(cfg, project)
 
 		// Plan if pending
 		if state == queue.StatePending {
 			emit(logs.LevelInfo, fmt.Sprintf("Planning task #%d: %s", task.ID, task.Description))
+			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: "planning"})
 			p, planErr := planFn(task, skeleton)
 			if planErr != nil {
 				emit(logs.LevelError, fmt.Sprintf("Plan failed for task #%d: %v", task.ID, planErr))
 				queue.SetBlockReason(task.ID, "plan generation failed: "+planErr.Error())
 				continue
 			}
-			// Plan succeeded, now run it
+			// Notify UI that plan is ready (PLN state)
+			emit(logs.LevelSuccess, fmt.Sprintf("Plan ready for task #%d", task.ID))
+			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned})
+			// Brief pause so UI can reflect PLN state before transitioning to RUN
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			runOneTask(ctx, task, p, cfg, send, mgr, emit)
 		} else if state == queue.StatePlanned {
 			// Already planned, parse and run
