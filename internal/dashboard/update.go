@@ -122,7 +122,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projects = msg.projects
 		m.tasks = msg.tasks
 		m.err = msg.err
-		m.cost = metrics.CalculateCost(m.today, m.week, m.month, m.cfg)
+		m.cost = metrics.CalculateCost(m.today, m.week, m.month)
 		if m.cursor >= len(m.tasks) && len(m.tasks) > 0 {
 			m.cursor = len(m.tasks) - 1
 		}

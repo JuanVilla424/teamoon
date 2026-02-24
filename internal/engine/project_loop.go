@@ -53,7 +53,7 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 		}
 		state := queue.EffectiveState(task)
 
-		if reason := CheckGuardrails(cfg); reason != "" {
+		if reason := CheckGuardrails(); reason != "" {
 			emit(logs.LevelWarn, fmt.Sprintf("Guardrail stopped %s: %s", project, reason))
 			return
 		}
