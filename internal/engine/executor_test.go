@@ -32,12 +32,12 @@ func TestBuildSpawnArgs_Default(t *testing.T) {
 		t.Error("max-turns should be 15")
 	}
 
-	// Should NOT have --model or --effort (empty in default config)
-	if containsArg(args, "--model") {
-		t.Error("--model should not be present for default config")
+	// Default config now has model=opusplan and effort=high
+	if !containsArgValue(args, "--model", "opusplan") {
+		t.Error("--model should be opusplan for default config")
 	}
-	if containsArg(args, "--effort") {
-		t.Error("--effort should not be present for default config")
+	if !containsArgValue(args, "--effort", "high") {
+		t.Error("--effort should be high for default config")
 	}
 	// Should NOT have --mcp-config (MCPServers is nil)
 	if containsArg(args, "--mcp-config") {

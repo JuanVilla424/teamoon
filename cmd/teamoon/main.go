@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	version  = "1.1.0"
+	version  = "1.1.1"
 	buildNum = "0"
 )
 
@@ -150,6 +150,7 @@ func main() {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			config.InitMCPFromGlobal(&cfg)
 			srv := web.NewServer(cfg, engineMgr, logBuf)
 			go srv.Start(ctx)
 
