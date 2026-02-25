@@ -949,9 +949,33 @@ function renderDashboard(root){
     costCard.appendChild(wBar);
     var wLabel = div("usage-bar-label");
     wLabel.textContent = Math.round(weeklyUse) + "% weekly usage";
-    var sessUse = (D.usage && D.usage.session) ? D.usage.session.utilization : 0;
-    if (sessUse > 0) wLabel.textContent += " \u00b7 " + Math.round(sessUse) + "% session";
     costCard.appendChild(wLabel);
+    // Session usage bar
+    var sessUse = (D.usage && D.usage.session) ? D.usage.session.utilization : 0;
+    var sColor = sessUse >= 90 ? "red" : sessUse >= 60 ? "yellow" : "green";
+    var sBar = div("progress");
+    var sFill = div("progress-fill " + sColor);
+    sFill.style.width = Math.min(sessUse, 100).toFixed(1) + "%";
+    sBar.appendChild(sFill);
+    costCard.appendChild(sBar);
+    var sLabel = div("usage-bar-label");
+    sLabel.textContent = Math.round(sessUse) + "% session usage";
+    costCard.appendChild(sLabel);
+  }
+  // Daily usage bar (100/7 ≈ 14.29% daily cap) — only when fetcher has data
+  if (weeklyUse > 0 && c.cost_week > 0) {
+    var dailyCap = 100 / 7;
+    var todayUtil = (todayCost / c.cost_week) * weeklyUse;
+    var dailyFill = Math.min(100, (todayUtil / dailyCap) * 100);
+    var dColor = dailyFill >= 90 ? "red" : dailyFill >= 60 ? "yellow" : "green";
+    var dBar = div("progress");
+    var dFill = div("progress-fill " + dColor);
+    dFill.style.width = dailyFill.toFixed(1) + "%";
+    dBar.appendChild(dFill);
+    costCard.appendChild(dBar);
+    var dLabel = div("usage-bar-label");
+    dLabel.textContent = Math.round(dailyFill) + "% daily usage";
+    costCard.appendChild(dLabel);
   }
   bento.appendChild(costCard);
 
@@ -3702,7 +3726,7 @@ function renderConfigAutopilot(root){
     modelRow.appendChild(modelLbl);
     var modelSel = el("select","config-input");
     modelSel.id = "cfg-spawn_model";
-    [["Opus + Sonnet (Plan Mode)","opusplan"],["Sonnet 4.6","sonnet"],["Opus 4.6","opus"]].forEach(function(opt){
+    [["opusplan (Opus plan, Sonnet exec)","opusplan"],["sonnet (Sonnet 4.6)","sonnet"],["opus (Opus 4.6)","opus"]].forEach(function(opt){
       var o = el("option","",[ opt[0] ]);
       o.value = opt[1];
       if((c.spawn_model||"") === opt[1]) o.selected = true;
@@ -3743,7 +3767,7 @@ function renderConfigAutopilot(root){
     asRow.appendChild(asCb);
     grid.appendChild(asRow);
   } else {
-    var modelLabels = {"opusplan":"Opus + Sonnet (Plan Mode)","sonnet":"Sonnet 4.6","opus":"Opus 4.6"};
+    var modelLabels = {"opusplan":"opusplan (Opus plan, Sonnet exec)","sonnet":"sonnet (Sonnet 4.6)","opus":"opus (Opus 4.6)"};
     grid.appendChild(configReadRow("Model", modelLabels[c.spawn_model] || c.spawn_model || "(inherit)"));
     grid.appendChild(configReadRow("Effort", c.spawn_effort || "(inherit)"));
     grid.appendChild(configReadRow("Max Turns", String(c.spawn_max_turns || 15)));
@@ -4466,22 +4490,50 @@ function saveAutopilotConfig(){
 }
 
 function renderConfigAbout(root){
+  var REPO = "https://github.com/JuanVilla424/teamoon";
+
+  // Card 1: About — version with inline update
   var sec = div("config-section");
   sec.appendChild(el("h3","config-section-title",["About"]));
   var grid = div("config-grid");
-  grid.appendChild(configReadRow("Version", "v" + (D.version||"?") + " #" + (D.build_num||"0")));
+
+  // Version row with inline update button
+  var verRow = div("config-field");
+  verRow.appendChild(span("config-label","Version"));
+  var verVal = div("config-value-inline");
+  verVal.appendChild(span("config-value-text","v" + (D.version||"?") + " #" + (D.build_num||"0")));
+  var updBtn = el("button","btn btn-sm",["Check for Updates"]);
+  updBtn.style.marginLeft = "12px";
+  verVal.appendChild(updBtn);
+  verRow.appendChild(verVal);
+  grid.appendChild(verRow);
+
   grid.appendChild(configReadRow("Plan Model", D.plan_model));
   grid.appendChild(configReadRow("Exec Model", D.exec_model));
   grid.appendChild(configReadRow("Effort", D.effort));
   sec.appendChild(grid);
+
+  // Inline update area (hidden until clicked)
+  var updContent = div("config-update-area");
+  updContent.style.display = "none";
+  updBtn.onclick = function(){
+    updContent.style.display = "";
+    updBtn.style.display = "none";
+    renderUpdateArea(updContent);
+  };
+  sec.appendChild(updContent);
   root.appendChild(sec);
 
-  var updSec = div("config-section");
-  updSec.appendChild(el("h3","config-section-title",["Updates"]));
-  var updContent = div("config-update-area");
-  renderUpdateArea(updContent);
-  updSec.appendChild(updContent);
-  root.appendChild(updSec);
+  // Card 2: Repository
+  var repoSec = div("config-section");
+  repoSec.appendChild(el("h3","config-section-title",["Repository"]));
+  var repoGrid = div("config-grid");
+  repoGrid.appendChild(configLinkRow("Source Code", "github.com/JuanVilla424/teamoon", REPO));
+  repoGrid.appendChild(configLinkRow("Issues", "Report bugs or request features", REPO + "/issues"));
+  repoGrid.appendChild(configLinkRow("Contributing", "Contributing Guidelines", REPO + "/blob/main/CONTRIBUTING.md"));
+  repoGrid.appendChild(configLinkRow("License", "GNU General Public License v3.0", REPO + "/blob/main/LICENSE"));
+  repoSec.appendChild(repoGrid);
+  root.appendChild(repoSec);
 }
 
 function renderUpdateArea(container){
@@ -5008,8 +5060,10 @@ function renderConfigLimits(root){
   var grid = div("config-grid");
   if(editing){
     grid.appendChild(configInput("context_limit","Context Limit (tokens)", String(c.context_limit || 0)));
+    grid.appendChild(configInput("log_retention_days","Log Retention (days)", String(c.log_retention_days || 20)));
   } else {
     grid.appendChild(configReadRow("Context Limit", (c.context_limit || 0) + " tokens"));
+    grid.appendChild(configReadRow("Log Retention", (c.log_retention_days || 20) + " days"));
   }
   sec.appendChild(grid);
   if(editing) sec.appendChild(configEditActions("limits"));
@@ -5147,6 +5201,19 @@ function configReadRow(label, value, masked){
   return row;
 }
 
+function configLinkRow(label, text, href){
+  var row = div("config-field");
+  row.appendChild(span("config-label", label));
+  var a = document.createElement("a");
+  a.className = "config-value-link";
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.textContent = text;
+  row.appendChild(a);
+  return row;
+}
+
 function saveConfigSection(section){
   var c = {};
   Object.keys(configData).forEach(function(k){ c[k] = configData[k]; });
@@ -5161,6 +5228,7 @@ function saveConfigSection(section){
     c.web_password = document.getElementById("cfg-web_password").value;
   } else if(section === "limits"){
     c.context_limit = parseInt(document.getElementById("cfg-context_limit").value) || 0;
+    c.log_retention_days = parseInt(document.getElementById("cfg-log_retention_days").value) || 20;
   }
   var saveBtn = document.querySelector(".config-actions .btn-primary");
   var restore = btnLoading(saveBtn, "SAVING\u2026");

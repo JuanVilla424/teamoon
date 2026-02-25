@@ -55,38 +55,47 @@ func (r *RingBuffer) SetDebug(on bool) {
 	r.debug = on
 }
 
-func NewRingBuffer(capacity int) *RingBuffer {
+func NewRingBuffer(retentionDays int) *RingBuffer {
+	if retentionDays <= 0 {
+		retentionDays = 20
+	}
 	f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	rb := &RingBuffer{
-		entries: make([]LogEntry, capacity),
-		cap:     capacity,
-		file:    f,
+		file: f,
 	}
-	rb.loadFromFile()
+	rb.loadFromFileRetention(retentionDays)
 	return rb
 }
 
-func (r *RingBuffer) loadFromFile() {
+func (r *RingBuffer) loadFromFileRetention(retentionDays int) {
 	data, err := os.ReadFile(logPath)
 	if err != nil {
+		// No file yet — initialize with minimum capacity
+		r.cap = 100
+		r.entries = make([]LogEntry, r.cap)
 		return
 	}
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	// Load last N lines (up to capacity)
-	start := 0
-	if len(lines) > r.cap {
-		start = len(lines) - r.cap
-	}
-	for _, line := range lines[start:] {
+	// Collect entries within retention window
+	var kept []LogEntry
+	for _, line := range lines {
 		e := parseLogLine(line)
-		if e.Time.IsZero() {
+		if e.Time.IsZero() || e.Time.Before(cutoff) {
 			continue
 		}
+		kept = append(kept, e)
+	}
+	cap := len(kept)
+	if cap < 100 {
+		cap = 100
+	}
+	r.entries = make([]LogEntry, cap)
+	r.cap = cap
+	for _, e := range kept {
 		r.entries[r.head] = e
 		r.head = (r.head + 1) % r.cap
-		if r.size < r.cap {
-			r.size++
-		}
+		r.size++
 	}
 }
 
@@ -237,6 +246,48 @@ func parseLogLine(line string) LogEntry {
 	}
 
 	return e
+}
+
+// CleanupLogs removes log entries older than retentionDays.
+// Rewrites the global log file and deletes old per-task log files.
+func CleanupLogs(retentionDays int) {
+	if retentionDays <= 0 {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+
+	// Rewrite global log file keeping only recent entries
+	data, err := os.ReadFile(logPath)
+	if err == nil && len(data) > 0 {
+		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		var kept []string
+		for _, line := range lines {
+			e := parseLogLine(line)
+			if !e.Time.IsZero() && !e.Time.Before(cutoff) {
+				kept = append(kept, line)
+			}
+		}
+		os.WriteFile(logPath, []byte(strings.Join(kept, "\n")+"\n"), 0644)
+	}
+
+	// Delete old per-task log files
+	dir := taskLogDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "task-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
 func (r *RingBuffer) Snapshot() []LogEntry {

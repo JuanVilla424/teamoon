@@ -50,7 +50,8 @@ func main() {
 			}
 
 			engineMgr := engine.NewManager()
-			logBuf := logs.NewRingBuffer(100)
+			logs.CleanupLogs(cfg.LogRetentionDays)
+			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
 			logBuf.SetDebug(cfg.Debug)
 			if f := logBuf.File(); f != nil {
 				log.SetOutput(f)
@@ -141,7 +142,8 @@ func main() {
 			}
 
 			engineMgr := engine.NewManager()
-			logBuf := logs.NewRingBuffer(100)
+			logs.CleanupLogs(cfg.LogRetentionDays)
+			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
 			logBuf.SetDebug(cfg.Debug)
 			if f := logBuf.File(); f != nil {
 				log.SetOutput(f)
