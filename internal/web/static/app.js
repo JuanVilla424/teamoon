@@ -887,7 +887,7 @@ function renderDashboard(root){
   var bento = div("bento");
 
   // Sessions card
-  var sessCard = div("card");
+  var sessCard = div("card bento-area-sessions");
   var sessLabel = div("card-label");
   var sessDot = span("label-dot"); sessDot.style.background = "var(--success)";
   sessLabel.appendChild(sessDot);
@@ -898,7 +898,7 @@ function renderDashboard(root){
   bento.appendChild(sessCard);
 
   // Cost card
-  var costCard = div("card");
+  var costCard = div("card bento-area-cost");
   var costLabel = div("card-label");
   var costDot = span("label-dot"); costDot.style.background = "var(--warning)";
   costLabel.appendChild(costDot);
@@ -926,7 +926,7 @@ function renderDashboard(root){
 
   // Context card (tall)
   var ctxPct = ctx.context_percent || 0;
-  var ctxCard = div("card bento-tall");
+  var ctxCard = div("card bento-area-context");
   var ctxLabel = div("card-label");
   var ctxDot = span("label-dot");
   ctxDot.style.background = ctxPct >= 80 ? "var(--danger)" : ctxPct >= 60 ? "var(--warning)" : "var(--success)";
@@ -957,7 +957,7 @@ function renderDashboard(root){
     else if(s==="done")doneC++;
   }
   var activeCount = running + pendingC + planned;
-  var qCard = div("card bento-wide card-clickable");
+  var qCard = div("card bento-area-queue card-clickable");
   qCard.onclick = function(){ location.hash = "queue"; };
   var qLabel = div("card-label");
   var qDot = span("label-dot"); qDot.style.background = "var(--accent)";
@@ -983,8 +983,8 @@ function renderDashboard(root){
   }
   bento.appendChild(qCard);
 
-  // Activity card (tall, right side)
-  var actCard = div("card");
+  // Activity card (full-width bottom)
+  var actCard = div("card bento-area-activity");
   var actLabel = div("card-label");
   actLabel.appendChild(txt("Recent Activity"));
   actCard.appendChild(actLabel);
