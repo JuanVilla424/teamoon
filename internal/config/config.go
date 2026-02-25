@@ -239,6 +239,45 @@ func InitMCPFromGlobal(cfg *Config) {
 	}
 }
 
+// RemoveMCPFromGlobal removes an MCP server entry from ~/.claude/settings.json.
+func RemoveMCPFromGlobal(name string) error {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".claude", "settings.json")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	type mcpEntry struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env,omitempty"`
+	}
+	servers := make(map[string]mcpEntry)
+	if existing, ok := raw["mcpServers"]; ok {
+		json.Unmarshal(existing, &servers)
+	}
+
+	delete(servers, name)
+
+	serversJSON, err := json.Marshal(servers)
+	if err != nil {
+		return err
+	}
+	raw["mcpServers"] = serversJSON
+
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0644)
+}
+
 // InstallMCPToGlobal adds an MCP server entry to ~/.claude/settings.json.
 // It reads the file, merges the new server into mcpServers, and writes back.
 // If envVars is non-empty, they are set in the "env" field of the server entry.

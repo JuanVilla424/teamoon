@@ -1586,23 +1586,35 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 	type registryServer struct {
 		Server struct {
 			Name        string `json:"name"`
+			Title       string `json:"title"`
 			Description string `json:"description"`
 			Version     string `json:"version"`
-			Icons       []struct {
+			WebsiteUrl  string `json:"websiteUrl"`
+			Repository  struct {
+				URL    string `json:"url"`
+				Source string `json:"source"`
+			} `json:"repository"`
+			Icons []struct {
 				Src string `json:"src"`
 			} `json:"icons"`
 			Packages []struct {
 				RegistryType         string `json:"registryType"`
 				Identifier           string `json:"identifier"`
+				RuntimeHint          string `json:"runtimeHint"`
 				EnvironmentVariables []struct {
-					Name       string `json:"name"`
-					IsRequired bool   `json:"isRequired"`
-					IsSecret   bool   `json:"isSecret"`
+					Name        string `json:"name"`
+					Description string `json:"description"`
+					IsRequired  bool   `json:"isRequired"`
+					IsSecret    bool   `json:"isSecret"`
+					Default     string `json:"default"`
 				} `json:"environmentVariables"`
 			} `json:"packages"`
 		} `json:"server"`
 		Meta map[string]struct {
-			UpdatedAt string `json:"updatedAt"`
+			UpdatedAt   string `json:"updatedAt"`
+			PublishedAt string `json:"publishedAt"`
+			IsLatest    bool   `json:"isLatest"`
+			Status      string `json:"status"`
 		} `json:"_meta"`
 	}
 	type registryResponse struct {
@@ -1614,20 +1626,30 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type envVar struct {
-		Name       string `json:"name"`
-		IsRequired bool   `json:"is_required"`
-		IsSecret   bool   `json:"is_secret"`
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+		IsRequired  bool   `json:"is_required"`
+		IsSecret    bool   `json:"is_secret"`
+		Default     string `json:"default,omitempty"`
 	}
 	type catalogEntry struct {
-		Name         string   `json:"name"`
-		Description  string   `json:"description"`
-		Package      string   `json:"package"`
-		RegistryType string   `json:"registry_type"`
-		Version      string   `json:"version,omitempty"`
-		Icon         string   `json:"icon,omitempty"`
-		UpdatedAt    string   `json:"updated_at,omitempty"`
-		EnvVars      []envVar `json:"env_vars"`
-		Installed    bool     `json:"installed"`
+		Name          string   `json:"name"`
+		Title         string   `json:"title,omitempty"`
+		Description   string   `json:"description"`
+		Package       string   `json:"package"`
+		RegistryType  string   `json:"registry_type"`
+		Version       string   `json:"version,omitempty"`
+		Icon          string   `json:"icon,omitempty"`
+		UpdatedAt     string   `json:"updated_at,omitempty"`
+		PublishedAt   string   `json:"published_at,omitempty"`
+		IsLatest      bool     `json:"is_latest,omitempty"`
+		Status        string   `json:"status,omitempty"`
+		RepositoryURL string   `json:"repository_url,omitempty"`
+		RepoSource    string   `json:"repo_source,omitempty"`
+		WebsiteURL    string   `json:"website_url,omitempty"`
+		RuntimeHint   string   `json:"runtime_hint,omitempty"`
+		EnvVars       []envVar `json:"env_vars"`
+		Installed     bool     `json:"installed"`
 	}
 
 	installed := config.ReadGlobalMCPServers()
@@ -1694,28 +1716,47 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 			if len(srv.Icons) > 0 {
 				icon = srv.Icons[0].Src
 			}
-			var updatedAt string
+			var updatedAt, publishedAt, status string
+			var isLatest bool
 			for _, m := range s.Meta {
 				if m.UpdatedAt != "" {
 					updatedAt = m.UpdatedAt
-					break
+				}
+				if m.PublishedAt != "" {
+					publishedAt = m.PublishedAt
+				}
+				if m.Status != "" {
+					status = m.Status
+				}
+				if m.IsLatest {
+					isLatest = true
 				}
 			}
 			entry := catalogEntry{
-				Name:         srv.Name,
-				Description:  srv.Description,
-				Package:      bestPkg.Identifier,
-				RegistryType: bestPkg.RegistryType,
-				Version:      srv.Version,
-				Icon:         icon,
-				UpdatedAt:    updatedAt,
-				Installed:    installed[srv.Name].Command != "",
+				Name:          srv.Name,
+				Title:         srv.Title,
+				Description:   srv.Description,
+				Package:       bestPkg.Identifier,
+				RegistryType:  bestPkg.RegistryType,
+				Version:       srv.Version,
+				Icon:          icon,
+				UpdatedAt:     updatedAt,
+				PublishedAt:   publishedAt,
+				IsLatest:      isLatest,
+				Status:        status,
+				RepositoryURL: srv.Repository.URL,
+				RepoSource:    srv.Repository.Source,
+				WebsiteURL:    srv.WebsiteUrl,
+				RuntimeHint:   bestPkg.RuntimeHint,
+				Installed:     installed[srv.Name].Command != "",
 			}
 			for _, ev := range bestPkg.EnvironmentVariables {
 				entry.EnvVars = append(entry.EnvVars, envVar{
-					Name:       ev.Name,
-					IsRequired: ev.IsRequired,
-					IsSecret:   ev.IsSecret,
+					Name:        ev.Name,
+					Description: ev.Description,
+					IsRequired:  ev.IsRequired,
+					IsSecret:    ev.IsSecret,
+					Default:     ev.Default,
 				})
 			}
 			results = append(results, entry)
@@ -1782,6 +1823,39 @@ func (s *Server) handleMCPInstall(w http.ResponseWriter, r *http.Request) {
 			mcp.SkeletonStep = &step
 		}
 		cfg.MCPServers[req.Name] = mcp
+		config.Save(cfg)
+		s.cfg = cfg
+	}
+
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleMCPUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+
+	if err := config.RemoveMCPFromGlobal(req.Name); err != nil {
+		writeErr(w, 500, "uninstall failed: "+err.Error())
+		return
+	}
+
+	// Also remove from teamoon config if present
+	cfg, err := config.Load()
+	if err == nil && cfg.MCPServers != nil {
+		delete(cfg.MCPServers, req.Name)
 		config.Save(cfg)
 		s.cfg = cfg
 	}
@@ -1944,6 +2018,37 @@ func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		writeErr(w, 500, "install failed: "+err.Error()+"\n"+string(out))
+		return
+	}
+
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleSkillsUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+
+	home, _ := os.UserHomeDir()
+	skillPath := filepath.Join(home, ".agents", "skills", req.Name)
+	if _, err := os.Stat(skillPath); os.IsNotExist(err) {
+		writeErr(w, 404, "skill not found")
+		return
+	}
+	if err := os.RemoveAll(skillPath); err != nil {
+		writeErr(w, 500, "uninstall failed: "+err.Error())
 		return
 	}
 
