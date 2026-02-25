@@ -237,7 +237,7 @@ a:hover { color: var(--text) }
   flex-shrink: 0;
   z-index: 20;
 }
-.topbar-left { display: flex; align-items: center; gap: 12px }
+.topbar-left { display: flex; align-items: center; gap: 12px; text-decoration: none; cursor: pointer }
 .topbar-brand { font-size: 17px; font-weight: 700; letter-spacing: -.5px; color: var(--text) }
 .moon-icon { color: var(--accent); width: 22px; height: 22px }
 .topbar-right { display: flex; align-items: center; gap: 16px }
@@ -511,10 +511,13 @@ a:hover { color: var(--text) }
   z-index: 2;
   transition: all var(--fast) var(--spring);
 }
+.tl-node.state-pending .tl-dot { border-color: var(--text-faint) }
+.tl-node.state-planned .tl-dot { background: var(--info); border-color: var(--info) }
+.tl-node.state-running .tl-dot { background: var(--accent); border-color: var(--accent); animation: pulse-dot 2s ease-in-out infinite; box-shadow: 0 0 10px var(--accent-glow) }
+.tl-node.state-generating .tl-dot { background: var(--warning); border-color: var(--warning); animation: pulse-dot 2s ease-in-out infinite }
+.tl-node.state-done .tl-dot { background: var(--success); border-color: var(--success) }
 .tl-node:hover .tl-dot { border-color: var(--accent); box-shadow: 0 0 8px var(--accent-glow) }
 .tl-node.selected .tl-dot { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 12px var(--accent-glow) }
-.tl-node.has-running .tl-dot { background: var(--success); border-color: var(--success); animation: pulse-dot 2s ease-in-out infinite; box-shadow: 0 0 10px var(--success-glow) }
-.tl-node.has-generating .tl-dot { background: var(--warning); border-color: var(--warning); animation: pulse-dot 2s ease-in-out infinite }
 .tl-node.task-just-done { animation: flash-done 2s var(--spring) }
 
 .tl-header {
@@ -560,8 +563,8 @@ a:hover { color: var(--text) }
 }
 .task-state.pending { background: var(--glass); color: var(--text-faint) }
 .task-state.planned { background: var(--info-soft); color: var(--info) }
-.task-state.running { background: var(--success-soft); color: var(--success) }
-.task-state.done { background: var(--card-bg); color: var(--text-faint) }
+.task-state.running { background: var(--accent-soft); color: var(--accent) }
+.task-state.done { background: var(--success-soft); color: var(--success) }
 .task-state.generating { background: var(--warning-soft); color: var(--warning) }
 .task-pri { font-size: 10px; font-weight: 700; font-family: var(--mono); letter-spacing: .3px }
 .task-pri.high { color: var(--danger) }
@@ -1187,9 +1190,9 @@ a:hover { color: var(--text) }
 .state-badge { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: var(--r-full); font-family: var(--mono); background: var(--card-border); color: var(--text-muted); text-transform: uppercase; letter-spacing: .3px }
 .state-badge.state-pending { background: var(--card-border); color: var(--text-faint) }
 .state-badge.state-planned { background: var(--info-soft); color: var(--info) }
-.state-badge.state-running { background: var(--success-soft); color: var(--success) }
+.state-badge.state-running { background: var(--accent-soft); color: var(--accent) }
 .state-badge.state-generating { background: var(--warning-soft); color: var(--warning) }
-.state-badge.state-done { background: var(--card-bg); color: var(--text-faint) }
+.state-badge.state-done { background: var(--success-soft); color: var(--success) }
 .priority-badge { font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: var(--r-full); text-transform: uppercase; letter-spacing: .3px; font-family: var(--mono) }
 .priority-badge.pri-high { background: var(--danger-soft); color: var(--danger) }
 .priority-badge.pri-med { background: var(--warning-soft); color: var(--warning) }
@@ -1254,6 +1257,8 @@ a:hover { color: var(--text) }
 .mcp-toggle input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent); flex-shrink: 0 }
 .mcp-server-name { font-size: 14px; font-weight: 600; color: var(--text); flex-shrink: 0; min-width: 130px }
 .mcp-server-cmd { font-size: 12px; color: var(--text-faint); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 }
+.skeleton-tag { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: var(--r-full); background: var(--card-bg-hover); color: var(--text-muted); font-family: var(--mono); white-space: nowrap; flex-shrink: 0 }
+.skeleton-tag.mcp { background: var(--info-soft); color: var(--info) }
 .init-progress-step { display: flex; gap: 12px; align-items: center; padding: 12px 0 }
 .init-step-icon { width: 20px; text-align: center; font-size: 16px }
 .init-step-name { font-size: 15px; color: var(--text-secondary) }
@@ -1267,6 +1272,38 @@ a:hover { color: var(--text) }
 }
 .skill-link-btn:hover { background: var(--glass) }
 .skill-link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+/* ── Marketplace Leaderboard ── */
+.mkt-header { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px }
+.mkt-search { width: 100%; background: var(--input-bg); border: 1px solid var(--glass); border-radius: var(--r-md); color: var(--text); font-size: 14px; padding: 10px 14px; outline: none; font-family: var(--font); transition: border-color var(--fast) var(--spring); box-sizing: border-box }
+.mkt-search:focus { border-color: var(--glass-focus); box-shadow: 0 0 0 3px var(--accent-glow) }
+.mkt-search::placeholder { color: var(--text-faint) }
+.mkt-tabs { display: flex; gap: 6px }
+.mkt-tab { font-size: 12px; font-weight: 600; padding: 5px 14px; border-radius: var(--r-full); border: 1px solid var(--glass); background: none; color: var(--text-faint); cursor: pointer; font-family: var(--mono); transition: all var(--fast) var(--spring) }
+.mkt-tab:hover { color: var(--text-secondary); border-color: var(--glass-hover) }
+.mkt-tab.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border) }
+.mkt-list { display: flex; flex-direction: column }
+.mkt-list-header { display: flex; align-items: center; padding: 8px 12px; font-size: 11px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--mono); border-bottom: 1px solid var(--glass) }
+.mkt-row { display: flex; align-items: center; gap: 12px; padding: 12px; border-bottom: 1px solid var(--glass); transition: background var(--fast) var(--spring) }
+.mkt-row:hover { background: var(--card-bg-hover) }
+.mkt-row:last-child { border-bottom: none }
+.mkt-rank { width: 32px; text-align: right; font-size: 13px; font-weight: 600; color: var(--text-faint); font-family: var(--mono); flex-shrink: 0 }
+.mkt-icon { width: 32px; height: 32px; border-radius: var(--r-sm); background: var(--card-border); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; overflow: hidden }
+.mkt-icon img { width: 32px; height: 32px; object-fit: contain }
+.mkt-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px }
+.mkt-name { font-size: 14px; font-weight: 600; color: var(--text) }
+.mkt-source { font-size: 11px; color: var(--text-faint); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.mkt-desc { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4 }
+.mkt-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0 }
+.mkt-version { font-size: 10px; color: var(--text-faint); font-family: var(--mono); padding: 2px 8px; border-radius: var(--r-full); background: var(--card-border) }
+.mkt-installs { font-size: 11px; font-weight: 600; color: var(--text-secondary); font-family: var(--mono); white-space: nowrap }
+.mkt-action { flex-shrink: 0 }
+.mkt-installed-badge { font-size: 10px; font-weight: 700; padding: 4px 12px; border-radius: var(--r-full); background: var(--success-soft); color: var(--success); white-space: nowrap }
+.mkt-load-more { display: flex; justify-content: center; margin-top: 16px }
+.mkt-empty { text-align: center; padding: 40px 20px; color: var(--text-faint); font-size: 14px }
+.mkt-loading .mkt-row { animation: shimmer 1.5s infinite linear; background-size: 200% 100%; background-image: linear-gradient(90deg, var(--card-border) 0%, var(--glass-hover) 50%, var(--card-border) 100%) }
+.mkt-env-hint { font-size: 10px; color: var(--text-faint); font-family: var(--mono) }
+.mkt-separator { border: none; border-top: 1px solid var(--glass); margin: 20px 0 }
 
 /* Agent badges */
 .agent-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: var(--r-full); font-size: 11px; font-weight: 600; background: var(--card-border); white-space: nowrap; flex-shrink: 0; font-family: var(--mono) }
@@ -1347,7 +1384,7 @@ a:hover { color: var(--text) }
 .setup-complete-msg { font-size: 16px; color: var(--text-secondary); max-width: 400px; line-height: 1.6 }
 
 /* ── Config Update Area ── */
-.config-update-area { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 }
+.config-update-area { display: flex; flex-direction: column; gap: 12px; padding: 8px 0; align-items: flex-start }
 .update-status { font-size: 13px; color: var(--text-secondary); padding: 4px 0 }
 .update-status.available { color: var(--accent) }
 .update-status.current { color: #22c55e }

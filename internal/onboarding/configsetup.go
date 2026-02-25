@@ -61,6 +61,13 @@ func setupConfig() error {
 	}
 
 	fmt.Printf("  [+] Config saved: %s\n", configPath)
+
+	if err := SetupEnvFile(); err != nil {
+		fmt.Printf("  [!] Warning: could not create .env: %v\n", err)
+	} else {
+		fmt.Printf("  [+] Service env file updated: %s/.env\n", configDir)
+	}
+
 	return nil
 }
 
@@ -96,5 +103,9 @@ func saveConfigWeb(wc WebConfig) error {
 		cfg.MaxConcurrent = wc.MaxConcurrent
 	}
 
-	return config.Save(cfg)
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	SetupEnvFile() // best-effort, ignore errors
+	return nil
 }

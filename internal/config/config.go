@@ -6,10 +6,29 @@ import (
 	"path/filepath"
 )
 
+type SkeletonStep struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Prompt      string `json:"prompt"`
+	ReadOnly    bool   `json:"read_only"`
+}
+
 type MCPServer struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
-	Enabled bool     `json:"enabled"`
+	Command      string        `json:"command"`
+	Args         []string      `json:"args"`
+	Enabled      bool          `json:"enabled"`
+	SkeletonStep *SkeletonStep `json:"skeleton_step,omitempty"`
+}
+
+// KnownSkeletonSteps maps MCP names to their default skeleton steps.
+// When an MCP is installed and matches a known name, the step is auto-attached.
+var KnownSkeletonSteps = map[string]SkeletonStep{
+	"context7": {
+		Label:       "Context7 Lookup",
+		Description: "Look up library documentation",
+		Prompt:      "Use resolve-library-id then query-docs for each relevant library. Note relevant APIs and patterns.",
+		ReadOnly:    true,
+	},
 }
 
 type SpawnConfig struct {
@@ -20,9 +39,8 @@ type SpawnConfig struct {
 }
 
 type SkeletonConfig struct {
-	WebSearch      bool `json:"web_search"`
-	Context7Lookup bool `json:"context7_lookup"`
-	BuildVerify    bool `json:"build_verify"`
+	WebSearch   bool `json:"web_search"`
+	BuildVerify bool `json:"build_verify"`
 	Test           bool `json:"test"`
 	PreCommit      bool `json:"pre_commit"`
 	Commit         bool `json:"commit"`
@@ -31,9 +49,8 @@ type SkeletonConfig struct {
 
 func DefaultSkeleton() SkeletonConfig {
 	return SkeletonConfig{
-		WebSearch:      true,
-		Context7Lookup: true,
-		BuildVerify:    true,
+		WebSearch:   true,
+		BuildVerify: true,
 		Test:           true,
 		PreCommit:      true,
 		Commit:         true,
@@ -65,6 +82,7 @@ type Config struct {
 	Skeleton           SkeletonConfig                 `json:"skeleton"`
 	ProjectSkeletons   map[string]SkeletonConfig      `json:"project_skeletons,omitempty"`
 	MaxConcurrent      int                            `json:"max_concurrent"`
+	AutopilotAutostart bool                           `json:"autopilot_autostart"`
 	MCPServers         map[string]MCPServer           `json:"mcp_servers,omitempty"`
 	SourceDir          string                         `json:"source_dir,omitempty"`
 	Debug              bool                           `json:"debug,omitempty"`
@@ -81,9 +99,10 @@ func DefaultConfig() Config {
 		WebPort:            7777,
 		WebHost:            "",
 		WebPassword:        "",
-		Spawn:              SpawnConfig{Model: "", Effort: "", MaxTurns: 15, StepTimeoutMin: 4},
+		Spawn:              SpawnConfig{Model: "opusplan", Effort: "high", MaxTurns: 15, StepTimeoutMin: 4},
 		Skeleton:           DefaultSkeleton(),
 		MaxConcurrent:      3,
+		AutopilotAutostart: false,
 		MCPServers:         nil,
 		SourceDir:          filepath.Join(home, "Projects", "teamoon"),
 	}
@@ -211,6 +230,13 @@ func InitMCPFromGlobal(cfg *Config) {
 		return
 	}
 	cfg.MCPServers = ReadGlobalMCPServers()
+	// Attach known skeleton steps
+	for name, mcp := range cfg.MCPServers {
+		if step, ok := KnownSkeletonSteps[name]; ok && mcp.SkeletonStep == nil {
+			mcp.SkeletonStep = &step
+			cfg.MCPServers[name] = mcp
+		}
+	}
 }
 
 // InstallMCPToGlobal adds an MCP server entry to ~/.claude/settings.json.

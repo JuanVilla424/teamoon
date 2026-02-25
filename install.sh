@@ -479,6 +479,24 @@ else
     fi
 fi
 
+# ── 14. generate service environment file ────────────────
+ENV_VARS=""
+while IFS= read -r var; do
+    [ -n "$var" ] && ENV_VARS="${ENV_VARS}${var}"$'\n'
+done < <(env | grep "^CLAUDE_CODE_" | sort)
+
+if [ -n "$ENV_VARS" ]; then
+    if [ -f "$ENV_FILE_PATH" ]; then
+        cp "$ENV_FILE_PATH" "${ENV_FILE_PATH}.bak"
+        ok "backed up existing .env to ${ENV_FILE_PATH}.bak"
+    fi
+    printf '%s' "$ENV_VARS" > "$ENV_FILE_PATH"
+    chmod 600 "$ENV_FILE_PATH"
+    ok "service env file written to $ENV_FILE_PATH"
+else
+    warn "no CLAUDE_CODE_* env vars found — .env not created (set them in ~/.bashrc and re-run)"
+fi
+
 # ── done ─────────────────────────────────────────────────
 printf '\n'
 printf '\033[1;32m  ╔═══════════════════════════════════════╗\033[0m\n'
