@@ -67,6 +67,7 @@ type DataSnapshot struct {
 	Version           string   `json:"version"`
 	BuildNum          string   `json:"build_num"`
 	ProjectAutopilots []string `json:"project_autopilots"`
+	UptimeSec         int64    `json:"uptime_sec"`
 }
 
 type Store struct {
@@ -75,6 +76,7 @@ type Store struct {
 	logBuf    *logs.RingBuffer
 	engineMgr *engine.Manager
 	cfg       config.Config
+	startTime time.Time
 }
 
 func NewStore(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *Store {
@@ -82,6 +84,7 @@ func NewStore(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *
 		cfg:       cfg,
 		engineMgr: mgr,
 		logBuf:    logBuf,
+		startTime: time.Now(),
 	}
 }
 
@@ -215,6 +218,7 @@ func (s *Store) Refresh() {
 		Version:           Version,
 		BuildNum:           BuildNum,
 		ProjectAutopilots: activeLoops,
+		UptimeSec:         int64(time.Since(s.startTime).Seconds()),
 	}
 
 	s.mu.Lock()

@@ -865,6 +865,12 @@ function updateTopbar(){
   var newMdl = parts.join(" \u00b7 ");
   if(mdl.textContent !== newMdl) mdl.textContent = newMdl;
 
+  var upEl = document.getElementById("sb-uptime");
+  if(upEl && D.uptime_sec > 0){
+    var upText = fmtUptime(D.uptime_sec);
+    if(upEl.textContent !== upText) upEl.textContent = upText;
+  }
+
   var ctx = D.session || {};
   var ctxPct = ctx.context_percent || 0;
   var ctxEl = document.getElementById("topbar-ctx");
@@ -2260,6 +2266,16 @@ function fmtNum(n){
   return String(n);
 }
 function fmtCost(n){ return n.toFixed(2); }
+
+function fmtUptime(sec){
+  if(!sec || sec < 0) return "0s";
+  var d = Math.floor(sec / 86400);
+  var h = Math.floor((sec % 86400) / 3600);
+  var m = Math.floor((sec % 3600) / 60);
+  if(d > 0) return d + "d " + h + "h " + m + "m";
+  if(h > 0) return h + "h " + m + "m";
+  return m + "m " + (sec % 60) + "s";
+}
 
 function fmtTime(ts){
   if(!ts) return "";
