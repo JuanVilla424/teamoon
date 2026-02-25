@@ -176,9 +176,11 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/mcp/init", s.logRequest(s.authWrap(s.handleMCPInit)))
 	mux.HandleFunc("/api/mcp/catalog", s.logRequest(s.authWrap(s.handleMCPCatalog)))
 	mux.HandleFunc("/api/mcp/install", s.logRequest(s.authWrap(s.handleMCPInstall)))
+	mux.HandleFunc("/api/mcp/uninstall", s.logRequest(s.authWrap(s.handleMCPUninstall)))
 	mux.HandleFunc("/api/skills/list", s.logRequest(s.authWrap(s.handleSkillsList)))
 	mux.HandleFunc("/api/skills/catalog", s.logRequest(s.authWrap(s.handleSkillsCatalog)))
 	mux.HandleFunc("/api/skills/install", s.logRequest(s.authWrap(s.handleSkillsInstall)))
+	mux.HandleFunc("/api/skills/uninstall", s.logRequest(s.authWrap(s.handleSkillsUninstall)))
 	mux.HandleFunc("/api/update/check", s.logRequest(s.authWrap(s.handleUpdateCheck)))
 	mux.HandleFunc("/api/update", s.logRequest(s.authWrap(s.handleUpdate)))
 

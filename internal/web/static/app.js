@@ -198,6 +198,9 @@ var setupStepError = {};
 var setupRunning = false;
 var setupStatusFetching = false;
 var setupStatusLoaded = false;
+var cameFromProjects = false;
+var selectedMktItem = null;
+var selectedMktType = "";
 
 /* ── BMAD Agent Map ── */
 var agentMap = {
@@ -589,7 +592,7 @@ function computeContentKey(v){
       for(var i=0;i<tasks.length;i++) ck += tasks[i].id + tasks[i].effective_state + (tasks[i].assignee||"") + ",";
       return "cv:" + ck;
     case "config":
-      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning;
+      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "");
     case "setup":
       return "s:" + setupStep + ":" + JSON.stringify(setupStepDone) + ":" + JSON.stringify(setupStepError);
     default:
@@ -610,6 +613,7 @@ function render(){
   var main = document.querySelector(".main");
   var viewChanged = (v !== prevView);
   prevView = v;
+  if(viewChanged && v !== "queue") cameFromProjects = false;
 
   // Skip full content rebuild if view-specific data unchanged
   var contentKey = computeContentKey(v);
@@ -757,8 +761,9 @@ function render(){
     prevTaskLogCounts[selectedTaskID] = count;
   }
 
-  // Restore scroll positions
-  content.scrollTop = mainScroll;
+  // Restore scroll positions (skip when scrolling to selected task)
+  var willScrollToTask = (v === "queue" && selectedTaskID && viewChanged);
+  if(!willScrollToTask) content.scrollTop = mainScroll;
   // Timeline scroll preserved via mainScroll
 
   if(v === "logs"){
@@ -802,9 +807,34 @@ function render(){
       if(cb) cb.checked = atBot;
     };
   }
+
+  // Scroll to selected task in queue after navigation from project detail
+  if(willScrollToTask){
+    var selNode = content.querySelector(".tl-node.selected");
+    if(selNode) selNode.scrollIntoView({ block: "center" });
+  }
 }
 
 window.addEventListener("hashchange", render);
+
+document.addEventListener("keydown", function(e){
+  if(e.key !== "Escape") return;
+  if(e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+  var v = getView();
+  if(v === "config" && selectedMktItem){
+    selectedMktItem = null;
+    selectedMktType = "";
+    render();
+  } else if(v === "queue" && selectedTaskID){
+    selectTask(0);
+  } else if(v === "queue" && cameFromProjects){
+    cameFromProjects = false;
+    window.location.hash = "#projects";
+  } else if(v === "projects" && selectedProjectName){
+    selectedProjectName = "";
+    render();
+  }
+});
 
 /* ── Theme Toggle ── */
 document.getElementById("theme-toggle").addEventListener("click", function() {
@@ -1637,7 +1667,7 @@ function renderProjectDetail(root){
       trow.appendChild(span("pd-task-desc", t.description.length > 80 ? t.description.substring(0,80)+"\u2026" : t.description));
       trow.appendChild(span("task-state " + t.effective_state, stateLabel(t.effective_state)));
       trow.appendChild(span("task-pri " + t.priority, (t.priority||"").toUpperCase()));
-      trow.onclick = (function(tid){ return function(){ selectedTaskID = tid; window.location.hash = "#queue"; render(); }; })(t.id);
+      trow.onclick = (function(tid){ return function(){ selectedTaskID = tid; cameFromProjects = true; window.location.hash = "#queue"; render(); }; })(t.id);
       trow.style.cursor = "pointer";
       details.appendChild(trow);
     }
@@ -3869,6 +3899,12 @@ function formatInstalls(n){
 
 function mkLeaderboardRow(item, rank, type){
   var row = div("mkt-row");
+  row.style.cursor = "pointer";
+  row.onclick = (function(itm, tp){ return function(){
+    selectedMktItem = itm;
+    selectedMktType = tp;
+    render();
+  }; })(item, type);
 
   // Rank
   row.appendChild(span("mkt-rank", "#" + rank));
@@ -3913,9 +3949,11 @@ function mkLeaderboardRow(item, rank, type){
     action.appendChild(span("mkt-installed-badge", "Installed"));
   } else {
     var installBtn = el("button","btn btn-success btn-sm",["Install"]);
+    installBtn.onclick = function(e){ e.stopPropagation(); };
     if(type === "mcp"){
       installBtn.onclick = (function(s, btn){
-        return function(){
+        return function(e){
+          e.stopPropagation();
           if(s.env_vars && s.env_vars.length > 0 && s.env_vars.some(function(v){ return v.is_required; })){
             showEnvVarsPrompt(s, btn);
             return;
@@ -3925,7 +3963,8 @@ function mkLeaderboardRow(item, rank, type){
       })(item, installBtn);
     } else {
       installBtn.onclick = (function(skill, btn){
-        return function(){
+        return function(e){
+          e.stopPropagation();
           var restore = btnLoading(btn, "INSTALLING\u2026");
           api("POST","/api/skills/install",{id: skill.source},function(d){
             if(restore) restore();
@@ -3945,6 +3984,227 @@ function mkLeaderboardRow(item, rank, type){
   row.appendChild(action);
 
   return row;
+}
+
+function renderMktDetail(root, item, type){
+  // Back button
+  var backBtn = el("button","btn btn-sm",  ["\u2190 Back"]);
+  backBtn.onclick = function(){ selectedMktItem = null; selectedMktType = ""; render(); };
+  root.appendChild(backBtn);
+
+  // Header card
+  var header = div("mkt-detail-header");
+  var iconWrap = div("mkt-detail-icon");
+  if(type === "mcp" && item.icon){
+    var img = document.createElement("img");
+    img.src = item.icon;
+    img.alt = item.name;
+    img.onerror = function(){ iconWrap.textContent = "\u2699"; img.remove(); };
+    iconWrap.appendChild(img);
+  } else if(type === "mcp"){
+    iconWrap.textContent = "\u2699";
+  } else {
+    iconWrap.textContent = "\u26A1";
+  }
+  header.appendChild(iconWrap);
+
+  var hInfo = div("mkt-detail-hinfo");
+  // Title (display name) or fallback to name
+  var displayName = (type === "mcp" && item.title) ? item.title : item.name;
+  hInfo.appendChild(el("h2","mkt-detail-name",[displayName]));
+  // Subtitle: reverse-DNS name for MCP (if title differs), source for skill
+  if(type === "mcp"){
+    if(item.title && item.title !== item.name) hInfo.appendChild(span("mkt-detail-subtitle", item.name));
+    if(item.package) hInfo.appendChild(span("mkt-detail-source", item.package));
+  } else {
+    if(item.source){
+      var srcLink = document.createElement("a");
+      srcLink.className = "mkt-detail-source mkt-detail-link-inline";
+      srcLink.href = "https://github.com/" + item.source;
+      srcLink.target = "_blank";
+      srcLink.rel = "noopener";
+      srcLink.textContent = item.source;
+      hInfo.appendChild(srcLink);
+    }
+  }
+
+  // Author from repo
+  if(type === "mcp" && item.repository_url){
+    var authorMatch = item.repository_url.match(/github\.com\/([^\/]+)/);
+    if(authorMatch) hInfo.appendChild(span("mkt-detail-author", "by " + authorMatch[1]));
+  }
+
+  var badges = div("mkt-detail-badges");
+  if(type === "mcp" && item.registry_type) badges.appendChild(span("mkt-version", item.registry_type));
+  if(type === "mcp" && item.version) badges.appendChild(span("mkt-version", "v" + item.version));
+  if(type === "mcp" && item.runtime_hint) badges.appendChild(span("mkt-version", item.runtime_hint));
+  if(type === "mcp" && item.status) badges.appendChild(span("mkt-version mkt-badge-status", item.status));
+  if(type === "mcp" && item.is_latest) badges.appendChild(span("mkt-installed-badge", "Latest"));
+  if(type === "skill" && item.installs > 0) badges.appendChild(span("mkt-installs", formatInstalls(item.installs) + " installs"));
+  if(item.installed) badges.appendChild(span("mkt-installed-badge", "Installed"));
+  hInfo.appendChild(badges);
+
+  // Dates
+  if(type === "mcp" && (item.published_at || item.updated_at)){
+    var dates = div("mkt-detail-dates");
+    if(item.published_at) dates.appendChild(span("mkt-detail-date", "Published: " + fmtDate(item.published_at)));
+    if(item.updated_at) dates.appendChild(span("mkt-detail-date", "Updated: " + fmtDate(item.updated_at)));
+    hInfo.appendChild(dates);
+  }
+
+  header.appendChild(hInfo);
+  root.appendChild(header);
+
+  // Links section (MCP only)
+  if(type === "mcp" && (item.repository_url || item.website_url)){
+    var linksSec = div("mkt-detail-links");
+    if(item.repository_url){
+      var repoLink = document.createElement("a");
+      repoLink.className = "mkt-detail-link";
+      repoLink.href = item.repository_url;
+      repoLink.target = "_blank";
+      repoLink.rel = "noopener";
+      repoLink.textContent = "\uD83D\uDCE6 Repository";
+      linksSec.appendChild(repoLink);
+    }
+    if(item.website_url){
+      var webLink = document.createElement("a");
+      webLink.className = "mkt-detail-link";
+      webLink.href = item.website_url;
+      webLink.target = "_blank";
+      webLink.rel = "noopener";
+      webLink.textContent = "\uD83C\uDF10 Website";
+      linksSec.appendChild(webLink);
+    }
+    root.appendChild(linksSec);
+  }
+
+  // Description
+  if(item.description){
+    var descSec = div("mkt-detail-section");
+    descSec.appendChild(el("h3","mkt-detail-label",["Description"]));
+    descSec.appendChild(el("p","mkt-detail-text",[item.description]));
+    root.appendChild(descSec);
+  }
+
+  // Env vars (MCP only)
+  if(type === "mcp" && item.env_vars && item.env_vars.length > 0){
+    var envSec = div("mkt-detail-section");
+    envSec.appendChild(el("h3","mkt-detail-label",["Environment Variables"]));
+    var envList = div("mkt-detail-env-list");
+    item.env_vars.forEach(function(v){
+      var envRow = div("mkt-detail-env-row");
+      envRow.appendChild(span("mkt-detail-env-name", v.name));
+      var tags = [];
+      if(v.is_required) tags.push("required");
+      else tags.push("optional");
+      if(v.is_secret) tags.push("secret");
+      if(v.default) tags.push("default: " + v.default);
+      envRow.appendChild(span("mkt-detail-env-tags", tags.join(" \u00b7 ")));
+      if(v.description) envRow.appendChild(span("mkt-detail-env-desc", v.description));
+      envList.appendChild(envRow);
+    });
+    envSec.appendChild(envList);
+    root.appendChild(envSec);
+  }
+
+  // Actions
+  var actSec = div("mkt-detail-actions");
+  if(item.installed){
+    var unBtn = el("button","btn btn-danger",["Uninstall"]);
+    unBtn.onclick = (function(itm, tp, btn){
+      return function(){
+        if(!confirm("Uninstall " + itm.name + "?")) return;
+        var restore = btnLoading(btn, "Removing\u2026");
+        var endpoint = tp === "mcp" ? "/api/mcp/uninstall" : "/api/skills/uninstall";
+        var payload = { name: itm.name };
+        api("POST", endpoint, payload, function(d){
+          if(restore) restore();
+          if(d.ok){
+            if(tp === "mcp"){
+              mcpData = null; mcpCatalogLoaded = false;
+            } else {
+              skillsData = null; skillsCatalogLoaded = false; skillsCatalogResults = null; skillsCatalogSearch = "";
+            }
+            selectedMktItem = null; selectedMktType = "";
+            toast("Uninstalled " + itm.name, "success");
+            render();
+          } else {
+            toast("Error: " + (d.error || "unknown"), "error");
+          }
+        });
+      };
+    })(item, type, unBtn);
+    actSec.appendChild(unBtn);
+  } else {
+    if(type === "mcp"){
+      // Env var inputs if required
+      if(item.env_vars && item.env_vars.length > 0 && item.env_vars.some(function(v){ return v.is_required; })){
+        var envForm = div("mkt-detail-env-form");
+        var inputs = {};
+        item.env_vars.forEach(function(v){
+          var fRow = div("mkt-detail-env-input-row");
+          var lbl = el("label","mkt-detail-env-label",[v.name + (v.is_required ? " *" : "")]);
+          fRow.appendChild(lbl);
+          var inp = el("input","mkt-detail-env-input");
+          inp.type = v.is_secret ? "password" : "text";
+          inp.placeholder = v.name;
+          fRow.appendChild(inp);
+          inputs[v.name] = inp;
+          envForm.appendChild(fRow);
+        });
+        actSec.appendChild(envForm);
+        var instBtn = el("button","btn btn-success",["Install"]);
+        instBtn.onclick = (function(itm, ins, btn){
+          return function(){
+            var envVars = {};
+            var missing = [];
+            itm.env_vars.forEach(function(v){
+              var val = ins[v.name].value.trim();
+              if(val) envVars[v.name] = val;
+              else if(v.is_required) missing.push(v.name);
+            });
+            if(missing.length > 0){
+              toast("Required: " + missing.join(", "), "error");
+              return;
+            }
+            doInstall(itm.name, itm.package, itm.registry_type, envVars, btn);
+            selectedMktItem = null; selectedMktType = "";
+          };
+        })(item, inputs, instBtn);
+        actSec.appendChild(instBtn);
+      } else {
+        var instBtn = el("button","btn btn-success",["Install"]);
+        instBtn.onclick = (function(itm, btn){
+          return function(){
+            doInstall(itm.name, itm.package, itm.registry_type, {}, btn);
+            selectedMktItem = null; selectedMktType = "";
+          };
+        })(item, instBtn);
+        actSec.appendChild(instBtn);
+      }
+    } else {
+      var instBtn = el("button","btn btn-success",["Install"]);
+      instBtn.onclick = (function(skill, btn){
+        return function(){
+          var restore = btnLoading(btn, "INSTALLING\u2026");
+          api("POST","/api/skills/install",{id: skill.source},function(d){
+            if(restore) restore();
+            if(d.ok){
+              skillsData = null; skillsCatalogLoaded = false; skillsCatalogResults = null; skillsCatalogSearch = "";
+              selectedMktItem = null; selectedMktType = "";
+              toast("Installed " + skill.name, "success");
+              render();
+            } else {
+              toast("Error: " + (d.error || "unknown"), "error");
+            }
+          });
+        };
+      })(item, instBtn);
+      actSec.appendChild(instBtn);
+    }
+  }
+  root.appendChild(actSec);
 }
 
 function mkMarketplaceHeader(searchVal, onSearch, tabs, activeTab, onTab){
@@ -3970,6 +4230,10 @@ function mkMarketplaceHeader(searchVal, onSearch, tabs, activeTab, onTab){
 }
 
 function renderMarketplaceMCP(root){
+  if(selectedMktItem && selectedMktType === "mcp"){
+    renderMktDetail(root, selectedMktItem, "mcp");
+    return;
+  }
   if(!mcpData){
     api("GET","/api/mcp/list",null,function(d){ mcpData = d; render(); });
     root.appendChild(span("mkt-empty", "Loading\u2026"));
@@ -4099,6 +4363,10 @@ function renderMarketplaceMCP(root){
 }
 
 function renderMarketplaceSkills(root){
+  if(selectedMktItem && selectedMktType === "skill"){
+    renderMktDetail(root, selectedMktItem, "skill");
+    return;
+  }
   if(!skillsData){
     api("GET","/api/skills/list",null,function(d){ skillsData = d.skills || []; render(); });
     root.appendChild(span("mkt-empty", "Loading\u2026"));
