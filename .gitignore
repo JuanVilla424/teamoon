@@ -142,6 +142,7 @@ CONTEXT.md
 # Compiled binaries
 /install-hooks
 /install-skills
+/cmd/test_usage/
 
 # Secrets
 .env.local
