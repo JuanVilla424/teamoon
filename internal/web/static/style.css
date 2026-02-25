@@ -444,10 +444,19 @@ a:hover { color: var(--text) }
 .queue-stat-val { font-family: var(--mono); font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums }
 
 /* ── Bento Grid ── */
+/* ── Dashboard full-height wrapper ── */
+.dashboard-root {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - var(--topbar-h) - var(--dock-h) - 72px);
+}
+
 .bento {
   display: grid;
+  flex: 1;
+  min-height: 0;
   grid-template-columns: repeat(3, 1fr);
-  grid-auto-rows: minmax(160px, auto);
+  grid-template-rows: 1fr 1fr auto;
   gap: 16px;
   grid-template-areas:
     "sessions cost    context"
@@ -1416,8 +1425,10 @@ a:hover { color: var(--text) }
 }
 
 @media (max-width: 900px) {
+  .dashboard-root { min-height: calc(100vh - var(--topbar-h) - var(--dock-h) - 48px) }
   .bento {
     grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: auto;
     grid-template-areas:
       "sessions cost"
       "context  context"
@@ -1463,8 +1474,10 @@ a:hover { color: var(--text) }
   }
   .cards-3,.cards-2,.cards-4,.cards-auto { grid-template-columns: 1fr }
   .cards { gap: 12px }
+  .dashboard-root { min-height: auto }
   .bento {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
     grid-template-areas:
       "sessions"
       "cost"

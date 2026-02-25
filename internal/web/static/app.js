@@ -881,7 +881,8 @@ function renderDashboard(root){
   }
   hero.appendChild(flowBar);
   hero.appendChild(div("hero-sub", [fmtNum(tIn) + " in \u00b7 " + fmtNum(tOut) + " out \u00b7 " + fmtNum(tCr) + " cached"]));
-  root.appendChild(hero);
+  var dashRoot = div("dashboard-root");
+  dashRoot.appendChild(hero);
 
   // ── Bento Grid ──
   var bento = div("bento");
@@ -1016,7 +1017,8 @@ function renderDashboard(root){
   }
   bento.appendChild(actCard);
 
-  root.appendChild(bento);
+  dashRoot.appendChild(bento);
+  root.appendChild(dashRoot);
 }
 
 /* ── Queue View ── */
