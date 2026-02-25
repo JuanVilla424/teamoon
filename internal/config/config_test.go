@@ -26,8 +26,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.WebHost != "" {
 		t.Errorf("WebHost should be empty by default, got %s", cfg.WebHost)
 	}
-	if cfg.Spawn.Model != "" {
-		t.Errorf("Spawn.Model should be empty, got %s", cfg.Spawn.Model)
+	if cfg.Spawn.Model != "opusplan" {
+		t.Errorf("Spawn.Model should be opusplan, got %s", cfg.Spawn.Model)
 	}
 	if cfg.MCPServers != nil {
 		t.Error("MCPServers should be nil by default")
@@ -356,10 +356,7 @@ func TestDefaultSkeleton(t *testing.T) {
 	if !sk.WebSearch {
 		t.Error("WebSearch should default to true")
 	}
-	if !sk.Context7Lookup {
-		t.Error("Context7Lookup should default to true")
-	}
-	if !sk.BuildVerify {
+if !sk.BuildVerify {
 		t.Error("BuildVerify should default to true")
 	}
 	if !sk.Test {

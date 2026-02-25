@@ -150,6 +150,7 @@ func main() {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			config.InitMCPFromGlobal(&cfg)
 			srv := web.NewServer(cfg, engineMgr, logBuf)
 			go srv.Start(ctx)
 
