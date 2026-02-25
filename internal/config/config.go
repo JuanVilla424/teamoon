@@ -86,6 +86,7 @@ type Config struct {
 	MCPServers         map[string]MCPServer           `json:"mcp_servers,omitempty"`
 	SourceDir          string                         `json:"source_dir,omitempty"`
 	Debug              bool                           `json:"debug,omitempty"`
+	LogRetentionDays   int                            `json:"log_retention_days"`
 }
 
 func DefaultConfig() Config {
@@ -105,6 +106,7 @@ func DefaultConfig() Config {
 		AutopilotAutostart: false,
 		MCPServers:         nil,
 		SourceDir:          filepath.Join(home, "Projects", "teamoon"),
+		LogRetentionDays:   20,
 	}
 }
 
