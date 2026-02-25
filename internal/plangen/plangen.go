@@ -14,8 +14,8 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/queue"
 )
 
-// BuildSkeletonPrompt builds the skeleton step instructions from a SkeletonConfig.
-func BuildSkeletonPrompt(sk config.SkeletonConfig) string {
+// BuildSkeletonPrompt builds the skeleton step instructions from a SkeletonConfig and MCP servers.
+func BuildSkeletonPrompt(sk config.SkeletonConfig, mcpServers map[string]config.MCPServer) string {
 	var sb strings.Builder
 	sb.WriteString("\n\nSKELETON — Your plan MUST follow this structure. The Investigate step is ALWAYS present.\n")
 	sb.WriteString("Generate implementation steps (Step 3..N-x) based on the task, then append the enabled tail steps.\n\n")
@@ -30,11 +30,17 @@ func BuildSkeletonPrompt(sk config.SkeletonConfig) string {
 	}
 	sb.WriteString("- Summarize findings\n\n")
 
-	if sk.Context7Lookup {
-		sb.WriteString("Step 2: Look up library documentation [ReadOnly]\n")
-		sb.WriteString("ReadOnly: true\n")
-		sb.WriteString("- Use resolve-library-id then query-docs for each relevant library\n")
-		sb.WriteString("- Note relevant APIs and patterns\n\n")
+	// Dynamic MCP skeleton steps
+	for name, mcp := range mcpServers {
+		if mcp.SkeletonStep != nil && mcp.Enabled {
+			sb.WriteString(fmt.Sprintf("Step: %s [MCP: %s]", mcp.SkeletonStep.Label, name))
+			if mcp.SkeletonStep.ReadOnly {
+				sb.WriteString(" [ReadOnly]\nReadOnly: true\n")
+			} else {
+				sb.WriteString("\n")
+			}
+			sb.WriteString("- " + mcp.SkeletonStep.Prompt + "\n\n")
+		}
 	}
 
 	sb.WriteString("Step 3..N-x: Implementation steps [YOU GENERATE THESE]\n")
@@ -142,7 +148,7 @@ func BuildPlanPrompt(t queue.Task, skeletonBlock, projectsDir string) string {
 
 // GeneratePlan runs claude to generate a plan synchronously and saves it.
 func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config) (plan.Plan, error) {
-	skeletonBlock := BuildSkeletonPrompt(sk)
+	skeletonBlock := BuildSkeletonPrompt(sk, cfg.MCPServers)
 	prompt := BuildPlanPrompt(t, skeletonBlock, cfg.ProjectsDir)
 
 	env := filterEnv(os.Environ(), "CLAUDECODE")

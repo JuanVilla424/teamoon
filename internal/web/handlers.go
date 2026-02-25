@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -459,13 +460,13 @@ usar /bmad:core:workflows:party-mode`, name, projectType, backupDir, manifest, m
 	return desc
 }
 
-func buildSkeletonPrompt(sk config.SkeletonConfig) string {
-	return plangen.BuildSkeletonPrompt(sk)
+func buildSkeletonPrompt(sk config.SkeletonConfig, mcpServers map[string]config.MCPServer) string {
+	return plangen.BuildSkeletonPrompt(sk, mcpServers)
 }
 
 func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 	sk := config.SkeletonFor(s.cfg, t.Project)
-	skeletonBlock := buildSkeletonPrompt(sk)
+	skeletonBlock := buildSkeletonPrompt(sk, s.cfg.MCPServers)
 	prompt := plangen.BuildPlanPrompt(t, skeletonBlock, s.cfg.ProjectsDir)
 
 	s.store.logBuf.Add(logs.LogEntry{
@@ -1333,6 +1334,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	config.InitMCPFromGlobal(&cfg)
 	// Mask password
 	pw := ""
 	if cfg.WebPassword != "" {
@@ -1351,10 +1353,13 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"spawn_model":         cfg.Spawn.Model,
 		"spawn_effort":        cfg.Spawn.Effort,
 		"spawn_max_turns":     cfg.Spawn.MaxTurns,
+		"spawn_step_timeout_min": cfg.Spawn.StepTimeoutMin,
 		"skeleton":            cfg.Skeleton,
 		"max_concurrent":      cfg.MaxConcurrent,
+		"autopilot_autostart": cfg.AutopilotAutostart,
 		"project_skeletons":   cfg.ProjectSkeletons,
 		"source_dir":          cfg.SourceDir,
+		"mcp_servers":         cfg.MCPServers,
 	})
 }
 
@@ -1376,8 +1381,10 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		SpawnModel         *string               `json:"spawn_model,omitempty"`
 		SpawnEffort        *string               `json:"spawn_effort,omitempty"`
 		SpawnMaxTurns      *int                  `json:"spawn_max_turns,omitempty"`
+		SpawnStepTimeoutMin *int                 `json:"spawn_step_timeout_min,omitempty"`
 		Skeleton           *config.SkeletonConfig `json:"skeleton,omitempty"`
 		MaxConcurrent      *int                   `json:"max_concurrent,omitempty"`
+		AutopilotAutostart *bool                  `json:"autopilot_autostart,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1421,11 +1428,17 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	if req.SpawnMaxTurns != nil && *req.SpawnMaxTurns > 0 {
 		cfg.Spawn.MaxTurns = *req.SpawnMaxTurns
 	}
+	if req.SpawnStepTimeoutMin != nil && *req.SpawnStepTimeoutMin >= 0 {
+		cfg.Spawn.StepTimeoutMin = *req.SpawnStepTimeoutMin
+	}
 	if req.Skeleton != nil {
 		cfg.Skeleton = *req.Skeleton
 	}
 	if req.MaxConcurrent != nil && *req.MaxConcurrent > 0 {
 		cfg.MaxConcurrent = *req.MaxConcurrent
+	}
+	if req.AutopilotAutostart != nil {
+		cfg.AutopilotAutostart = *req.AutopilotAutostart
 	}
 
 	if err := config.Save(cfg); err != nil {
@@ -1560,59 +1573,45 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	search := r.URL.Query().Get("search")
-	limit := r.URL.Query().Get("limit")
-	if limit == "" {
-		limit = "20"
+	limitStr := r.URL.Query().Get("limit")
+	cursor := r.URL.Query().Get("cursor")
+	if limitStr == "" {
+		limitStr = "20"
+	}
+	wantLimit, _ := strconv.Atoi(limitStr)
+	if wantLimit <= 0 {
+		wantLimit = 20
 	}
 
-	url := "https://registry.modelcontextprotocol.io/v0.1/servers?limit=" + limit
-	if search != "" {
-		url += "&search=" + search
+	type registryServer struct {
+		Server struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Version     string `json:"version"`
+			Icons       []struct {
+				Src string `json:"src"`
+			} `json:"icons"`
+			Packages []struct {
+				RegistryType         string `json:"registryType"`
+				Identifier           string `json:"identifier"`
+				EnvironmentVariables []struct {
+					Name       string `json:"name"`
+					IsRequired bool   `json:"isRequired"`
+					IsSecret   bool   `json:"isSecret"`
+				} `json:"environmentVariables"`
+			} `json:"packages"`
+		} `json:"server"`
+		Meta map[string]struct {
+			UpdatedAt string `json:"updatedAt"`
+		} `json:"_meta"`
 	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		writeErr(w, 502, "registry request failed: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		writeErr(w, 502, "reading registry response: "+err.Error())
-		return
-	}
-
-	// Parse registry response
-	var registry struct {
-		Servers []struct {
-			Server struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				Packages    []struct {
-					RegistryType         string `json:"registryType"`
-					Identifier           string `json:"identifier"`
-					EnvironmentVariables []struct {
-						Name       string `json:"name"`
-						IsRequired bool   `json:"isRequired"`
-						IsSecret   bool   `json:"isSecret"`
-					} `json:"environmentVariables"`
-				} `json:"packages"`
-			} `json:"server"`
-		} `json:"servers"`
+	type registryResponse struct {
+		Servers  []registryServer `json:"servers"`
 		Metadata struct {
 			NextCursor string `json:"nextCursor"`
 			Count      int    `json:"count"`
 		} `json:"metadata"`
 	}
-	if err := json.Unmarshal(body, &registry); err != nil {
-		writeErr(w, 502, "parsing registry response: "+err.Error())
-		return
-	}
-
-	// Get installed servers for marking
-	installed := config.ReadGlobalMCPServers()
 
 	type envVar struct {
 		Name       string `json:"name"`
@@ -1620,28 +1619,99 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 		IsSecret   bool   `json:"is_secret"`
 	}
 	type catalogEntry struct {
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Package     string   `json:"package"`
-		EnvVars     []envVar `json:"env_vars"`
-		Installed   bool     `json:"installed"`
+		Name         string   `json:"name"`
+		Description  string   `json:"description"`
+		Package      string   `json:"package"`
+		RegistryType string   `json:"registry_type"`
+		Version      string   `json:"version,omitempty"`
+		Icon         string   `json:"icon,omitempty"`
+		UpdatedAt    string   `json:"updated_at,omitempty"`
+		EnvVars      []envVar `json:"env_vars"`
+		Installed    bool     `json:"installed"`
 	}
 
+	installed := config.ReadGlobalMCPServers()
+	client := &http.Client{Timeout: 15 * time.Second}
+
 	var results []catalogEntry
-	for _, s := range registry.Servers {
-		srv := s.Server
-		// Find npm package
-		for _, pkg := range srv.Packages {
-			if pkg.RegistryType != "npm" {
+	nextCursor := cursor
+	totalCount := 0
+
+	// Fetch pages until we have enough results or exhaust the registry (max 5 pages)
+	for page := 0; page < 5; page++ {
+		regURL := "https://registry.modelcontextprotocol.io/v0.1/servers?limit=100"
+		if search != "" {
+			regURL += "&search=" + search
+		}
+		if nextCursor != "" {
+			regURL += "&cursor=" + nextCursor
+		}
+
+		resp, err := client.Get(regURL)
+		if err != nil {
+			if page == 0 {
+				writeErr(w, 502, "registry request failed: "+err.Error())
+				return
+			}
+			break
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			break
+		}
+
+		var registry registryResponse
+		if err := json.Unmarshal(body, &registry); err != nil {
+			if page == 0 {
+				writeErr(w, 502, "parsing registry response: "+err.Error())
+				return
+			}
+			break
+		}
+
+		totalCount = registry.Metadata.Count
+		nextCursor = registry.Metadata.NextCursor
+
+		for _, s := range registry.Servers {
+			srv := s.Server
+			var bestPkgIdx = -1
+			for i, pkg := range srv.Packages {
+				if pkg.RegistryType == "npm" {
+					bestPkgIdx = i
+					break
+				}
+				if bestPkgIdx < 0 || (pkg.RegistryType == "pypi" && srv.Packages[bestPkgIdx].RegistryType != "npm") {
+					bestPkgIdx = i
+				}
+			}
+			if bestPkgIdx < 0 {
 				continue
 			}
-			entry := catalogEntry{
-				Name:        srv.Name,
-				Description: srv.Description,
-				Package:     pkg.Identifier,
-				Installed:   installed[srv.Name].Command != "",
+			bestPkg := srv.Packages[bestPkgIdx]
+			var icon string
+			if len(srv.Icons) > 0 {
+				icon = srv.Icons[0].Src
 			}
-			for _, ev := range pkg.EnvironmentVariables {
+			var updatedAt string
+			for _, m := range s.Meta {
+				if m.UpdatedAt != "" {
+					updatedAt = m.UpdatedAt
+					break
+				}
+			}
+			entry := catalogEntry{
+				Name:         srv.Name,
+				Description:  srv.Description,
+				Package:      bestPkg.Identifier,
+				RegistryType: bestPkg.RegistryType,
+				Version:      srv.Version,
+				Icon:         icon,
+				UpdatedAt:    updatedAt,
+				Installed:    installed[srv.Name].Command != "",
+			}
+			for _, ev := range bestPkg.EnvironmentVariables {
 				entry.EnvVars = append(entry.EnvVars, envVar{
 					Name:       ev.Name,
 					IsRequired: ev.IsRequired,
@@ -1649,13 +1719,18 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			results = append(results, entry)
-			break // only first npm package per server
+		}
+
+		// Stop if we have enough results or no more pages
+		if len(results) >= wantLimit || nextCursor == "" {
+			break
 		}
 	}
 
 	writeJSON(w, map[string]any{
-		"servers": results,
-		"count":   registry.Metadata.Count,
+		"servers":     results,
+		"count":       totalCount,
+		"next_cursor": nextCursor,
 	})
 }
 
@@ -1665,9 +1740,10 @@ func (s *Server) handleMCPInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name    string            `json:"name"`
-		Package string            `json:"package"`
-		EnvVars map[string]string `json:"env_vars"`
+		Name         string            `json:"name"`
+		Package      string            `json:"package"`
+		RegistryType string            `json:"registry_type"`
+		EnvVars      map[string]string `json:"env_vars"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1678,8 +1754,18 @@ func (s *Server) handleMCPInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := []string{"-y", req.Package}
-	if err := config.InstallMCPToGlobal(req.Name, "npx", args, req.EnvVars); err != nil {
+	var command string
+	var args []string
+	switch req.RegistryType {
+	case "pypi":
+		command = "uvx"
+		args = []string{req.Package}
+	default: // npm and others
+		command = "npx"
+		args = []string{"-y", req.Package}
+	}
+
+	if err := config.InstallMCPToGlobal(req.Name, command, args, req.EnvVars); err != nil {
 		writeErr(w, 500, "install failed: "+err.Error())
 		return
 	}
@@ -1687,11 +1773,15 @@ func (s *Server) handleMCPInstall(w http.ResponseWriter, r *http.Request) {
 	// Also add to teamoon config if custom config exists
 	cfg, err := config.Load()
 	if err == nil && cfg.MCPServers != nil {
-		cfg.MCPServers[req.Name] = config.MCPServer{
-			Command: "npx",
+		mcp := config.MCPServer{
+			Command: command,
 			Args:    args,
 			Enabled: true,
 		}
+		if step, ok := config.KnownSkeletonSteps[req.Name]; ok {
+			mcp.SkeletonStep = &step
+		}
+		cfg.MCPServers[req.Name] = mcp
 		config.Save(cfg)
 		s.cfg = cfg
 	}
@@ -1755,15 +1845,15 @@ func (s *Server) handleSkillsCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	search := r.URL.Query().Get("search")
+	if search == "" {
+		search = "claude"
+	}
 	limit := r.URL.Query().Get("limit")
 	if limit == "" {
 		limit = "20"
 	}
 
-	url := "https://skills.sh/api/search?limit=" + limit
-	if search != "" {
-		url += "&q=" + search
-	}
+	url := "https://skills.sh/api/search?limit=" + limit + "&q=" + search
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Get(url)
@@ -1968,54 +2058,69 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	srcDir := resolveSourceDir(cfg.SourceDir)
 
-	// Fetch all (branches + tags)
+	// Fetch all
 	exec.Command("git", "-C", srcDir, "fetch", "--all", "--tags").Run()
 
-	// Current version: check for tag on HEAD, fallback to branch
-	currentTag := ""
-	tagOut, err := exec.Command("git", "-C", srcDir, "describe", "--tags", "--exact-match", "HEAD").Output()
-	if err == nil {
-		currentTag = strings.TrimSpace(string(tagOut))
-	}
+	// Current local info
 	localOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--short", "HEAD").Output()
 	localCommit := strings.TrimSpace(string(localOut))
 	branchOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
 	currentBranch := strings.TrimSpace(string(branchOut))
 
-	// Get tags sorted by version (newest first)
-	tagsOut, _ := exec.Command("git", "-C", srcDir, "tag", "--sort=-v:refname").Output()
-	var tags []string
-	for _, t := range strings.Split(strings.TrimSpace(string(tagsOut)), "\n") {
-		t = strings.TrimSpace(t)
-		if t != "" {
-			tags = append(tags, t)
+	// List available remote branches (filter to main/prod/test/dev)
+	remoteBranchOut, _ := exec.Command("git", "-C", srcDir, "branch", "-r", "--format=%(refname:short)").Output()
+	knownBranches := []string{"main", "prod", "test", "dev"}
+	var branches []string
+	remoteLines := strings.Split(strings.TrimSpace(string(remoteBranchOut)), "\n")
+	for _, kb := range knownBranches {
+		for _, rb := range remoteLines {
+			if strings.TrimSpace(rb) == "origin/"+kb {
+				branches = append(branches, kb)
+				break
+			}
 		}
 	}
 
-	// Check if main has newer commits
-	remoteOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--short", "origin/main").Output()
-	remoteCommit := strings.TrimSpace(string(remoteOut))
-	behindOut, _ := exec.Command("git", "-C", srcDir, "rev-list", "--count", "HEAD..origin/main").Output()
-	behind := strings.TrimSpace(string(behindOut))
+	// Selected branch for comparison
+	selectedBranch := r.URL.Query().Get("branch")
+	if selectedBranch == "" {
+		selectedBranch = currentBranch
+	}
 
-	currentVersion := currentTag
-	if currentVersion == "" {
-		currentVersion = currentBranch + "@" + localCommit
+	// Remote info for selected branch
+	remoteOut, _ := exec.Command("git", "-C", srcDir, "rev-parse", "--short", "origin/"+selectedBranch).Output()
+	remoteCommit := strings.TrimSpace(string(remoteOut))
+	behindOut, _ := exec.Command("git", "-C", srcDir, "rev-list", "--count", "HEAD..origin/"+selectedBranch).Output()
+	behind, _ := strconv.Atoi(strings.TrimSpace(string(behindOut)))
+
+	// Remote version from Makefile on selected branch
+	remoteVersion := ""
+	mkOut, err := exec.Command("git", "-C", srcDir, "show", "origin/"+selectedBranch+":Makefile").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(mkOut), "\n") {
+			if strings.HasPrefix(line, "VERSION") {
+				parts := strings.SplitN(line, ":=", 2)
+				if len(parts) == 2 {
+					remoteVersion = strings.TrimSpace(parts[1])
+				}
+				break
+			}
+		}
 	}
 
 	writeJSON(w, map[string]any{
-		"current_version": currentVersion,
-		"current_tag":     currentTag,
+		"current_version": Version,
 		"current_branch":  currentBranch,
 		"local_commit":    localCommit,
+		"remote_version":  remoteVersion,
 		"remote_commit":   remoteCommit,
 		"behind":          behind,
-		"tags":            tags,
+		"branches":        branches,
+		"selected_branch": selectedBranch,
 	})
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	// Read target from query or body
 	target := r.URL.Query().Get("target")
 	if target == "" {
 		target = "main"
@@ -2035,37 +2140,34 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			progress(map[string]any{"type": "step", "name": name, "message": msg, "status": "done"})
 		}
 
-		// 1. fetch + checkout target
+		// 1. fetch
 		step("fetch", "Fetching latest...")
 		exec.Command("git", "-C", srcDir, "fetch", "--all", "--tags").Run()
 		done("fetch", "Fetched")
 
-		if target == "main" {
-			step("checkout", "Switching to main...")
-			out, err := exec.Command("git", "-C", srcDir, "checkout", "main").CombinedOutput()
-			if err != nil {
-				progress(map[string]any{"type": "step", "name": "checkout", "message": string(out), "status": "error"})
-				return fmt.Errorf("checkout failed: %s", string(out))
-			}
-			step("pull", "Pulling latest from main...")
-			out, err = exec.Command("git", "-C", srcDir, "pull", "origin", "main").CombinedOutput()
-			if err != nil {
-				progress(map[string]any{"type": "step", "name": "pull", "message": string(out), "status": "error"})
-				return fmt.Errorf("pull failed: %s", string(out))
-			}
-			done("pull", strings.TrimSpace(string(out)))
-		} else {
-			// Checkout specific tag
-			step("checkout", "Switching to "+target+"...")
-			out, err := exec.Command("git", "-C", srcDir, "checkout", target).CombinedOutput()
+		// 2. checkout branch (create tracking branch if needed)
+		step("checkout", "Switching to "+target+"...")
+		out, err := exec.Command("git", "-C", srcDir, "checkout", target).CombinedOutput()
+		if err != nil {
+			// Try creating a tracking branch
+			out, err = exec.Command("git", "-C", srcDir, "checkout", "-b", target, "origin/"+target).CombinedOutput()
 			if err != nil {
 				progress(map[string]any{"type": "step", "name": "checkout", "message": string(out), "status": "error"})
 				return fmt.Errorf("checkout %s failed: %s", target, string(out))
 			}
-			done("checkout", "On "+target)
 		}
+		done("checkout", "On "+target)
 
-		// 2. make build
+		// 3. pull latest
+		step("pull", "Pulling latest from "+target+"...")
+		out, err = exec.Command("git", "-C", srcDir, "pull", "origin", target).CombinedOutput()
+		if err != nil {
+			progress(map[string]any{"type": "step", "name": "pull", "message": string(out), "status": "error"})
+			return fmt.Errorf("pull failed: %s", string(out))
+		}
+		done("pull", strings.TrimSpace(string(out)))
+
+		// 4. make build
 		step("build", "Building new binary...")
 		cmd := exec.Command("make", "-C", srcDir, "build")
 		cmd.Env = append(os.Environ(), "HOME="+os.Getenv("HOME"))
@@ -2076,17 +2178,16 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		done("build", "Build successful")
 
-		// 3. install binary via background script (stop, cp, start)
-		// Must run externally because systemctl stop kills this process
+		// 5. install binary via systemd-run (own cgroup, survives service stop)
 		step("install", "Installing new binary...")
 		newBin := filepath.Join(srcDir, "teamoon")
 		progress(map[string]any{"type": "step", "name": "restart", "message": "Restarting service...", "status": "restarting"})
 
 		script := fmt.Sprintf(
-			"sleep 1 && sudo systemctl stop teamoon && sudo cp %s /usr/local/bin/teamoon && sudo chmod 755 /usr/local/bin/teamoon && sudo systemctl start teamoon",
+			"sleep 2 && systemctl stop teamoon && cp %s /usr/local/bin/teamoon && chmod 755 /usr/local/bin/teamoon && systemctl start teamoon",
 			newBin,
 		)
-		exec.Command("bash", "-c", "nohup bash -c '"+script+"' &>/dev/null &").Start()
+		exec.Command("sudo", "systemd-run", "--description=teamoon-update", "bash", "-c", script).Start()
 
 		return nil
 	})

@@ -76,6 +76,11 @@ func (s *Server) RecoverAndResume() {
 		log.Printf("[recovery] task #%d (%s) reset to %s", t.ID, t.Project, t.State)
 	}
 
+	if !s.cfg.AutopilotAutostart {
+		log.Printf("[recovery] autopilot autostart disabled, skipping resume")
+		return
+	}
+
 	projects, err := queue.AutopilotProjects()
 	if err != nil {
 		log.Printf("[recovery] error listing projects: %v", err)

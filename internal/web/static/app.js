@@ -173,14 +173,21 @@ var canvasDragTaskId = 0;
 var canvasDragFromCol = "";
 var loadingActions = {}; // track in-progress actions: key -> true
 var mcpData = null; // cached MCP list response
-var mcpCatalogOpen = false;
 var mcpCatalogResults = null;
 var mcpCatalogSearch = "";
+var mcpCatalogLoaded = false;
+var mcpCatalogTab = "all"; // "trending" | "all" | "installed"
+var mcpCatalogCursor = "";
+var mcpCatalogHasMore = false;
+var mcpCatalogVersion = 0;
 var marketplaceSubTab = "mcp";
 var skillsData = null;
-var skillsCatalogOpen = false;
 var skillsCatalogResults = null;
 var skillsCatalogSearch = "";
+var skillsCatalogLoaded = false;
+var skillsCatalogTab = "all"; // "trending" | "all" | "installed"
+var skillsCatalogVersion = 0;
+var skillsShowCount = 100;
 var projectAutopilots = [];
 var updateCheckResult = null;
 var updateRunning = false;
@@ -390,25 +397,50 @@ function api(method, path, body, cb){
 }
 
 /* ── MCP Catalog helpers ── */
-function searchCatalog(query){
-  mcpCatalogResults = "loading";
-  render();
-  var url = "/api/mcp/catalog?limit=20";
+function loadMCPCatalog(query, cursor){
+  if(!cursor && !mcpCatalogLoaded){ mcpCatalogResults = "loading"; render(); }
+  var url = "/api/mcp/catalog?limit=100";
   if(query) url += "&search=" + encodeURIComponent(query);
+  if(cursor) url += "&cursor=" + encodeURIComponent(cursor);
   api("GET", url, null, function(d){
-    mcpCatalogResults = d.servers || [];
+    var items = d.servers || [];
+    if(cursor && mcpCatalogResults && mcpCatalogResults !== "loading"){
+      mcpCatalogResults = mcpCatalogResults.concat(items);
+    } else {
+      mcpCatalogResults = items;
+    }
+    mcpCatalogCursor = d.next_cursor || "";
+    mcpCatalogHasMore = !!d.next_cursor;
+    mcpCatalogLoaded = true;
+    mcpCatalogVersion++;
     render();
   });
 }
 
-function doInstall(name, pkg, envVars, btn){
+function loadSkillsCatalog(query){
+  if(!skillsCatalogLoaded){ skillsCatalogResults = "loading"; render(); }
+  skillsShowCount = 100;
+  var url = "/api/skills/catalog?limit=500";
+  if(query) url += "&search=" + encodeURIComponent(query);
+  api("GET", url, null, function(d){
+    skillsCatalogResults = d.skills || [];
+    skillsCatalogLoaded = true;
+    skillsCatalogVersion++;
+    render();
+  });
+}
+
+var mcpSearchTimer = null;
+var skillsSearchTimer = null;
+
+function doInstall(name, pkg, regType, envVars, btn){
   var restore = btnLoading(btn, "INSTALLING\u2026");
-  api("POST", "/api/mcp/install", {name: name, package: pkg, env_vars: envVars}, function(d){
+  api("POST", "/api/mcp/install", {name: name, package: pkg, registry_type: regType || "npm", env_vars: envVars}, function(d){
     if(restore) restore();
     if(d.ok){
       mcpData = null;
+      mcpCatalogLoaded = false;
       mcpCatalogResults = null;
-      mcpCatalogOpen = false;
       mcpCatalogSearch = "";
       toast("Installed " + name, "success");
       render();
@@ -475,7 +507,7 @@ function showEnvVarsPrompt(srv, installBtn){
       return;
     }
     form.remove();
-    doInstall(srv.name, srv.package, envVars, installBtn);
+    doInstall(srv.name, srv.package, srv.registry_type, envVars, installBtn);
   };
   actRow.appendChild(confirmBtn);
   var cancelEnvBtn = el("button","btn btn-sm",["Cancel"]);
@@ -557,7 +589,7 @@ function computeContentKey(v){
       for(var i=0;i<tasks.length;i++) ck += tasks[i].id + tasks[i].effective_state + (tasks[i].assignee||"") + ",";
       return "cv:" + ck;
     case "config":
-      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogOpen + ":" + (mcpCatalogResults === "loading" ? "ld" : mcpCatalogResults ? mcpCatalogResults.length : "n") + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogOpen + ":" + (skillsCatalogResults === "loading" ? "ld" : skillsCatalogResults ? skillsCatalogResults.length : "n") + ":" + updateRunning;
+      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning;
     case "setup":
       return "s:" + setupStep + ":" + JSON.stringify(setupStepDone) + ":" + JSON.stringify(setupStepError);
     default:
@@ -670,6 +702,15 @@ function render(){
   var existingLC = document.getElementById("log-container");
   if(existingLC) logContainerScroll = existingLC.scrollTop;
 
+  // Save marketplace search focus state
+  var mktSearchFocused = false;
+  var mktSearchCursor = 0;
+  var existingMktSearch = content.querySelector(".mkt-search");
+  if(existingMktSearch && document.activeElement === existingMktSearch){
+    mktSearchFocused = true;
+    mktSearchCursor = existingMktSearch.selectionStart || 0;
+  }
+
   // Save task terminal scroll position
   var taskTermScroll = 0;
   var existingTerm = content.querySelector(".task-terminal");
@@ -725,6 +766,15 @@ function render(){
     if(lc){
       if(logAutoScroll) lc.scrollTop = lc.scrollHeight;
       else lc.scrollTop = logContainerScroll;
+    }
+  }
+
+  // Restore marketplace search focus
+  if(mktSearchFocused){
+    var newMktSearch = content.querySelector(".mkt-search");
+    if(newMktSearch){
+      newMktSearch.focus();
+      newMktSearch.setSelectionRange(mktSearchCursor, mktSearchCursor);
     }
   }
 
@@ -1031,7 +1081,7 @@ function renderQueue(root){
 
   for(var i=0;i<filtered.length;i++){
     (function(t){
-      var cls = "tl-node";
+      var cls = "tl-node state-" + t.effective_state;
       if(t.id === selectedTaskID) cls += " selected";
       if(t.is_running) cls += " has-running";
       if(t.effective_state === "generating") cls += " has-generating";
@@ -3620,7 +3670,7 @@ function renderConfigAutopilot(root){
     modelRow.appendChild(modelLbl);
     var modelSel = el("select","config-input");
     modelSel.id = "cfg-spawn_model";
-    [["(inherit)",""],["sonnet","sonnet"],["opus","opus"],["haiku","haiku"]].forEach(function(opt){
+    [["Opus + Sonnet (Plan Mode)","opusplan"],["Sonnet 4.6","sonnet"],["Opus 4.6","opus"]].forEach(function(opt){
       var o = el("option","",[ opt[0] ]);
       o.value = opt[1];
       if((c.spawn_model||"") === opt[1]) o.selected = true;
@@ -3646,12 +3696,28 @@ function renderConfigAutopilot(root){
     grid.appendChild(effortRow);
 
     grid.appendChild(configInput("spawn_max_turns","Max Turns", String(c.spawn_max_turns || 15)));
+    grid.appendChild(configInput("spawn_step_timeout_min","Step Timeout (min)", String(c.spawn_step_timeout_min != null ? c.spawn_step_timeout_min : 4)));
     grid.appendChild(configInput("max_concurrent","Max Concurrent Autopilots", String(c.max_concurrent || 3)));
+
+    // Autostart toggle
+    var asRow = div("config-field");
+    var asLbl = el("label","config-label",["Resume on Restart"]);
+    asLbl.setAttribute("for","cfg-autopilot_autostart");
+    asRow.appendChild(asLbl);
+    var asCb = el("input","config-checkbox");
+    asCb.type = "checkbox";
+    asCb.id = "cfg-autopilot_autostart";
+    asCb.checked = !!c.autopilot_autostart;
+    asRow.appendChild(asCb);
+    grid.appendChild(asRow);
   } else {
-    grid.appendChild(configReadRow("Model", c.spawn_model || "(inherit)"));
+    var modelLabels = {"opusplan":"Opus + Sonnet (Plan Mode)","sonnet":"Sonnet 4.6","opus":"Opus 4.6"};
+    grid.appendChild(configReadRow("Model", modelLabels[c.spawn_model] || c.spawn_model || "(inherit)"));
     grid.appendChild(configReadRow("Effort", c.spawn_effort || "(inherit)"));
     grid.appendChild(configReadRow("Max Turns", String(c.spawn_max_turns || 15)));
+    grid.appendChild(configReadRow("Step Timeout", (c.spawn_step_timeout_min != null ? c.spawn_step_timeout_min : 4) + " min"));
     grid.appendChild(configReadRow("Max Concurrent", String(c.max_concurrent || 3)));
+    grid.appendChild(configReadRow("Resume on Restart", c.autopilot_autostart ? "Yes" : "No"));
   }
   sec.appendChild(grid);
   if(editing){
@@ -3675,18 +3741,29 @@ function renderConfigAutopilot(root){
 
   var sk = (c.skeleton || {});
   var skToggles = [
-    {key:"investigate", label:"Investigate", desc:"Read codebase, CLAUDE.md, understand patterns", locked:true},
-    {key:"web_search", label:"Web Search", desc:"Search the web during investigation"},
-    {key:"context7_lookup", label:"Context7 Lookup", desc:"Look up library documentation"},
-    {key:"build_verify", label:"Build & Verify", desc:"Compile/build, create build system if missing"},
-    {key:"test", label:"Test", desc:"Run + create tests, set up test infra if missing"},
-    {key:"pre_commit", label:"Pre-commit", desc:"Run linters/formatters, set up hooks if missing"},
-    {key:"commit", label:"Commit", desc:"Git commit (type(core): desc, single commit)"},
-    {key:"push", label:"Push", desc:"Git push to remote (off by default)"}
+    {key:"investigate", label:"Investigate", desc:"Read codebase, CLAUDE.md, understand patterns", tag:"Built-in", locked:true},
+    {key:"web_search", label:"Web Search", desc:"Search the web during investigation", tag:"Tool: WebSearch"},
+    {key:"build_verify", label:"Build & Verify", desc:"Compile/build, create build system if missing", tag:"Tool: Bash"},
+    {key:"test", label:"Test", desc:"Run + create tests, set up test infra if missing", tag:"Tool: Bash"},
+    {key:"pre_commit", label:"Pre-commit", desc:"Run linters/formatters, set up hooks if missing", tag:"Tool: Bash"},
+    {key:"commit", label:"Commit", desc:"Git commit (type(core): desc, single commit)", tag:"Tool: Bash (git)"},
+    {key:"push", label:"Push", desc:"Git push to remote (off by default)", tag:"Tool: Bash (git)"}
   ];
 
+  // Collect dynamic MCP skeleton steps
+  var mcpSteps = [];
+  var mcpServers = c.mcp_servers || {};
+  for(var mcpName in mcpServers){
+    var mcp = mcpServers[mcpName];
+    if(mcp.skeleton_step && mcp.enabled){
+      mcpSteps.push({mcpName: mcpName, step: mcp.skeleton_step, enabled: mcp.enabled});
+    }
+  }
+
   var skList = div("config-grid");
-  skToggles.forEach(function(t){
+
+  // Render fixed skeleton toggles
+  function renderSkToggle(t){
     var row = div("mcp-toggle");
     var cb = el("input","");
     cb.type = "checkbox";
@@ -3700,7 +3777,6 @@ function renderConfigAutopilot(root){
       cb.onchange = function(){
         var full = {
           web_search: sk.web_search !== false,
-          context7_lookup: sk.context7_lookup !== false,
           build_verify: sk.build_verify !== false,
           test: sk.test !== false,
           pre_commit: sk.pre_commit !== false,
@@ -3723,11 +3799,36 @@ function renderConfigAutopilot(root){
     row.appendChild(cb);
     row.appendChild(span("mcp-server-name", t.label));
     row.appendChild(span("mcp-server-cmd", t.desc));
-    if(t.key === "context7_lookup" || t.key === "web_search"){
-      row.appendChild(buildMarketplaceLink("MCP", "mcp"));
+    if(t.tag){
+      row.appendChild(span("skeleton-tag", t.tag));
     }
     skList.appendChild(row);
+  }
+
+  // First two fixed steps (Investigate + Web Search)
+  renderSkToggle(skToggles[0]);
+  renderSkToggle(skToggles[1]);
+
+  // Dynamic MCP skeleton steps (after investigate, before build)
+  mcpSteps.forEach(function(ms){
+    var row = div("mcp-toggle");
+    var cb = el("input","");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.setAttribute("aria-label", ms.step.label);
+    cb.title = "Provided by MCP: " + ms.mcpName;
+    cb.disabled = true; // controlled by MCP enabled/disabled
+    row.appendChild(cb);
+    row.appendChild(span("mcp-server-name", ms.step.label));
+    row.appendChild(span("mcp-server-cmd", ms.step.description));
+    row.appendChild(span("skeleton-tag mcp", "MCP: " + ms.mcpName));
+    skList.appendChild(row);
   });
+
+  // Remaining fixed steps (Build, Test, Pre-commit, Commit, Push)
+  for(var si=2; si<skToggles.length; si++){
+    renderSkToggle(skToggles[si]);
+  }
   skSec.appendChild(skList);
   root.appendChild(skSec);
 }
@@ -3757,431 +3858,307 @@ function renderConfigMarketplace(root){
   }
 }
 
-function renderMarketplaceMCP(root){
-  var mcpSec = div("config-section");
-  mcpSec.appendChild(el("h3","config-section-title",["MCP Servers"]));
+function formatInstalls(n){
+  if(!n || n <= 0) return "";
+  if(n >= 1000000) return (n/1000000).toFixed(1).replace(/\.0$/,"") + "M";
+  if(n >= 1000) return (n/1000).toFixed(1).replace(/\.0$/,"") + "K";
+  return String(n);
+}
 
+function mkLeaderboardRow(item, rank, type){
+  var row = div("mkt-row");
+
+  // Rank
+  row.appendChild(span("mkt-rank", "#" + rank));
+
+  // Icon
+  var iconWrap = div("mkt-icon");
+  if(type === "mcp" && item.icon){
+    var img = document.createElement("img");
+    img.src = item.icon;
+    img.alt = item.name;
+    img.onerror = function(){ iconWrap.textContent = "\u2699"; img.remove(); };
+    iconWrap.appendChild(img);
+  } else if(type === "mcp"){
+    iconWrap.textContent = "\u2699";
+  } else {
+    iconWrap.textContent = "\u26A1";
+  }
+  row.appendChild(iconWrap);
+
+  // Info column
+  var info = div("mkt-info");
+  info.appendChild(span("mkt-name", item.name));
+  var source = type === "mcp" ? (item.package || "") : (item.source || "");
+  if(source) info.appendChild(span("mkt-source", source));
+  if(item.description) info.appendChild(span("mkt-desc", item.description));
+  row.appendChild(info);
+
+  // Meta badges
+  var meta = div("mkt-meta");
+  if(type === "mcp" && item.registry_type) meta.appendChild(span("mkt-version", item.registry_type));
+  if(type === "mcp" && item.version) meta.appendChild(span("mkt-version", "v" + item.version));
+  if(type === "skill" && item.installs > 0) meta.appendChild(span("mkt-installs", formatInstalls(item.installs)));
+  if(item.env_vars && item.env_vars.length > 0){
+    var envNames = item.env_vars.map(function(v){ return v.name + (v.is_required ? "*" : ""); }).join(", ");
+    meta.appendChild(span("mkt-env-hint", "Env: " + envNames));
+  }
+  row.appendChild(meta);
+
+  // Action
+  var action = div("mkt-action");
+  if(item.installed){
+    action.appendChild(span("mkt-installed-badge", "Installed"));
+  } else {
+    var installBtn = el("button","btn btn-success btn-sm",["Install"]);
+    if(type === "mcp"){
+      installBtn.onclick = (function(s, btn){
+        return function(){
+          if(s.env_vars && s.env_vars.length > 0 && s.env_vars.some(function(v){ return v.is_required; })){
+            showEnvVarsPrompt(s, btn);
+            return;
+          }
+          doInstall(s.name, s.package, s.registry_type, {}, btn);
+        };
+      })(item, installBtn);
+    } else {
+      installBtn.onclick = (function(skill, btn){
+        return function(){
+          var restore = btnLoading(btn, "INSTALLING\u2026");
+          api("POST","/api/skills/install",{id: skill.source},function(d){
+            if(restore) restore();
+            if(d.ok){
+              skillsData = null; skillsCatalogLoaded = false; skillsCatalogResults = null; skillsCatalogSearch = "";
+              toast("Installed " + skill.name, "success");
+              render();
+            } else {
+              toast("Error: " + (d.error || "unknown"), "error");
+            }
+          });
+        };
+      })(item, installBtn);
+    }
+    action.appendChild(installBtn);
+  }
+  row.appendChild(action);
+
+  return row;
+}
+
+function mkMarketplaceHeader(searchVal, onSearch, tabs, activeTab, onTab){
+  var header = div("mkt-header");
+  var searchInput = el("input","mkt-search");
+  searchInput.type = "text";
+  searchInput.placeholder = "Search\u2026";
+  searchInput.name = "search";
+  searchInput.setAttribute("aria-label", "Search marketplace");
+  searchInput.setAttribute("autocomplete", "off");
+  searchInput.value = searchVal;
+  searchInput.oninput = function(){ onSearch(searchInput.value); };
+  header.appendChild(searchInput);
+
+  var tabRow = div("mkt-tabs");
+  tabs.forEach(function(t){
+    var btn = el("button","mkt-tab" + (t.id === activeTab ? " active" : ""), [t.label]);
+    btn.onclick = function(){ onTab(t.id); };
+    tabRow.appendChild(btn);
+  });
+  header.appendChild(tabRow);
+  return header;
+}
+
+function renderMarketplaceMCP(root){
   if(!mcpData){
-    api("GET","/api/mcp/list",null,function(d){
-      mcpData = d;
-      render();
-    });
-    var ld = div("config-empty");
-    ld.textContent = "Loading MCP servers\u2026";
-    mcpSec.appendChild(ld);
-    root.appendChild(mcpSec);
+    api("GET","/api/mcp/list",null,function(d){ mcpData = d; render(); });
+    root.appendChild(span("mkt-empty", "Loading\u2026"));
     return;
   }
 
-  if(mcpData.using_global){
-    var info = div("config-empty");
-    info.textContent = "Using global MCP servers from ~/.claude/settings.json";
-    mcpSec.appendChild(info);
+  // Auto-load catalog
+  if(!mcpCatalogLoaded){
+    loadMCPCatalog(mcpCatalogSearch, "");
+    var shimmer = div("mkt-list mkt-loading");
+    for(var si=0;si<5;si++){
+      var ph = div("mkt-row");
+      ph.textContent = "\u00A0";
+      ph.style.height = "52px";
+      shimmer.appendChild(ph);
+    }
+    root.appendChild(shimmer);
+    return;
+  }
 
+  // Header: search + tabs
+  var tabs = [{id:"trending",label:"Trending"},{id:"all",label:"All"},{id:"installed",label:"Installed"}];
+  root.appendChild(mkMarketplaceHeader(
+    mcpCatalogSearch,
+    function(val){
+      mcpCatalogSearch = val;
+      clearTimeout(mcpSearchTimer);
+      mcpSearchTimer = setTimeout(function(){
+        mcpCatalogCursor = "";
+        loadMCPCatalog(val, "");
+      }, 300);
+    },
+    tabs, mcpCatalogTab,
+    function(tab){ mcpCatalogTab = tab; render(); }
+  ));
+
+  // Filter items by tab
+  var items = mcpCatalogResults || [];
+  if(mcpCatalogTab === "installed"){
+    items = items.filter(function(i){ return i.installed; });
+  } else if(mcpCatalogTab === "trending"){
+    items = items.slice().sort(function(a,b){
+      if(a.updated_at && b.updated_at) return b.updated_at.localeCompare(a.updated_at);
+      return 0;
+    });
+  }
+
+  // Leaderboard
+  if(items.length === 0){
+    root.appendChild(span("mkt-empty", mcpCatalogTab === "installed" ? "No installed MCP servers." : "No servers found."));
+  } else {
+    var list = div("mkt-list");
+    items.forEach(function(item, i){ list.appendChild(mkLeaderboardRow(item, i + 1, "mcp")); });
+    root.appendChild(list);
+  }
+
+  // Load More
+  if(mcpCatalogHasMore && mcpCatalogTab !== "installed"){
+    var moreWrap = div("mkt-load-more");
+    var moreBtn = el("button","btn btn-sm",["Load More"]);
+    moreBtn.onclick = function(){ btnLoading(moreBtn, "LOADING\u2026"); loadMCPCatalog(mcpCatalogSearch, mcpCatalogCursor); };
+    moreWrap.appendChild(moreBtn);
+    root.appendChild(moreWrap);
+  }
+
+  // Separator + Manage section
+  var sep = document.createElement("hr");
+  sep.className = "mkt-separator";
+  root.appendChild(sep);
+
+  var manageSec = div("config-section");
+  manageSec.appendChild(el("h3","config-section-title",["Manage Installed"]));
+
+  if(mcpData.using_global){
+    manageSec.appendChild(span("config-empty", "Using global MCP servers from ~/.claude/settings.json"));
     if(mcpData.global){
       var gList = div("config-grid");
       Object.keys(mcpData.global).forEach(function(name){
-        var s = mcpData.global[name];
+        var gs = mcpData.global[name];
         var row = div("mcp-toggle");
         row.appendChild(span("mcp-server-name", name));
-        row.appendChild(span("mcp-server-cmd", s.command + " " + (s.args||[]).join(" ")));
+        row.appendChild(span("mcp-server-cmd", gs.command + " " + (gs.args||[]).join(" ")));
         gList.appendChild(row);
       });
-      mcpSec.appendChild(gList);
+      manageSec.appendChild(gList);
     }
-
     var initBtn = el("button","btn btn-primary btn-sm",["Initialize Custom Config"]);
     initBtn.style.marginTop = "12px";
     initBtn.onclick = function(){
       var restore = btnLoading(initBtn, "INITIALIZING\u2026");
       api("POST","/api/mcp/init",{},function(d){
         if(restore) restore();
-        if(d.ok){
-          mcpData = null;
-          toast("MCP servers initialized","success");
-          render();
-        } else {
-          toast("Error: " + (d.error||"unknown"),"error");
-        }
+        if(d.ok){ mcpData = null; toast("MCP servers initialized","success"); render(); }
+        else { toast("Error: " + (d.error||"unknown"),"error"); }
       });
     };
-    mcpSec.appendChild(initBtn);
+    manageSec.appendChild(initBtn);
   } else {
     var servers = mcpData.custom || {};
     var names = Object.keys(servers);
     if(names.length === 0){
-      var empty = div("config-empty");
-      empty.textContent = "No MCP servers configured.";
-      mcpSec.appendChild(empty);
+      manageSec.appendChild(span("config-empty", "No MCP servers configured."));
     } else {
-      var list = div("config-grid");
+      var toggleList = div("config-grid");
       names.forEach(function(name){
-        var s = servers[name];
+        var sv = servers[name];
         var row = div("mcp-toggle");
-
         var cb = el("input","");
         cb.type = "checkbox";
-        cb.checked = s.enabled;
+        cb.checked = sv.enabled;
         cb.setAttribute("aria-label", "Toggle " + name);
         cb.onchange = function(){
           api("POST","/api/mcp/toggle",{name:name, enabled:cb.checked},function(d){
-            if(d.ok){
-              mcpData = null;
-              toast("MCP configuration saved","success");
-              render();
-            } else {
-              toast("Error: " + (d.error||"unknown"),"error");
-              cb.checked = !cb.checked;
-            }
+            if(d.ok){ mcpData = null; toast("MCP configuration saved","success"); render(); }
+            else { toast("Error: " + (d.error||"unknown"),"error"); cb.checked = !cb.checked; }
           });
         };
         row.appendChild(cb);
         row.appendChild(span("mcp-server-name", name));
-        row.appendChild(span("mcp-server-cmd", s.command + " " + (s.args||[]).join(" ")));
-        list.appendChild(row);
+        row.appendChild(span("mcp-server-cmd", sv.command + " " + (sv.args||[]).join(" ")));
+        toggleList.appendChild(row);
       });
-      mcpSec.appendChild(list);
+      manageSec.appendChild(toggleList);
     }
   }
-
-  // Add Server (Catalog)
-  var addBtn = el("button","btn btn-primary btn-sm",["Add Server"]);
-  addBtn.style.marginTop = "12px";
-  addBtn.onclick = function(){
-    mcpCatalogOpen = !mcpCatalogOpen;
-    mcpCatalogResults = null;
-    render();
-  };
-  mcpSec.appendChild(addBtn);
-
-  if(mcpCatalogOpen){
-    var catBox = div("config-section");
-    catBox.style.marginTop = "12px";
-    catBox.style.padding = "12px";
-    catBox.style.border = "1px solid var(--glass)";
-    catBox.style.borderRadius = "8px";
-
-    var searchRow = div("");
-    searchRow.style.display = "flex";
-    searchRow.style.gap = "8px";
-    searchRow.style.marginBottom = "12px";
-
-    var searchInput = el("input","");
-    searchInput.type = "text";
-    searchInput.placeholder = "Search MCP servers\u2026";
-    searchInput.name = "search";
-    searchInput.setAttribute("aria-label", "Search MCP servers");
-    searchInput.setAttribute("autocomplete", "off");
-    searchInput.value = mcpCatalogSearch;
-    searchInput.style.flex = "1";
-    searchInput.style.padding = "6px 10px";
-    searchInput.style.background = "rgba(0,0,0,.4)";
-    searchInput.style.border = "1px solid var(--glass)";
-    searchInput.style.borderRadius = "6px";
-    searchInput.style.color = "var(--text)";
-    searchInput.style.fontSize = "13px";
-    searchInput.onkeydown = function(e){
-      if(e.key === "Enter"){
-        mcpCatalogSearch = searchInput.value;
-        searchCatalog(searchInput.value);
-      }
-    };
-    searchRow.appendChild(searchInput);
-
-    var searchBtn = el("button","btn btn-primary btn-sm",["Search"]);
-    searchBtn.onclick = function(){
-      mcpCatalogSearch = searchInput.value;
-      searchCatalog(searchInput.value);
-    };
-    searchRow.appendChild(searchBtn);
-
-    var closeBtn = el("button","btn btn-sm",["Close"]);
-    closeBtn.onclick = function(){
-      mcpCatalogOpen = false;
-      mcpCatalogResults = null;
-      mcpCatalogSearch = "";
-      render();
-    };
-    searchRow.appendChild(closeBtn);
-    catBox.appendChild(searchRow);
-
-    if(mcpCatalogResults === null){
-      var hint = div("config-empty");
-      hint.textContent = "Search the official MCP registry to find and install servers.";
-      catBox.appendChild(hint);
-    } else if(mcpCatalogResults === "loading"){
-      var ld2 = div("config-empty");
-      ld2.textContent = "Searching\u2026";
-      catBox.appendChild(ld2);
-    } else if(mcpCatalogResults.length === 0){
-      var noRes = div("config-empty");
-      noRes.textContent = "No servers found.";
-      catBox.appendChild(noRes);
-    } else {
-      var resList = div("config-grid");
-      mcpCatalogResults.forEach(function(srv){
-        var row = div("mcp-toggle");
-        row.style.flexDirection = "column";
-        row.style.alignItems = "flex-start";
-        row.style.gap = "4px";
-        row.style.padding = "8px 0";
-        row.style.borderBottom = "1px solid var(--glass)";
-
-        var topRow = div("");
-        topRow.style.display = "flex";
-        topRow.style.justifyContent = "space-between";
-        topRow.style.width = "100%";
-        topRow.style.alignItems = "center";
-
-        var nameEl = span("mcp-server-name", srv.name);
-        nameEl.style.fontWeight = "600";
-        topRow.appendChild(nameEl);
-
-        if(srv.installed){
-          var badge = span("","Installed");
-          badge.style.color = "var(--success)";
-          badge.style.fontSize = "11px";
-          badge.style.fontWeight = "600";
-          topRow.appendChild(badge);
-        } else {
-          var installBtn = el("button","btn btn-success btn-sm",["Install"]);
-          installBtn.dataset.pkg = srv.package;
-          installBtn.dataset.name = srv.name;
-          installBtn.onclick = (function(s, btn){
-            return function(){
-              if(s.env_vars && s.env_vars.length > 0){
-                var hasRequired = s.env_vars.some(function(v){ return v.is_required; });
-                if(hasRequired){
-                  showEnvVarsPrompt(s, btn);
-                  return;
-                }
-              }
-              doInstall(s.name, s.package, {}, btn);
-            };
-          })(srv, installBtn);
-          topRow.appendChild(installBtn);
-        }
-        row.appendChild(topRow);
-
-        if(srv.description){
-          var desc = span("mcp-server-cmd", srv.description);
-          desc.style.fontSize = "12px";
-          desc.style.opacity = "0.8";
-          row.appendChild(desc);
-        }
-
-        var pkgEl = span("mcp-server-cmd", srv.package);
-        pkgEl.style.fontSize = "11px";
-        pkgEl.style.opacity = "0.6";
-        row.appendChild(pkgEl);
-
-        if(srv.env_vars && srv.env_vars.length > 0){
-          var envHint = span("","Env: " + srv.env_vars.map(function(v){ return v.name + (v.is_required ? "*" : ""); }).join(", "));
-          envHint.style.fontSize = "11px";
-          envHint.style.opacity = "0.5";
-          envHint.style.fontStyle = "italic";
-          row.appendChild(envHint);
-        }
-
-        resList.appendChild(row);
-      });
-      catBox.appendChild(resList);
-    }
-    mcpSec.appendChild(catBox);
-  }
-
-  root.appendChild(mcpSec);
+  root.appendChild(manageSec);
 }
 
 function renderMarketplaceSkills(root){
-  // Installed Skills section
-  var sec = div("config-section");
-  sec.appendChild(el("h3","config-section-title",["Installed Skills"]));
-
   if(!skillsData){
-    api("GET","/api/skills/list",null,function(d){
-      skillsData = d.skills || [];
-      render();
-    });
-    var ld = div("config-empty");
-    ld.textContent = "Loading installed skills\u2026";
-    sec.appendChild(ld);
-    root.appendChild(sec);
+    api("GET","/api/skills/list",null,function(d){ skillsData = d.skills || []; render(); });
+    root.appendChild(span("mkt-empty", "Loading\u2026"));
     return;
   }
 
-  if(skillsData.length === 0){
-    var empty = div("config-empty");
-    empty.textContent = "No skills installed yet.";
-    sec.appendChild(empty);
-  } else {
-    var list = div("config-grid");
-    skillsData.forEach(function(sk){
-      var row = div("mcp-toggle");
-      row.appendChild(span("mcp-server-name", sk.name));
-      row.appendChild(span("mcp-server-cmd", sk.description || sk.path));
-      list.appendChild(row);
-    });
-    sec.appendChild(list);
-  }
-
-  // Add Skill (Catalog)
-  var addBtn = el("button","btn btn-primary btn-sm",["Add Skill"]);
-  addBtn.style.marginTop = "12px";
-  addBtn.onclick = function(){
-    skillsCatalogOpen = !skillsCatalogOpen;
-    skillsCatalogResults = null;
-    render();
-  };
-  sec.appendChild(addBtn);
-
-  if(skillsCatalogOpen){
-    var catBox = div("config-section");
-    catBox.style.marginTop = "12px";
-    catBox.style.padding = "12px";
-    catBox.style.border = "1px solid var(--glass)";
-    catBox.style.borderRadius = "8px";
-
-    var searchRow = div("");
-    searchRow.style.display = "flex";
-    searchRow.style.gap = "8px";
-    searchRow.style.marginBottom = "12px";
-
-    var searchInput = el("input","");
-    searchInput.type = "text";
-    searchInput.placeholder = "Search skills\u2026";
-    searchInput.name = "search";
-    searchInput.setAttribute("aria-label", "Search skills");
-    searchInput.setAttribute("autocomplete", "off");
-    searchInput.value = skillsCatalogSearch;
-    searchInput.style.flex = "1";
-    searchInput.style.padding = "6px 10px";
-    searchInput.style.background = "rgba(0,0,0,.4)";
-    searchInput.style.border = "1px solid var(--glass)";
-    searchInput.style.borderRadius = "6px";
-    searchInput.style.color = "var(--text)";
-    searchInput.style.fontSize = "13px";
-    searchInput.onkeydown = function(e){
-      if(e.key === "Enter"){
-        skillsCatalogSearch = searchInput.value;
-        searchSkillsCatalog(searchInput.value);
-      }
-    };
-    searchRow.appendChild(searchInput);
-
-    var searchBtn = el("button","btn btn-primary btn-sm",["Search"]);
-    searchBtn.onclick = function(){
-      skillsCatalogSearch = searchInput.value;
-      searchSkillsCatalog(searchInput.value);
-    };
-    searchRow.appendChild(searchBtn);
-
-    var closeBtn = el("button","btn btn-sm",["Close"]);
-    closeBtn.onclick = function(){
-      skillsCatalogOpen = false;
-      skillsCatalogResults = null;
-      skillsCatalogSearch = "";
-      render();
-    };
-    searchRow.appendChild(closeBtn);
-    catBox.appendChild(searchRow);
-
-    if(skillsCatalogResults === null){
-      var hint = div("config-empty");
-      hint.textContent = "Search skills.sh to find and install Claude Code skills.";
-      catBox.appendChild(hint);
-    } else if(skillsCatalogResults === "loading"){
-      var ld2 = div("config-empty");
-      ld2.textContent = "Searching\u2026";
-      catBox.appendChild(ld2);
-    } else if(skillsCatalogResults.length === 0){
-      var noRes = div("config-empty");
-      noRes.textContent = "No skills found.";
-      catBox.appendChild(noRes);
-    } else {
-      var resList = div("config-grid");
-      skillsCatalogResults.forEach(function(sk){
-        var row = div("mcp-toggle");
-        row.style.flexDirection = "column";
-        row.style.alignItems = "flex-start";
-        row.style.gap = "4px";
-        row.style.padding = "8px 0";
-        row.style.borderBottom = "1px solid var(--glass)";
-
-        var topRow = div("");
-        topRow.style.display = "flex";
-        topRow.style.justifyContent = "space-between";
-        topRow.style.width = "100%";
-        topRow.style.alignItems = "center";
-
-        var nameEl = span("mcp-server-name", sk.name);
-        nameEl.style.fontWeight = "600";
-        topRow.appendChild(nameEl);
-
-        if(sk.installed){
-          var badge = span("","Installed");
-          badge.style.color = "var(--success)";
-          badge.style.fontSize = "11px";
-          badge.style.fontWeight = "600";
-          topRow.appendChild(badge);
-        } else {
-          var installBtn = el("button","btn btn-success btn-sm",["Install"]);
-          installBtn.onclick = (function(skill, btn){
-            return function(){
-              var restore = btnLoading(btn, "INSTALLING\u2026");
-              api("POST","/api/skills/install",{id: skill.source},function(d){
-                if(restore) restore();
-                if(d.ok){
-                  skillsData = null;
-                  skillsCatalogResults = null;
-                  skillsCatalogOpen = false;
-                  skillsCatalogSearch = "";
-                  toast("Installed " + skill.name, "success");
-                  render();
-                } else {
-                  toast("Error: " + (d.error || "unknown"), "error");
-                }
-              });
-            };
-          })(sk, installBtn);
-          topRow.appendChild(installBtn);
-        }
-        row.appendChild(topRow);
-
-        var metaRow = div("");
-        metaRow.style.display = "flex";
-        metaRow.style.gap = "8px";
-        metaRow.style.alignItems = "center";
-        if(sk.source){
-          metaRow.appendChild(span("skill-source-badge", sk.source));
-        }
-        if(sk.installs > 0){
-          var instCount = span("mcp-server-cmd", new Intl.NumberFormat().format(sk.installs) + " installs");
-          instCount.style.fontSize = "11px";
-          instCount.style.opacity = "0.6";
-          metaRow.appendChild(instCount);
-        }
-        if(metaRow.childNodes.length > 0) row.appendChild(metaRow);
-
-        resList.appendChild(row);
-      });
-      catBox.appendChild(resList);
+  // Auto-load catalog
+  if(!skillsCatalogLoaded){
+    loadSkillsCatalog(skillsCatalogSearch);
+    var shimmer = div("mkt-list mkt-loading");
+    for(var si=0;si<5;si++){
+      var ph = div("mkt-row");
+      ph.textContent = "\u00A0";
+      ph.style.height = "52px";
+      shimmer.appendChild(ph);
     }
-    sec.appendChild(catBox);
+    root.appendChild(shimmer);
+    return;
   }
 
-  root.appendChild(sec);
-}
+  // Header: search + tabs
+  var tabs = [{id:"trending",label:"Trending"},{id:"all",label:"All"},{id:"installed",label:"Installed"}];
+  root.appendChild(mkMarketplaceHeader(
+    skillsCatalogSearch,
+    function(val){
+      skillsCatalogSearch = val;
+      clearTimeout(skillsSearchTimer);
+      skillsSearchTimer = setTimeout(function(){
+        loadSkillsCatalog(val);
+      }, 300);
+    },
+    tabs, skillsCatalogTab,
+    function(tab){ skillsCatalogTab = tab; render(); }
+  ));
 
-function searchSkillsCatalog(query){
-  skillsCatalogResults = "loading";
-  render();
-  var url = "/api/skills/catalog?limit=20";
-  if(query) url += "&search=" + encodeURIComponent(query);
-  api("GET", url, null, function(d){
-    skillsCatalogResults = d.skills || [];
-    render();
-  });
+  // Filter items by tab
+  var items = skillsCatalogResults || [];
+  if(skillsCatalogTab === "installed"){
+    items = items.filter(function(i){ return i.installed; });
+  } else if(skillsCatalogTab === "trending"){
+    items = items.slice().sort(function(a,b){ return (b.installs || 0) - (a.installs || 0); });
+  }
+
+  // Leaderboard with progressive loading
+  var visible = items.slice(0, skillsShowCount);
+  if(visible.length === 0){
+    root.appendChild(span("mkt-empty", skillsCatalogTab === "installed" ? "No installed skills." : "No skills found."));
+  } else {
+    var list = div("mkt-list");
+    visible.forEach(function(item, i){ list.appendChild(mkLeaderboardRow(item, i + 1, "skill")); });
+    root.appendChild(list);
+  }
+
+  // Load More (client-side)
+  if(items.length > skillsShowCount){
+    var moreWrap = div("mkt-load-more");
+    var remaining = items.length - skillsShowCount;
+    var moreBtn = el("button","btn btn-sm",["Load More (" + remaining + " more)"]);
+    moreBtn.onclick = function(){ skillsShowCount += 100; render(); };
+    moreWrap.appendChild(moreBtn);
+    root.appendChild(moreWrap);
+  }
 }
 
 function buildMarketplaceLink(label, subTab){
@@ -4204,7 +4181,9 @@ function saveAutopilotConfig(){
   c.spawn_model = document.getElementById("cfg-spawn_model").value;
   c.spawn_effort = document.getElementById("cfg-spawn_effort").value;
   c.spawn_max_turns = parseInt(document.getElementById("cfg-spawn_max_turns").value) || 25;
+  c.spawn_step_timeout_min = parseInt(document.getElementById("cfg-spawn_step_timeout_min").value) || 0;
   c.max_concurrent = parseInt(document.getElementById("cfg-max_concurrent").value) || 3;
+  c.autopilot_autostart = document.getElementById("cfg-autopilot_autostart").checked;
   var saveBtn = document.querySelector(".config-actions .btn-primary");
   var restore = btnLoading(saveBtn, "SAVING\u2026");
   api("POST","/api/config/save",c,function(){
@@ -4244,15 +4223,15 @@ function renderUpdateArea(container){
 
   if(updateRunning) checkBtn.disabled = true;
 
-  checkBtn.onclick = function(){
-    if(updateRunning) return;
-    updateCheckResult = null;
+  function doCheck(branch){
     statusEl.textContent = "";
     channelEl.textContent = "";
     actionEl.textContent = "";
     progressEl.textContent = "";
     var restore = btnLoading(checkBtn, "Checking\u2026");
-    api("GET", "/api/update/check", null, function(data){
+    var url = "/api/update/check";
+    if(branch) url += "?branch=" + encodeURIComponent(branch);
+    api("GET", url, null, function(data){
       if(restore) restore();
       updateCheckResult = data;
       if(data.error){
@@ -4260,62 +4239,71 @@ function renderUpdateArea(container){
         statusEl.className = "update-status error";
         return;
       }
-      // Show current version
-      statusEl.textContent = "Current: " + data.current_version;
+
+      // Current version info
+      var curVer = "v" + (data.current_version || "?");
+      if(D.build_num && D.build_num !== "0") curVer += " #" + D.build_num;
+      var curInfo = div("update-current");
+      curInfo.appendChild(span("update-label","Current: "));
+      curInfo.appendChild(span("update-value", curVer));
+      curInfo.appendChild(span("update-meta"," (branch: " + data.current_branch + ", commit: " + data.local_commit + ")"));
+      statusEl.appendChild(curInfo);
       statusEl.className = "update-status";
 
-      // Channel selector
-      var label = span("","Channel: ");
+      // Branch selector
+      var label = span("","Branch: ");
       var sel = document.createElement("select");
       sel.className = "update-channel-select";
-      var optMain = document.createElement("option");
-      optMain.value = "main";
-      optMain.textContent = "main (latest)";
-      sel.appendChild(optMain);
-      var tags = data.tags || [];
-      for(var i = 0; i < tags.length; i++){
+      var branches = data.branches || ["main"];
+      for(var i = 0; i < branches.length; i++){
         var opt = document.createElement("option");
-        opt.value = tags[i];
-        opt.textContent = tags[i];
-        if(tags[i] === data.current_tag) opt.textContent += " (current)";
+        opt.value = branches[i];
+        opt.textContent = branches[i];
+        if(branches[i] === data.current_branch) opt.textContent += " (current)";
         sel.appendChild(opt);
       }
-      // Pre-select: if on a tag, select that tag; else select main
-      if(data.current_tag) sel.value = data.current_tag;
-      else sel.value = "main";
+      sel.value = data.selected_branch || data.current_branch || "main";
       channelEl.appendChild(label);
       channelEl.appendChild(sel);
 
-      // Info line based on selection
+      // Remote version info
+      var remoteInfo = div("update-remote");
+      var remVer = data.remote_version ? "v" + data.remote_version : "unknown";
+      remoteInfo.appendChild(span("update-label","Latest on " + (data.selected_branch || "main") + ": "));
+      remoteInfo.appendChild(span("update-value", remVer));
+      remoteInfo.appendChild(span("update-meta"," (commit: " + data.remote_commit + ")"));
+      channelEl.appendChild(remoteInfo);
+
+      // Behind info
       var infoEl = div("update-info");
-      function updateInfo(){
-        var v = sel.value;
-        if(v === "main"){
-          var b = parseInt(data.behind) || 0;
-          if(b > 0){
-            infoEl.textContent = data.behind + " commits behind main (" + data.remote_commit + ")";
-            infoEl.className = "update-info available";
-          } else {
-            infoEl.textContent = "Already on latest main";
-            infoEl.className = "update-info current";
-          }
-        } else if(v === data.current_tag){
-          infoEl.textContent = "Already on " + v;
-          infoEl.className = "update-info current";
-        } else {
-          infoEl.textContent = "Switch to " + v;
-          infoEl.className = "update-info available";
-        }
+      var b = data.behind || 0;
+      var onSameBranch = data.current_branch === (data.selected_branch || "main");
+      if(onSameBranch && b === 0){
+        infoEl.textContent = "Already up to date";
+        infoEl.className = "update-info current";
+      } else if(b > 0){
+        infoEl.textContent = b + " commit" + (b > 1 ? "s" : "") + " behind";
+        infoEl.className = "update-info available";
+      } else {
+        infoEl.textContent = "Switch to " + (data.selected_branch || "main");
+        infoEl.className = "update-info available";
       }
-      sel.onchange = updateInfo;
-      updateInfo();
       channelEl.appendChild(infoEl);
 
+      // Re-check on branch change
+      sel.onchange = function(){ doCheck(sel.value); };
+
       // Update button
-      var updateBtn = el("button","btn btn-success btn-sm",["Update Now"]);
+      var updateBtn = el("button","btn btn-success btn-sm",["Update to " + (data.selected_branch || "main")]);
       updateBtn.onclick = function(){ runUpdate(progressEl, updateBtn, checkBtn, sel.value); };
       actionEl.appendChild(updateBtn);
     });
+  }
+
+  checkBtn.onclick = function(){
+    if(updateRunning) return;
+    updateCheckResult = null;
+    doCheck("");
   };
 
   container.appendChild(checkBtn);
