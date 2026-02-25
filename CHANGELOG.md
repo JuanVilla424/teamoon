@@ -15,4 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- go.mod version mismatches for lipgloss and mousetrap corrected to match go.sum
+
 ### Removed
