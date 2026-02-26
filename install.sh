@@ -5,8 +5,8 @@ set -eo pipefail
 #   curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/<branch>/install.sh | bash
 #
 # Interactive installer — asks before optional components.
-# Installs prerequisites, builds, and sets up teamoon with systemd.
-# Supports Ubuntu/Debian and RHEL/Rocky Linux 8+.
+# Installs prerequisites, builds, and sets up teamoon as a service.
+# Supports Ubuntu/Debian, RHEL/Rocky Linux 8+, and macOS (Apple Silicon + Intel).
 
 REPO="https://github.com/JuanVilla424/teamoon.git"
 INSTALL_DIR="${HOME}/.local/src/teamoon"
@@ -51,15 +51,32 @@ ask_input() {
     echo "${answer:-$default}"
 }
 
-# Append line to shell profile (bashrc + bash_profile on RHEL)
+# Silent input (for passwords — does not echo)
+ask_input_silent() {
+    local prompt="$1" default="$2"
+    printf '\033[1;33m?\033[0m %s ' "$prompt" >/dev/tty 2>/dev/null || true
+    local answer
+    read -rs answer </dev/tty 2>/dev/null || answer=""
+    printf '\n'
+    echo "${answer:-$default}"
+}
+
+# Append line to shell profile (bashrc/zshrc depending on OS)
 append_to_profile() {
     local line="$1"
-    if ! grep -qF "$line" "$HOME/.bashrc" 2>/dev/null; then
-        printf '\n%s\n' "$line" >> "$HOME/.bashrc"
-    fi
-    if [ "$DISTRO_FAMILY" = "rhel" ]; then
-        if ! grep -qF "$line" "$HOME/.bash_profile" 2>/dev/null; then
-            printf '\n%s\n' "$line" >> "$HOME/.bash_profile"
+    if [ "$DISTRO_FAMILY" = "darwin" ]; then
+        local target="$HOME/.zshrc"
+        if ! grep -qF "$line" "$target" 2>/dev/null; then
+            printf '\n%s\n' "$line" >> "$target"
+        fi
+    else
+        if ! grep -qF "$line" "$HOME/.bashrc" 2>/dev/null; then
+            printf '\n%s\n' "$line" >> "$HOME/.bashrc"
+        fi
+        if [ "$DISTRO_FAMILY" = "rhel" ]; then
+            if ! grep -qF "$line" "$HOME/.bash_profile" 2>/dev/null; then
+                printf '\n%s\n' "$line" >> "$HOME/.bash_profile"
+            fi
         fi
     fi
 }
@@ -72,8 +89,11 @@ if [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-# ── detect distro family ─────────────────────────────────
-if [ -f /etc/debian_version ]; then
+# ── detect OS / distro family ────────────────────────────
+OS_TYPE=$(uname -s)
+if [ "$OS_TYPE" = "Darwin" ]; then
+    DISTRO_FAMILY="darwin"
+elif [ -f /etc/debian_version ]; then
     DISTRO_FAMILY="debian"
 elif [ -f /etc/redhat-release ] || [ -f /etc/rocky-release ] || [ -f /etc/centos-release ]; then
     DISTRO_FAMILY="rhel"
@@ -81,10 +101,10 @@ elif [ -f /etc/redhat-release ] || [ -f /etc/rocky-release ] || [ -f /etc/centos
         fail "dnf is required (RHEL 8+). RHEL 7 is not supported."
     fi
 else
-    fail "unsupported OS. Supported: Ubuntu/Debian, RHEL/Rocky Linux 8+"
+    fail "unsupported OS. Supported: Ubuntu/Debian, RHEL/Rocky Linux 8+, macOS"
 fi
 
-if ! has sudo; then
+if [ "$DISTRO_FAMILY" != "darwin" ] && ! has sudo; then
     fail "sudo is required"
 fi
 
@@ -93,12 +113,53 @@ printf '\033[1;35m  ╔═══════════════════
 printf '\033[1;35m  ║         teamoon installer             ║\033[0m\n'
 printf '\033[1;35m  ╚═══════════════════════════════════════╝\033[0m\n'
 printf '\n'
-info "detected distro family: $DISTRO_FAMILY"
+info "detected OS: $DISTRO_FAMILY"
 
 # ── 1. system packages (required) ────────────────────────
 step "system packages (required)"
 
-if [ "$DISTRO_FAMILY" = "debian" ]; then
+if [ "$DISTRO_FAMILY" = "darwin" ]; then
+    # Ensure Homebrew is installed
+    if ! has brew; then
+        info "installing Homebrew"
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+        # Add brew to PATH for this session
+        if [ -f /opt/homebrew/bin/brew ]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [ -f /usr/local/bin/brew ]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+        ok "homebrew installed"
+    else
+        ok "homebrew already installed"
+    fi
+
+    PKGS=(jq htop tree tmux shellcheck openssl readline)
+    MISSING=()
+    for pkg in "${PKGS[@]}"; do
+        if ! brew list --formula "$pkg" &>/dev/null; then
+            MISSING+=("$pkg")
+        fi
+    done
+
+    if [ ${#MISSING[@]} -eq 0 ]; then
+        ok "all system packages already installed"
+    else
+        info "installing ${#MISSING[@]} packages via Homebrew..."
+        brew install "${MISSING[@]}"
+        ok "system packages installed"
+    fi
+
+    # Xcode Command Line Tools (provides git, make, clang)
+    if ! xcode-select -p &>/dev/null; then
+        info "installing Xcode Command Line Tools"
+        xcode-select --install 2>/dev/null || true
+        warn "accept the Xcode CLT dialog, then re-run this installer"
+    else
+        ok "xcode command line tools installed"
+    fi
+
+elif [ "$DISTRO_FAMILY" = "debian" ]; then
     PKGS=(
         git curl wget zip unzip
         build-essential gcc g++ make cmake
@@ -128,15 +189,13 @@ if [ "$DISTRO_FAMILY" = "debian" ]; then
         ok "system packages installed"
     fi
 else
-    # Enable EPEL + CRB repos (needed for htop, ShellCheck, etc.)
+    # RHEL
     info "enabling EPEL + CRB repositories"
     sudo dnf install -y -q epel-release 2>/dev/null || \
-        sudo dnf install -y -q https://dl.fedoraproject.org/pub/epel/epel-release-latest-$(rpm -E %rhel).noarch.rpm 2>/dev/null || true
-    # CRB = "crb" on RHEL 9+, "powertools" on RHEL 8
+        sudo dnf install -y -q "https://dl.fedoraproject.org/pub/epel/epel-release-latest-$(rpm -E %rhel).noarch.rpm" 2>/dev/null || true
     sudo dnf config-manager --set-enabled crb 2>/dev/null || \
         sudo dnf config-manager --set-enabled powertools 2>/dev/null || true
 
-    # RHEL 9 ships curl-minimal; installing curl conflicts. Use curl-minimal on 9+.
     RHEL_VER=$(rpm -E %rhel 2>/dev/null || echo 8)
     if [ "$RHEL_VER" -ge 9 ] 2>/dev/null; then
         _CURL_PKG="curl-minimal"
@@ -172,13 +231,29 @@ else
         sudo dnf install -y "${MISSING[@]}"
         ok "system packages installed"
     fi
-
 fi
 
+# yq
 if ! has yq; then
     info "installing yq"
-    sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-    sudo chmod +x /usr/local/bin/yq
+    YQ_OS="linux"
+    YQ_ARCH="amd64"
+    if [ "$DISTRO_FAMILY" = "darwin" ]; then
+        YQ_OS="darwin"
+        if [ "$(uname -m)" = "arm64" ]; then
+            YQ_ARCH="arm64"
+        fi
+    elif [ "$(uname -m)" = "aarch64" ]; then
+        YQ_ARCH="arm64"
+    fi
+    YQ_URL="https://github.com/mikefarah/yq/releases/latest/download/yq_${YQ_OS}_${YQ_ARCH}"
+    if [ "$DISTRO_FAMILY" = "darwin" ]; then
+        curl -sL "$YQ_URL" -o /usr/local/bin/yq
+        chmod +x /usr/local/bin/yq
+    else
+        sudo wget -qO /usr/local/bin/yq "$YQ_URL"
+        sudo chmod +x /usr/local/bin/yq
+    fi
     ok "yq installed"
 else
     ok "yq already installed"
@@ -188,17 +263,33 @@ fi
 step "Go ${GO_VERSION} (required)"
 
 install_go() {
-    local tarball="go${GO_VERSION}.linux-amd64.tar.gz"
-    info "downloading Go ${GO_VERSION}"
-    curl -sLO "https://go.dev/dl/${tarball}"
-    sudo rm -rf /usr/local/go
-    sudo tar -C /usr/local -xzf "${tarball}"
-    rm -f "${tarball}"
+    if [ "$DISTRO_FAMILY" = "darwin" ]; then
+        # Use Homebrew on macOS
+        info "installing Go via Homebrew"
+        brew install go
+        if ! echo "$PATH" | grep -q "go/bin"; then
+            local gopath
+            gopath="$(go env GOPATH)"
+            export PATH="$PATH:${gopath}/bin"
+        fi
+        append_to_profile 'export PATH=$PATH:$(go env GOPATH)/bin'
+    else
+        local go_arch="amd64"
+        if [ "$(uname -m)" = "aarch64" ]; then
+            go_arch="arm64"
+        fi
+        local tarball="go${GO_VERSION}.linux-${go_arch}.tar.gz"
+        info "downloading Go ${GO_VERSION}"
+        curl -sLO "https://go.dev/dl/${tarball}"
+        sudo rm -rf /usr/local/go
+        sudo tar -C /usr/local -xzf "${tarball}"
+        rm -f "${tarball}"
 
-    if ! echo "$PATH" | grep -q "/usr/local/go/bin"; then
-        export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+        if ! echo "$PATH" | grep -q "/usr/local/go/bin"; then
+            export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+        fi
+        append_to_profile 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin'
     fi
-    append_to_profile 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin'
 }
 
 if has go; then
@@ -260,7 +351,10 @@ if has gh; then
     ok "gh already installed ($(gh --version | head -1))"
 else
     if ask "Install GitHub CLI (gh)? Needed for PR features"; then
-        if [ "$DISTRO_FAMILY" = "debian" ]; then
+        if [ "$DISTRO_FAMILY" = "darwin" ]; then
+            info "installing gh via Homebrew"
+            brew install gh
+        elif [ "$DISTRO_FAMILY" = "debian" ]; then
             info "installing gh (Debian/Ubuntu)"
             sudo mkdir -p -m 755 /etc/apt/keyrings
             tmpkey=$(mktemp)
@@ -358,6 +452,7 @@ BRANCH=$(ask_input "Branch to install [main, prod, test, dev]" "main")
 WEB_PORT=$(ask_input "Web dashboard port" "7777")
 WEB_HOST=$(ask_input "Bind address (localhost = local only, 0.0.0.0 = all interfaces)" "localhost")
 PROJECTS_DIR=$(ask_input "Projects directory" "~/Projects")
+WEB_PASS=$(ask_input_silent "Web dashboard password (enter = no auth)")
 
 # Expand ~ for mkdir
 PROJECTS_DIR_EXPANDED="${PROJECTS_DIR/#\~/$HOME}"
@@ -385,16 +480,73 @@ cd "$INSTALL_DIR"
 make build
 ok "built"
 
-# ── 10. generate systemd service ────────────────────────
-info "generating systemd service for user $CURRENT_USER"
+# ── 10. install binary + service ─────────────────────────
+if [ "$DISTRO_FAMILY" = "darwin" ]; then
+    # macOS: copy binary + launchd user agent
+    info "installing binary to $BINARY_DEST"
+    sudo cp "$INSTALL_DIR/teamoon" "$BINARY_DEST"
+    sudo chmod 755 "$BINARY_DEST"
+    ok "binary installed"
 
-if [ "$DISTRO_FAMILY" = "rhel" ]; then
-    ENV_FILE_PATH="/etc/sysconfig/teamoon"
+    PLIST_LABEL="com.teamoon"
+    PLIST_DIR="${HOME}/Library/LaunchAgents"
+    PLIST_FILE="${PLIST_DIR}/${PLIST_LABEL}.plist"
+    LOG_FILE="${HOME}/Library/Logs/teamoon.log"
+
+    mkdir -p "$PLIST_DIR"
+
+    # Unload existing agent if running
+    launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
+
+    info "generating launchd user agent"
+    cat > "$PLIST_FILE" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${PLIST_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${BINARY_DEST}</string>
+    <string>serve</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${LOG_FILE}</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_FILE}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>${HOME}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${HOME}/.nvm/versions/node/$(node --version 2>/dev/null || echo v22.0.0)/bin:${HOME}/go/bin</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>${HOME}</string>
+</dict>
+</plist>
+PLISTEOF
+
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE" 2>/dev/null || \
+        launchctl load "$PLIST_FILE" 2>/dev/null || true
+    ok "launchd agent installed and started"
 else
-    ENV_FILE_PATH="${HOME}/.config/teamoon/.env"
-fi
+    # Linux: systemd service
+    info "generating systemd service for user $CURRENT_USER"
 
-cat > "$INSTALL_DIR/teamoon.service" <<SVCEOF
+    if [ "$DISTRO_FAMILY" = "rhel" ]; then
+        ENV_FILE_PATH="/etc/sysconfig/teamoon"
+    else
+        ENV_FILE_PATH="${HOME}/.config/teamoon/.env"
+    fi
+
+    cat > "$INSTALL_DIR/teamoon.service" <<SVCEOF
 [Unit]
 Description=Teamoon - AI-powered project management and autopilot task engine
 After=network.target
@@ -414,14 +566,14 @@ EnvironmentFile=-${ENV_FILE_PATH}
 WantedBy=multi-user.target
 SVCEOF
 
-ok "service file generated"
+    ok "service file generated"
 
-# ── 11. install binary + systemd ────────────────────────
-info "installing binary + systemd service (requires sudo)"
-make install
-ok "installed to $BINARY_DEST"
+    info "installing binary + systemd service (requires sudo)"
+    make install
+    ok "installed to $BINARY_DEST"
+fi
 
-# ── 12. RHEL post-install: SELinux + firewalld ──────────
+# ── 11. RHEL post-install: SELinux + firewalld ──────────
 if [ "$DISTRO_FAMILY" = "rhel" ]; then
     step "RHEL: SELinux + firewall configuration"
 
@@ -448,7 +600,7 @@ if [ "$DISTRO_FAMILY" = "rhel" ]; then
     fi
 fi
 
-# ── 13. write initial config ────────────────────────────
+# ── 12. write initial config ────────────────────────────
 CONFIG_DIR="${HOME}/.config/teamoon"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 
@@ -479,22 +631,31 @@ else
     fi
 fi
 
-# ── 14. generate service environment file ────────────────
-ENV_VARS=""
-while IFS= read -r var; do
-    [ -n "$var" ] && ENV_VARS="${ENV_VARS}${var}"$'\n'
-done < <(env | grep "^CLAUDE_CODE_" | sort)
+# ── 13. set password (if provided) ──────────────────────
+if [ -n "$WEB_PASS" ]; then
+    info "setting web dashboard password (bcrypt hash)"
+    "$BINARY_DEST" set-password "$WEB_PASS"
+    ok "password set"
+fi
 
-if [ -n "$ENV_VARS" ]; then
-    if [ -f "$ENV_FILE_PATH" ]; then
-        cp "$ENV_FILE_PATH" "${ENV_FILE_PATH}.bak"
-        ok "backed up existing .env to ${ENV_FILE_PATH}.bak"
+# ── 14. generate service environment file ────────────────
+if [ "$DISTRO_FAMILY" != "darwin" ]; then
+    ENV_VARS=""
+    while IFS= read -r var; do
+        [ -n "$var" ] && ENV_VARS="${ENV_VARS}${var}"$'\n'
+    done < <(env | grep "^CLAUDE_CODE_" | sort)
+
+    if [ -n "$ENV_VARS" ]; then
+        if [ -f "$ENV_FILE_PATH" ]; then
+            cp "$ENV_FILE_PATH" "${ENV_FILE_PATH}.bak"
+            ok "backed up existing .env to ${ENV_FILE_PATH}.bak"
+        fi
+        printf '%s' "$ENV_VARS" > "$ENV_FILE_PATH"
+        chmod 600 "$ENV_FILE_PATH"
+        ok "service env file written to $ENV_FILE_PATH"
+    else
+        warn "no CLAUDE_CODE_* env vars found — .env not created (set them in ~/.bashrc and re-run)"
     fi
-    printf '%s' "$ENV_VARS" > "$ENV_FILE_PATH"
-    chmod 600 "$ENV_FILE_PATH"
-    ok "service env file written to $ENV_FILE_PATH"
-else
-    warn "no CLAUDE_CODE_* env vars found — .env not created (set them in ~/.bashrc and re-run)"
 fi
 
 # ── done ─────────────────────────────────────────────────
@@ -506,7 +667,12 @@ printf '\n'
 echo "  binary:   $BINARY_DEST"
 echo "  source:   $INSTALL_DIR"
 echo "  config:   $CONFIG_FILE"
-echo "  service:  systemctl status teamoon"
+if [ "$DISTRO_FAMILY" = "darwin" ]; then
+    echo "  service:  launchctl list | grep teamoon"
+    echo "  logs:     ${HOME}/Library/Logs/teamoon.log"
+else
+    echo "  service:  systemctl status teamoon"
+fi
 echo "  web ui:   http://${WEB_HOST}:${WEB_PORT}"
 echo ""
 echo "  Next steps:"
