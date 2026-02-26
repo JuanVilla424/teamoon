@@ -99,6 +99,49 @@ func parseGitHubRepo(remote string) string {
 	return ""
 }
 
+type PRDetail struct {
+	Number       int    `json:"number"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	State        string `json:"state"`
+	IsDraft      bool   `json:"isDraft"`
+	Author       struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	HeadRefName    string `json:"headRefName"`
+	BaseRefName    string `json:"baseRefName"`
+	ChangedFiles   int    `json:"changedFiles"`
+	Additions      int    `json:"additions"`
+	Deletions      int    `json:"deletions"`
+	Labels         []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	ReviewDecision string `json:"reviewDecision"`
+	CreatedAt      string `json:"createdAt"`
+	UpdatedAt      string `json:"updatedAt"`
+	URL            string `json:"url"`
+}
+
+func FetchPRDetail(repo string, number int) (*PRDetail, error) {
+	if repo == "" {
+		return nil, fmt.Errorf("no github repo")
+	}
+	cmd := exec.Command("gh", "pr", "view",
+		fmt.Sprintf("%d", number),
+		"--repo", repo,
+		"--json", "number,title,body,state,isDraft,author,headRefName,baseRefName,changedFiles,additions,deletions,labels,reviewDecision,createdAt,updatedAt,url",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var detail PRDetail
+	if err := json.Unmarshal(out, &detail); err != nil {
+		return nil, err
+	}
+	return &detail, nil
+}
+
 func FetchPRs(repo string) ([]PR, error) {
 	if repo == "" {
 		return nil, fmt.Errorf("no github repo")

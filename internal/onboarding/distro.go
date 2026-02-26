@@ -2,6 +2,7 @@ package onboarding
 
 import (
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -10,12 +11,16 @@ type distroFamily string
 const (
 	distroDebian  distroFamily = "debian"
 	distroRHEL    distroFamily = "rhel"
+	distroDarwin  distroFamily = "darwin"
 	distroUnknown distroFamily = "unknown"
 )
 
 // detectDistro reads /etc/os-release to determine the distro family.
 // Falls back to file presence checks for older distros.
 func detectDistro() distroFamily {
+	if runtime.GOOS == "darwin" {
+		return distroDarwin
+	}
 	data, err := os.ReadFile("/etc/os-release")
 	if err == nil {
 		content := string(data)

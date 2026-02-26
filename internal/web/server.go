@@ -11,6 +11,7 @@ import (
 
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
+	"github.com/JuanVilla424/teamoon/internal/jobs"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/metrics"
 	"github.com/JuanVilla424/teamoon/internal/plan"
@@ -53,17 +54,18 @@ func (h *Hub) broadcast(data []byte) {
 }
 
 type Server struct {
-	cfg        config.Config
-	store      *Store
-	hub        *Hub
-	refreshMu  sync.Mutex
+	cfg            config.Config
+	store          *Store
+	hub            *Hub
+	sessions       *sessionStore
+	refreshMu      sync.Mutex
 	refreshPending bool
 }
 
 func NewServer(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *Server {
 	store := NewStore(cfg, mgr, logBuf)
 	hub := newHub()
-	return &Server{cfg: cfg, store: store, hub: hub}
+	return &Server{cfg: cfg, store: store, hub: hub, sessions: newSessionStore()}
 }
 
 func (s *Server) RecoverAndResume() {
@@ -120,6 +122,13 @@ func (s *Server) Start(ctx context.Context) {
 	s.store.Refresh()
 	s.RecoverAndResume()
 
+	// Start jobs scheduler
+	jobCfg := s.cfg
+	jobs.StartScheduler(ctx, func(j jobs.Job) {
+		jobs.RunJob(ctx, j, jobCfg)
+		s.refreshAndBroadcast()
+	})
+
 	go func() {
 		interval := time.Duration(s.cfg.RefreshIntervalSec) * time.Second
 		if interval < 5*time.Second {
@@ -156,7 +165,10 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/onboarding/hooks", s.logRequest(s.handleOnboardingHooks))
 	mux.HandleFunc("/api/onboarding/mcp", s.logRequest(s.handleOnboardingMCP))
 
-	mux.HandleFunc("/", s.authWrap(s.handleIndex))
+	mux.HandleFunc("/api/auth/login", s.logRequest(s.handleLogin))
+	mux.HandleFunc("/api/auth/logout", s.logRequest(s.handleLogout))
+
+	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/data", s.authWrap(s.handleData))
 	mux.HandleFunc("/api/sse", s.authWrap(s.handleSSE))
 	mux.HandleFunc("/api/tasks/add", s.logRequest(s.authWrap(s.handleTaskAdd)))
@@ -168,6 +180,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/tasks/plan", s.logRequest(s.authWrap(s.handleTaskPlan)))
 	mux.HandleFunc("/api/tasks/detail", s.logRequest(s.authWrap(s.handleTaskDetail)))
 	mux.HandleFunc("/api/projects/prs", s.logRequest(s.authWrap(s.handleProjectPRs)))
+	mux.HandleFunc("/api/projects/pr-detail", s.logRequest(s.authWrap(s.handleProjectPRDetail)))
 	mux.HandleFunc("/api/projects/merge-dependabot", s.logRequest(s.authWrap(s.handleMergeDependabot)))
 	mux.HandleFunc("/api/projects/pull", s.logRequest(s.authWrap(s.handleProjectPull)))
 	mux.HandleFunc("/api/projects/git-init", s.logRequest(s.authWrap(s.handleProjectGitInit)))
@@ -196,8 +209,16 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/skills/catalog", s.logRequest(s.authWrap(s.handleSkillsCatalog)))
 	mux.HandleFunc("/api/skills/install", s.logRequest(s.authWrap(s.handleSkillsInstall)))
 	mux.HandleFunc("/api/skills/uninstall", s.logRequest(s.authWrap(s.handleSkillsUninstall)))
+	mux.HandleFunc("/api/jobs/list", s.logRequest(s.authWrap(s.handleJobsList)))
+	mux.HandleFunc("/api/jobs/add", s.logRequest(s.authWrap(s.handleJobAdd)))
+	mux.HandleFunc("/api/jobs/update", s.logRequest(s.authWrap(s.handleJobUpdate)))
+	mux.HandleFunc("/api/jobs/delete", s.logRequest(s.authWrap(s.handleJobDelete)))
+	mux.HandleFunc("/api/jobs/run", s.logRequest(s.authWrap(s.handleJobRun)))
 	mux.HandleFunc("/api/update/check", s.logRequest(s.authWrap(s.handleUpdateCheck)))
 	mux.HandleFunc("/api/update", s.logRequest(s.authWrap(s.handleUpdate)))
+	mux.HandleFunc("/api/upload", s.logRequest(s.authWrap(s.handleUpload)))
+	mux.HandleFunc("/api/uploads/", s.logRequest(s.authWrap(s.handleUploadServe)))
+	mux.HandleFunc("/api/tasks/attach", s.logRequest(s.authWrap(s.handleTaskAttach)))
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.WebHost, s.cfg.WebPort)
 	srv := &http.Server{Addr: addr, Handler: mux}
@@ -224,16 +245,26 @@ func (s *Server) logRequest(next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) authWrap(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.WebPassword != "" {
-			_, pass, ok := r.BasicAuth()
-			if !ok || pass != s.cfg.WebPassword {
-				w.Header().Set("WWW-Authenticate", `Basic realm="teamoon"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if s.cfg.WebPassword == "" {
+			next(w, r)
+			return
+		}
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || !s.sessions.validate(cookie.Value) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			return
 		}
 		next(w, r)
 	}
+}
+
+func isSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
