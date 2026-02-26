@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/dashboard"
@@ -171,10 +172,33 @@ func main() {
 		},
 	}
 
+	setPasswordCmd := &cobra.Command{
+		Use:   "set-password [password]",
+		Short: "Set or update the web UI password (stored as bcrypt hash)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pw := args[0]
+			hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+			if err != nil {
+				return fmt.Errorf("bcrypt: %w", err)
+			}
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+			cfg.WebPassword = string(hash)
+			if err := config.Save(cfg); err != nil {
+				return fmt.Errorf("save: %w", err)
+			}
+			fmt.Println("Password updated (bcrypt hash saved to config)")
+			return nil
+		},
+	}
+
 	rootCmd.PersistentFlags().BoolVar(&debugFlag, "debug", false, "Enable debug logging")
 
 	taskCmd.AddCommand(taskAddCmd, taskDoneCmd, taskListCmd)
-	rootCmd.AddCommand(taskCmd, serveCmd, initCmd)
+	rootCmd.AddCommand(taskCmd, serveCmd, initCmd, setPasswordCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
