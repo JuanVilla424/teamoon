@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  teamoon launchd user agent template (macOS).
+  Install to: ~/Library/LaunchAgents/com.teamoon.plist
+  The install.sh and Makefile generate this dynamically with correct paths.
+  This file is a reference template only.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.teamoon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/teamoon</string>
+    <string>serve</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/USERNAME/Library/Logs/teamoon.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/USERNAME/Library/Logs/teamoon.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/USERNAME</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/USERNAME</string>
+</dict>
+</plist>

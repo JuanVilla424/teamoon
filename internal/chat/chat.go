@@ -13,10 +13,11 @@ import (
 const maxMessages = 50
 
 type Message struct {
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	Project   string    `json:"project"`
-	Timestamp time.Time `json:"timestamp"`
+	Role        string    `json:"role"`
+	Content     string    `json:"content"`
+	Project     string    `json:"project"`
+	Timestamp   time.Time `json:"timestamp"`
+	Attachments []string  `json:"attachments,omitempty"`
 }
 
 type chatStore struct {
