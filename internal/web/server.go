@@ -216,6 +216,9 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/jobs/run", s.logRequest(s.authWrap(s.handleJobRun)))
 	mux.HandleFunc("/api/update/check", s.logRequest(s.authWrap(s.handleUpdateCheck)))
 	mux.HandleFunc("/api/update", s.logRequest(s.authWrap(s.handleUpdate)))
+	mux.HandleFunc("/api/upload", s.logRequest(s.authWrap(s.handleUpload)))
+	mux.HandleFunc("/api/uploads/", s.logRequest(s.authWrap(s.handleUploadServe)))
+	mux.HandleFunc("/api/tasks/attach", s.logRequest(s.authWrap(s.handleTaskAttach)))
 
 	addr := fmt.Sprintf("%s:%d", s.cfg.WebHost, s.cfg.WebPort)
 	srv := &http.Server{Addr: addr, Handler: mux}

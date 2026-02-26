@@ -38,6 +38,7 @@ type Task struct {
 	AutoPilot   bool      `json:"auto_pilot"`
 	Optional    bool      `json:"optional,omitempty"`
 	Assignee    string    `json:"assignee,omitempty"`
+	Attachments []string  `json:"attachments,omitempty"`
 }
 
 func EffectiveState(t Task) TaskState {
@@ -518,6 +519,23 @@ func UpdateAssignee(id int, assignee string) error {
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].Assignee = assignee
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
+func AttachToTask(id int, uploadID string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].Attachments = append(store.Tasks[i].Attachments, uploadID)
 			return saveStore(store)
 		}
 	}

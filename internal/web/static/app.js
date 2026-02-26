@@ -171,6 +171,11 @@ var chatCounter = 0;
 var chatCreatedTasks = [];
 var chatToolCalls = [];
 var chatTurnStartMs = 0;
+var chatPendingAttachments = [];
+var chatRecording = false;
+var chatMediaRecorder = null;
+var chatAudioChunks = [];
+var taskModalAttachments = [];
 var canvasFilterAssignee = "";
 var canvasFilterProject = "";
 var canvasDragTaskId = 0;
@@ -551,6 +556,12 @@ function getView(){
 
 /* ── Safe DOM helpers ── */
 function txt(s){ return document.createTextNode(s || ""); }
+function escHtml(s){
+  var d = document.createElement("div");
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+
 function el(tag, cls, children){
   var e = document.createElement(tag);
   if(cls) e.className = cls;
@@ -1435,6 +1446,51 @@ function renderTaskDetail(parent, t){
   actions.appendChild(archBtn);
 
   parent.appendChild(actions);
+
+  // ── Attachments section ──
+  if(t.attachments && t.attachments.length > 0){
+    var attSec = div("detail-card detail-section");
+    var attTitle = div("detail-section-title");
+    attTitle.appendChild(txt("Attachments"));
+    attSec.appendChild(attTitle);
+    var attRow = div("task-detail-attachments");
+    attRow.id = "task-att-" + t.id;
+    // Fetch attachment metadata
+    api("GET","/api/tasks/detail?id="+t.id,null,function(d){
+      var area = document.getElementById("task-att-" + t.id);
+      if(!area || !d.attachments) return;
+      d.attachments.forEach(function(att){
+        if(att.mime_type && att.mime_type.indexOf("image/") === 0){
+          var img = document.createElement("img");
+          img.className = "chat-att-image";
+          img.src = "/api/uploads/" + att.id;
+          img.alt = att.orig_name;
+          img.onclick = function(){ window.open(img.src,"_blank"); };
+          area.appendChild(img);
+        } else if(att.mime_type && att.mime_type.indexOf("audio/") === 0){
+          var audio = document.createElement("audio");
+          audio.className = "chat-att-audio";
+          audio.controls = true;
+          audio.src = "/api/uploads/" + att.id;
+          area.appendChild(audio);
+        } else {
+          var a = document.createElement("a");
+          a.className = "chat-att-link";
+          a.href = "/api/uploads/" + att.id;
+          a.target = "_blank";
+          a.textContent = att.orig_name || att.id;
+          area.appendChild(a);
+        }
+      });
+    });
+    attSec.appendChild(attRow);
+    // Attach more button
+    var moreBtn = el("button","btn btn-sm",["Add File"]);
+    moreBtn.style.marginTop = "8px";
+    moreBtn.onclick = function(){ attachToExistingTask(t.id); };
+    attSec.appendChild(moreBtn);
+    parent.appendChild(attSec);
+  }
 
   // ── Plan section (collapsible) ──
   if(t.has_plan){
@@ -2392,6 +2448,8 @@ function openAddTask(proj){
   document.getElementById("add-priority").value = "med";
   document.getElementById("tmpl-name").value = "";
   editingTemplateId = 0;
+  taskModalAttachments = [];
+  renderTaskAttachPreview();
   document.getElementById("tmpl-select").onchange = onTemplateSelect;
   loadTemplates();
   updateTemplateSaveBtn();
@@ -2424,11 +2482,68 @@ function submitAddTask(){
   }
   var addBtn = document.querySelector("#modal-add .btn-primary");
   var restore = btnLoading(addBtn, "ADDING\u2026");
-  api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri, assignee:assignee}, function(d){
+  var attIds = taskModalAttachments.map(function(a){ return a.id; });
+  api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri, assignee:assignee, attachments:attIds.length?attIds:undefined}, function(d){
+    taskModalAttachments = [];
     if(restore) restore();
     closeModal("modal-add");
     if(d.id){ selectedTaskID = d.id; toast("Task #"+d.id+" created", "success"); }
   });
+}
+
+function taskAttachFile(){
+  var inp = document.createElement("input");
+  inp.type = "file"; inp.multiple = true;
+  inp.onchange = function(){
+    for(var i=0;i<this.files.length;i++) taskUploadAttachment(this.files[i]);
+  };
+  inp.click();
+}
+
+function taskUploadAttachment(file){
+  var fd = new FormData(); fd.append("file", file);
+  fetch("/api/upload",{method:"POST",body:fd})
+  .then(function(r){ return r.json(); })
+  .then(function(att){
+    taskModalAttachments.push(att);
+    renderTaskAttachPreview();
+    toast("Attached: " + att.orig_name, "success");
+  }).catch(function(){ toast("Upload failed","error"); });
+}
+
+function renderTaskAttachPreview(){
+  var area = document.getElementById("task-attach-preview");
+  if(!area) return;
+  area.innerHTML = "";
+  taskModalAttachments.forEach(function(att, idx){
+    var chip = document.createElement("div");
+    chip.className = "task-att-chip";
+    chip.innerHTML = '<span>' + escHtml(att.orig_name) + '</span><button class="remove-att" onclick="taskModalAttachments.splice('+idx+',1);renderTaskAttachPreview()">\u00d7</button>';
+    area.appendChild(chip);
+  });
+}
+
+function attachToExistingTask(taskId){
+  var inp = document.createElement("input");
+  inp.type = "file"; inp.multiple = true;
+  inp.onchange = function(){
+    for(var i=0;i<this.files.length;i++){
+      (function(f){
+        var fd = new FormData(); fd.append("file", f);
+        fetch("/api/upload",{method:"POST",body:fd})
+        .then(function(r){ return r.json(); })
+        .then(function(att){
+          return fetch("/api/tasks/attach",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({id:taskId, upload_id:att.id})
+          });
+        }).then(function(){ toast("File attached to #"+taskId,"success"); })
+        .catch(function(){ toast("Attach failed","error"); });
+      })(this.files[i]);
+    }
+  };
+  inp.click();
 }
 
 /* ── Modals ── */
@@ -2763,6 +2878,7 @@ function renderChat(container){
           userBubble.appendChild(document.createTextNode(" "));
         }
         userBubble.appendChild(document.createTextNode(m.isSystem ? m.content.replace(/^\/system /,"") : m.content));
+        renderAttachmentPreviews(userBubble, m.attachment_meta);
         msgArea.appendChild(userBubble);
       } else {
         var bwrap = el("div","chat-bubble-wrap");
@@ -2860,6 +2976,37 @@ function renderChat(container){
   };
   inputBar.appendChild(sysToggle);
 
+  // Attach file button
+  var attachBtn = el("button","chat-attach-btn");
+  attachBtn.title = "Attach file";
+  attachBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>';
+  attachBtn.onclick = function(){
+    var inp = document.createElement("input");
+    inp.type = "file"; inp.multiple = true;
+    inp.onchange = function(){ for(var i=0;i<this.files.length;i++) chatUploadFile(this.files[i]); };
+    inp.click();
+  };
+  inputBar.appendChild(attachBtn);
+
+  // Voice record button
+  var voiceBtn = el("button","chat-voice-btn" + (chatRecording ? " recording" : ""));
+  voiceBtn.title = chatRecording ? "Stop recording" : "Record voice note";
+  voiceBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+  voiceBtn.onclick = chatToggleRecording;
+  inputBar.appendChild(voiceBtn);
+
+  // Attachment preview strip
+  if(chatPendingAttachments.length > 0){
+    var strip = el("div","chat-attach-strip");
+    chatPendingAttachments.forEach(function(att,idx){
+      var chip = el("div","chat-attach-chip");
+      chip.innerHTML = '<span>' + escHtml(att.orig_name) + '</span><button class="remove-att" data-idx="'+idx+'">\u00d7</button>';
+      chip.querySelector(".remove-att").onclick = function(){ chatPendingAttachments.splice(idx,1); chatCounter++; render(); };
+      strip.appendChild(chip);
+    });
+    inputBar.appendChild(strip);
+  }
+
   var textarea = el("textarea","chat-input");
   textarea.id = "chat-textarea";
   textarea.rows = 2;
@@ -2911,7 +3058,10 @@ function sendChatMessage(){
   chatLoading = true;
   chatToolCalls = [];
   chatTurnStartMs = Date.now();
-  chatMessages.push({role:"user", content:msg, project:chatProject, isSystem:isSystem});
+  var sendAtts = chatPendingAttachments.map(function(a){ return a.id; });
+  var sendAttMeta = chatPendingAttachments.slice();
+  chatPendingAttachments = [];
+  chatMessages.push({role:"user", content:msg, project:chatProject, isSystem:isSystem, attachment_meta:sendAttMeta});
   chatMessages.push({role:"assistant", content:"", project:chatProject, isSystem:isSystem});
   chatCounter++;
   render();
@@ -2920,7 +3070,7 @@ function sendChatMessage(){
   fetch("/api/chat/send",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({message:msg, project:chatProject})
+    body:JSON.stringify({message:msg, project:chatProject, attachments:sendAtts.length?sendAtts:undefined})
   }).then(function(res){
     if(!res.ok && !res.headers.get("content-type")?.startsWith("text/event-stream")){
       chatMessages[chatMessages.length-1].content = "Error: server returned " + res.status;
@@ -3135,6 +3285,74 @@ function sendChatMessage(){
     chatCounter++;
     render();
   });
+}
+
+function chatUploadFile(file){
+  var fd = new FormData();
+  fd.append("file", file);
+  toast("Uploading " + file.name + "...", "info");
+  fetch("/api/upload",{method:"POST",body:fd})
+  .then(function(r){ return r.json(); })
+  .then(function(att){
+    chatPendingAttachments.push(att);
+    chatCounter++; render();
+    toast("Attached: " + att.orig_name, "success");
+  }).catch(function(){ toast("Upload failed: " + file.name, "error"); });
+}
+
+function chatToggleRecording(){
+  if(!chatRecording){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      toast("Microphone not available","error"); return;
+    }
+    navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+      chatMediaRecorder = new MediaRecorder(stream);
+      chatAudioChunks = [];
+      chatMediaRecorder.ondataavailable = function(e){ chatAudioChunks.push(e.data); };
+      chatMediaRecorder.onstop = function(){
+        var blob = new Blob(chatAudioChunks, {type:"audio/webm"});
+        var file = new File([blob], "voice-note.webm", {type:"audio/webm"});
+        stream.getTracks().forEach(function(t){ t.stop(); });
+        chatUploadFile(file);
+      };
+      chatMediaRecorder.start();
+      chatRecording = true;
+      chatCounter++; render();
+    }).catch(function(){ toast("Microphone not available","error"); });
+  } else {
+    if(chatMediaRecorder) chatMediaRecorder.stop();
+    chatRecording = false;
+    chatCounter++; render();
+  }
+}
+
+function renderAttachmentPreviews(parent, metas){
+  if(!metas || !metas.length) return;
+  var row = el("div","chat-message-attachments");
+  metas.forEach(function(att){
+    if(att.mime_type && att.mime_type.indexOf("image/") === 0){
+      var img = document.createElement("img");
+      img.className = "chat-att-image";
+      img.src = "/api/uploads/" + att.id;
+      img.alt = att.orig_name;
+      img.onclick = function(){ window.open(img.src, "_blank"); };
+      row.appendChild(img);
+    } else if(att.mime_type && att.mime_type.indexOf("audio/") === 0){
+      var audio = document.createElement("audio");
+      audio.className = "chat-att-audio";
+      audio.controls = true;
+      audio.src = "/api/uploads/" + att.id;
+      row.appendChild(audio);
+    } else {
+      var a = document.createElement("a");
+      a.className = "chat-att-link";
+      a.href = "/api/uploads/" + att.id;
+      a.target = "_blank";
+      a.textContent = att.orig_name || att.id;
+      row.appendChild(a);
+    }
+  });
+  parent.appendChild(row);
 }
 
 /* ── Canvas View ── */

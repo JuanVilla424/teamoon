@@ -33,6 +33,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/projects"
 	"github.com/JuanVilla424/teamoon/internal/queue"
 	"github.com/JuanVilla424/teamoon/internal/templates"
+	"github.com/JuanVilla424/teamoon/internal/uploads"
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -128,10 +129,11 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Project     string `json:"project"`
-		Description string `json:"description"`
-		Priority    string `json:"priority"`
-		Assignee    string `json:"assignee"`
+		Project     string   `json:"project"`
+		Description string   `json:"description"`
+		Priority    string   `json:"priority"`
+		Assignee    string   `json:"assignee"`
+		Attachments []string `json:"attachments,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -141,6 +143,9 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	for _, uid := range req.Attachments {
+		queue.AttachToTask(t.ID, uid)
 	}
 	if req.Assignee != "" {
 		queue.UpdateAssignee(t.ID, req.Assignee)
@@ -409,7 +414,12 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 			Agent:   e.Agent,
 		}
 	}
-	writeJSON(w, map[string]any{"task_id": id, "logs": logJSON})
+	task, _ := queue.GetTask(id)
+	var attMeta []uploads.Attachment
+	if len(task.Attachments) > 0 {
+		attMeta = uploads.ResolveIDs(task.Attachments)
+	}
+	writeJSON(w, map[string]any{"task_id": id, "logs": logJSON, "attachments": attMeta})
 }
 
 func (s *Server) handleProjectPRs(w http.ResponseWriter, r *http.Request) {
@@ -923,7 +933,18 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"messages": msgs})
+	type enrichedMsg struct {
+		chat.Message
+		AttachmentMeta []uploads.Attachment `json:"attachment_meta,omitempty"`
+	}
+	enriched := make([]enrichedMsg, len(msgs))
+	for i, m := range msgs {
+		enriched[i] = enrichedMsg{Message: m}
+		if len(m.Attachments) > 0 {
+			enriched[i].AttachmentMeta = uploads.ResolveIDs(m.Attachments)
+		}
+	}
+	writeJSON(w, map[string]any{"messages": enriched})
 }
 
 func (s *Server) handleChatClear(w http.ResponseWriter, r *http.Request) {
@@ -948,8 +969,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Message string `json:"message"`
-		Project string `json:"project"`
+		Message     string   `json:"message"`
+		Project     string   `json:"project"`
+		Attachments []string `json:"attachments,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -971,10 +993,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 
 	// Save user message
 	chat.AppendMessage(chat.Message{
-		Role:      "user",
-		Content:   func() string { if isSystemMode { return "/system " + req.Message }; return req.Message }(),
-		Project:   chatProject,
-		Timestamp: time.Now(),
+		Role:        "user",
+		Content:     func() string { if isSystemMode { return "/system " + req.Message }; return req.Message }(),
+		Project:     chatProject,
+		Timestamp:   time.Now(),
+		Attachments: req.Attachments,
 	})
 
 	// Build prompt with recent context
@@ -1091,6 +1114,28 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 	promptBuf.WriteString(req.Message)
 	} // end else (non-system mode)
+
+	// Inject attachment context into prompt
+	if len(req.Attachments) > 0 {
+		promptBuf.WriteString("\n\n## Attached Files\n")
+		for _, uid := range req.Attachments {
+			att, err := uploads.GetByID(uid)
+			if err != nil {
+				continue
+			}
+			if uploads.IsTextMIME(att.MIMEType) {
+				data, err := os.ReadFile(uploads.AbsPath(att))
+				if err != nil {
+					continue
+				}
+				promptBuf.WriteString(fmt.Sprintf("\n### %s\n```\n%s\n```\n", att.OrigName, string(data)))
+			} else if strings.HasPrefix(att.MIMEType, "image/") {
+				promptBuf.WriteString(fmt.Sprintf("\n### %s (image)\nPath: %s\n", att.OrigName, uploads.AbsPath(att)))
+			} else {
+				promptBuf.WriteString(fmt.Sprintf("\n### %s (%s, %d bytes)\n", att.OrigName, att.MIMEType, att.Size))
+			}
+		}
+	}
 
 	// Spawn claude with stream-json
 	home2, _ := os.UserHomeDir()
@@ -2602,4 +2647,82 @@ func (s *Server) handleJobRun(w http.ResponseWriter, r *http.Request) {
 	}()
 	s.refreshAndBroadcast()
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// ── Upload handlers ──
+
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, uploads.MaxUploadSize+1024)
+	if err := r.ParseMultipartForm(uploads.MaxUploadSize); err != nil {
+		writeErr(w, 400, "file too large or bad request")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, 400, "file required")
+		return
+	}
+	defer file.Close()
+
+	mimeType := header.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	att, err := uploads.Save(file, header.Filename, mimeType, header.Size)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, att)
+}
+
+func (s *Server) handleUploadServe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/api/uploads/")
+	id := strings.SplitN(name, ".", 2)[0]
+	if id == "" {
+		writeErr(w, 400, "id required")
+		return
+	}
+	att, err := uploads.GetByID(id)
+	if err != nil {
+		writeErr(w, 404, "not found")
+		return
+	}
+	w.Header().Set("Content-Type", att.MIMEType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, att.OrigName))
+	http.ServeFile(w, r, uploads.AbsPath(att))
+}
+
+func (s *Server) handleTaskAttach(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		ID       int    `json:"id"`
+		UploadID string `json:"upload_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if _, err := uploads.GetByID(req.UploadID); err != nil {
+		writeErr(w, 404, "attachment not found")
+		return
+	}
+	if err := queue.AttachToTask(req.ID, req.UploadID); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]bool{"ok": true})
 }
