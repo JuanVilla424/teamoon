@@ -395,6 +395,34 @@ func ListAutopilotPending(project string) ([]Task, error) {
 	return result, nil
 }
 
+// ListAutopilotSystemPending returns system-assignee tasks with autopilot enabled.
+func ListAutopilotSystemPending() ([]Task, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []Task
+	for _, t := range store.Tasks {
+		if t.Assignee != "system" || !t.AutoPilot {
+			continue
+		}
+		s := EffectiveState(t)
+		if s == StatePending || s == StatePlanned {
+			result = append(result, t)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+
+	return result, nil
+}
+
 func priorityRank(p string) int {
 	switch p {
 	case "high":

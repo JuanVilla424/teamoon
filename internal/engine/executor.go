@@ -275,6 +275,9 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 }
 
 func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string, cfg config.Config) string {
+	if task.Assignee == "system" {
+		return buildSystemStepPrompt(task, p, step, retry, recoveryCtx, prevSteps, cfg)
+	}
 	projectPath := filepath.Join(cfg.ProjectsDir, task.Project)
 
 	var sb strings.Builder
@@ -367,6 +370,44 @@ func buildRecoveryPrompt(task queue.Task, step plan.Step, output string, exitCod
 	)
 }
 
+func buildSystemStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string, cfg config.Config) string {
+	home, _ := os.UserHomeDir()
+	var sb strings.Builder
+	if step.Agent != "" {
+		sb.WriteString(fmt.Sprintf("You are the %s agent executing system step %d of %d.\n\n", step.Agent, step.Number, len(p.Steps)))
+	} else {
+		sb.WriteString(fmt.Sprintf("You are executing system step %d of %d.\n\n", step.Number, len(p.Steps)))
+	}
+	sb.WriteString(fmt.Sprintf("Task: %s\n", task.Description))
+	sb.WriteString(fmt.Sprintf("Working directory: %s\n", home))
+	sb.WriteString(fmt.Sprintf("Projects root: %s\n\n", cfg.ProjectsDir))
+	if cfg.SudoEnabled {
+		sb.WriteString("## Sudo\nSudo is ENABLED. You may use sudo for operations requiring elevated privileges.\n\n")
+	} else {
+		sb.WriteString("## Sudo\nSudo is DISABLED. Avoid commands requiring sudo.\n\n")
+	}
+	if prevSteps != "" {
+		sb.WriteString("Previous steps completed:\n" + prevSteps + "\n\n")
+	}
+	sb.WriteString(fmt.Sprintf("Step %d: %s\n", step.Number, step.Title))
+	sb.WriteString(step.Body + "\n")
+	if step.Verify != "" {
+		sb.WriteString(fmt.Sprintf("\nVerify when done: %s\n", step.Verify))
+	}
+	if retry > 0 && recoveryCtx != "" {
+		sb.WriteString(fmt.Sprintf("\nPrevious attempt context:\n%s\n", recoveryCtx))
+	}
+	sb.WriteString("\nRULES:")
+	sb.WriteString("\n1. You are performing SYSTEM ADMINISTRATION, not software development.")
+	sb.WriteString("\n2. Be surgical — only change what the task requires.")
+	sb.WriteString("\n3. Verify your changes after making them.")
+	sb.WriteString("\n4. Security hooks remain active and block destructive operations.")
+	sb.WriteString("\n5. Do NOT create documentation files, commit code, or run autopilot workflows.")
+	sb.WriteString("\n6. NEVER invoke /bmad slash commands or EnterPlanMode.")
+	sb.WriteString("\n7. Be concise. Do not narrate. Just do the work.")
+	return sb.String()
+}
+
 func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg), taskID int, addDirs []string, agent string, cfg config.Config) (spawnResult, error) {
 	projectPath := filepath.Join(cfg.ProjectsDir, project)
 
@@ -386,6 +427,9 @@ func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg)
 	}
 
 	env := filterEnv(os.Environ(), "CLAUDECODE")
+	if cfg.SudoEnabled {
+		env = append(env, "TEAMOON_SUDO_ENABLED=true")
+	}
 
 	// Satirical git identity for autopilot commits
 	gitName := GenerateName()

@@ -87,6 +87,7 @@ type Config struct {
 	SourceDir          string                         `json:"source_dir,omitempty"`
 	Debug              bool                           `json:"debug,omitempty"`
 	LogRetentionDays   int                            `json:"log_retention_days"`
+	SudoEnabled        bool                           `json:"sudo_enabled,omitempty"`
 }
 
 func DefaultConfig() Config {
