@@ -94,3 +94,52 @@ func RecentContext(n int) []Message {
 	}
 	return msgs
 }
+
+func LoadHistoryForProject(project string) ([]Message, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	store, err := load()
+	if err != nil {
+		return nil, err
+	}
+	var filtered []Message
+	for _, m := range store.Messages {
+		if m.Project == project {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered, nil
+}
+
+func ClearHistoryForProject(project string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	store, err := load()
+	if err != nil {
+		return err
+	}
+	var kept []Message
+	for _, m := range store.Messages {
+		if m.Project != project {
+			kept = append(kept, m)
+		}
+	}
+	store.Messages = kept
+	return save(store)
+}
+
+func RecentContextForProject(n int, project string) []Message {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	store, _ := load()
+	var filtered []Message
+	for _, m := range store.Messages {
+		if m.Project == project {
+			filtered = append(filtered, m)
+		}
+	}
+	if len(filtered) > n {
+		filtered = filtered[len(filtered)-n:]
+	}
+	return filtered
+}

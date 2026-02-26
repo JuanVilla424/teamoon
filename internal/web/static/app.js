@@ -140,6 +140,9 @@ var logFilterLevel = "";
 var logFilterTask = "";
 var logFilterProject = "";
 var logFilterAgent = "";
+var logFilterDateFrom = "";
+var logFilterDateTo = "";
+var logFilterDatePreset = "";
 var prevView = "";
 var isDataUpdate = false;
 var taskLogAutoScroll = true;
@@ -163,6 +166,7 @@ var configEditing = null;
 var cfgEditingTemplate = null;
 var templatesLoading = false;
 var chatProject = "";
+var chatSystemMode = false;
 var chatCounter = 0;
 var chatCreatedTasks = [];
 var chatToolCalls = [];
@@ -330,8 +334,11 @@ function svgIcon(str){
 
 /* ── SSE ── */
 var pollTimer = null;
+var currentSSE = null;
 function connectSSE(){
+  if(currentSSE){ try{ currentSSE.close(); }catch(e){} }
   var es = new EventSource("/api/sse");
+  currentSSE = es;
   es.onmessage = function(ev){
     try{
       var parsed = JSON.parse(ev.data);
@@ -584,7 +591,7 @@ function computeContentKey(v){
       }
       return "p:" + selectedProjectName + ":" + pk;
     case "logs":
-      return "l:" + logFilterLevel + ":" + logFilterTask + ":" + logFilterProject + ":" + logs.length;
+      return "l:" + logFilterLevel + ":" + logFilterTask + ":" + logFilterProject + ":" + logFilterDateFrom + ":" + logFilterDateTo + ":" + logs.length;
     case "chat":
       return "chat:" + chatCounter;
     case "canvas":
@@ -666,6 +673,14 @@ function render(){
       if(logFilterLevel && l.level !== logFilterLevel) return false;
       if(logFilterTask && String(l.task_id) !== logFilterTask) return false;
       if(logFilterProject && l.project !== logFilterProject) return false;
+      if(logFilterDateFrom){
+        var ld = new Date(l.time); ld.setHours(0,0,0,0);
+        if(ld < new Date(logFilterDateFrom + "T00:00:00")) return false;
+      }
+      if(logFilterDateTo){
+        var ld2 = new Date(l.time); ld2.setHours(0,0,0,0);
+        if(ld2 > new Date(logFilterDateTo + "T00:00:00")) return false;
+      }
       return true;
     });
     if(filtered.length > prevLogCount){
@@ -865,6 +880,12 @@ function updateTopbar(){
   var newMdl = parts.join(" \u00b7 ");
   if(mdl.textContent !== newMdl) mdl.textContent = newMdl;
 
+  var upEl = document.getElementById("sb-uptime");
+  if(upEl && D.uptime_sec > 0){
+    var upText = fmtUptime(D.uptime_sec);
+    if(upEl.textContent !== upText) upEl.textContent = upText;
+  }
+
   var ctx = D.session || {};
   var ctxPct = ctx.context_percent || 0;
   var ctxEl = document.getElementById("topbar-ctx");
@@ -1055,6 +1076,9 @@ function renderDashboard(root){
       var lvlSpan = span("feed-level");
       lvlSpan.appendChild(levelIconEl(le.level));
       item.appendChild(lvlSpan);
+      if(le.agent && agentMap[le.agent]){
+        item.appendChild(agentBadge(le.agent));
+      }
       var msg = span("feed-msg");
       if(le.project){
         var ps = span("", le.project);
@@ -1751,6 +1775,7 @@ function mkPdRow(label, value){
 function renderLogs(root){
   var logs = D.log_entries || [];
 
+  // Header
   var header = div("view-header");
   header.appendChild(span("view-title", "Autopilot Logs"));
   var autoLabel = el("label");
@@ -1764,17 +1789,35 @@ function renderLogs(root){
   header.appendChild(autoLabel);
   root.appendChild(header);
 
+  // Stats bar — clickable level pills
+  var statsBar = div("log-stats");
+  var levelCounts = {info:0, success:0, warn:0, error:0};
+  for(var i=0;i<logs.length;i++) if(levelCounts[logs[i].level] !== undefined) levelCounts[logs[i].level]++;
+  var levelMeta = [
+    {key:"info", label:"Info", color:"var(--accent)"},
+    {key:"success", label:"Success", color:"var(--success)"},
+    {key:"warn", label:"Warn", color:"var(--warning)"},
+    {key:"error", label:"Error", color:"var(--danger)"}
+  ];
+  for(var i=0;i<levelMeta.length;i++){
+    var lm = levelMeta[i];
+    var pill = el("button", "log-stat-pill" + (logFilterLevel===lm.key ? " active" : ""));
+    pill.style.cssText = "--pill-color:"+lm.color;
+    pill.setAttribute("aria-label", "Filter by " + lm.label);
+    pill.textContent = lm.label + " " + levelCounts[lm.key];
+    pill.onclick = (function(k){ return function(){
+      logFilterLevel = logFilterLevel===k ? "" : k;
+      render();
+    };})(lm.key);
+    statsBar.appendChild(pill);
+  }
+  root.appendChild(statsBar);
+
+  // Filter toolbar — structured with separators
   var toolbar = div("log-toolbar");
+  var toolbarRow = div("log-toolbar-row");
 
-  var levelSel = el("select", "filter-select");
-  levelSel.appendChild(mkOption("", "All Levels"));
-  levelSel.appendChild(mkOption("info", "Info", logFilterLevel==="info"));
-  levelSel.appendChild(mkOption("success", "Success", logFilterLevel==="success"));
-  levelSel.appendChild(mkOption("warn", "Warning", logFilterLevel==="warn"));
-  levelSel.appendChild(mkOption("error", "Error", logFilterLevel==="error"));
-  levelSel.onchange = function(){ logFilterLevel = this.value; render(); };
-  toolbar.appendChild(levelSel);
-
+  // Group 1: Entity filters
   var taskSet = {};
   var projSet = {};
   for(var i=0;i<logs.length;i++){
@@ -1782,24 +1825,27 @@ function renderLogs(root){
     if(logs[i].project) projSet[logs[i].project] = true;
   }
   var taskSel = el("select", "filter-select");
+  taskSel.setAttribute("aria-label", "Filter by task");
   taskSel.appendChild(mkOption("", "All Tasks"));
   var tids = Object.keys(taskSet).sort(function(a,b){return a-b;});
   for(var i=0;i<tids.length;i++){
     taskSel.appendChild(mkOption(tids[i], "#"+tids[i], logFilterTask===tids[i]));
   }
   taskSel.onchange = function(){ logFilterTask = this.value; render(); };
-  toolbar.appendChild(taskSel);
+  toolbarRow.appendChild(taskSel);
 
   var projSel = el("select", "filter-select");
+  projSel.setAttribute("aria-label", "Filter by project");
   projSel.appendChild(mkOption("", "All Projects"));
   var pnames = Object.keys(projSet).sort();
   for(var i=0;i<pnames.length;i++){
     projSel.appendChild(mkOption(pnames[i], pnames[i], logFilterProject===pnames[i]));
   }
   projSel.onchange = function(){ logFilterProject = this.value; render(); };
-  toolbar.appendChild(projSel);
+  toolbarRow.appendChild(projSel);
 
   var agentSel = el("select", "filter-select");
+  agentSel.setAttribute("aria-label", "Filter by agent");
   agentSel.appendChild(mkOption("", "All Agents"));
   var agentIds = Object.keys(agentMap).sort();
   for(var ai=0;ai<agentIds.length;ai++){
@@ -1807,17 +1853,84 @@ function renderLogs(root){
     agentSel.appendChild(mkOption(aKey, agentMap[aKey].icon + " " + agentMap[aKey].name, logFilterAgent===aKey));
   }
   agentSel.onchange = function(){ logFilterAgent = this.value; render(); };
-  toolbar.appendChild(agentSel);
+  toolbarRow.appendChild(agentSel);
 
+  // Separator
+  toolbarRow.appendChild(div("log-toolbar-sep"));
+
+  // Group 2: Date filters
+  var dateSel = el("select", "filter-select");
+  dateSel.setAttribute("aria-label", "Filter by date range");
+  dateSel.appendChild(mkOption("", "All Time"));
+  dateSel.appendChild(mkOption("today", "Today", logFilterDatePreset==="today"));
+  dateSel.appendChild(mkOption("yesterday", "Yesterday", logFilterDatePreset==="yesterday"));
+  dateSel.appendChild(mkOption("7d", "Last 7 days", logFilterDatePreset==="7d"));
+  dateSel.appendChild(mkOption("30d", "Last 30 days", logFilterDatePreset==="30d"));
+  dateSel.appendChild(mkOption("custom", "Custom", logFilterDatePreset==="custom"));
+  dateSel.onchange = function(){ applyDatePreset(this.value); render(); };
+  toolbarRow.appendChild(dateSel);
+
+  var dateFrom = el("input", "filter-input");
+  dateFrom.type = "date";
+  dateFrom.value = logFilterDateFrom;
+  dateFrom.title = "From date";
+  dateFrom.setAttribute("aria-label", "From date");
+  dateFrom.onchange = function(){ logFilterDateFrom = this.value; logFilterDatePreset = "custom"; render(); };
+  toolbarRow.appendChild(dateFrom);
+
+  var dateTo = el("input", "filter-input");
+  dateTo.type = "date";
+  dateTo.value = logFilterDateTo;
+  dateTo.title = "To date";
+  dateTo.setAttribute("aria-label", "To date");
+  dateTo.onchange = function(){ logFilterDateTo = this.value; logFilterDatePreset = "custom"; render(); };
+  toolbarRow.appendChild(dateTo);
+
+  // Separator
+  toolbarRow.appendChild(div("log-toolbar-sep"));
+
+  // Group 3: Clear + Count
+  var hasFilters = logFilterLevel || logFilterTask || logFilterProject || logFilterAgent || logFilterDateFrom || logFilterDateTo;
+  if(hasFilters){
+    var clearBtn = el("button", "btn btn-sm log-clear-btn");
+    clearBtn.textContent = "Clear";
+    clearBtn.setAttribute("aria-label", "Clear all filters");
+    clearBtn.onclick = function(){
+      logFilterLevel = ""; logFilterTask = ""; logFilterProject = "";
+      logFilterAgent = ""; logFilterDateFrom = ""; logFilterDateTo = "";
+      logFilterDatePreset = "";
+      render();
+    };
+    toolbarRow.appendChild(clearBtn);
+  }
+
+  toolbar.appendChild(toolbarRow);
   root.appendChild(toolbar);
 
+  // Filter entries
   var filtered = logs.filter(function(l){
     if(logFilterLevel && l.level !== logFilterLevel) return false;
     if(logFilterTask && String(l.task_id) !== logFilterTask) return false;
     if(logFilterProject && l.project !== logFilterProject) return false;
     if(logFilterAgent && l.agent !== logFilterAgent) return false;
+    if(logFilterDateFrom){
+      var ld = new Date(l.time); ld.setHours(0,0,0,0);
+      if(ld < new Date(logFilterDateFrom + "T00:00:00")) return false;
+    }
+    if(logFilterDateTo){
+      var ld2 = new Date(l.time); ld2.setHours(0,0,0,0);
+      if(ld2 > new Date(logFilterDateTo + "T00:00:00")) return false;
+    }
     return true;
   });
+
+  // Count badge — after filtering
+  var countBadge = span("log-count");
+  countBadge.textContent = hasFilters ? (filtered.length + " of " + logs.length + " entries") : (logs.length + " entries");
+  toolbarRow.appendChild(countBadge);
+
+  // Smart time: show date when range > 1 day
+  var showFullDate = !logFilterDateFrom || !logFilterDateTo || logFilterDateFrom !== logFilterDateTo;
 
   var container = div("log-container");
   container.id = "log-container";
@@ -1827,7 +1940,7 @@ function renderLogs(root){
     for(var i=0;i<filtered.length;i++){
       var l = filtered[i];
       var entry = div("log-entry " + l.level);
-      entry.appendChild(span("log-time", fmtTime(l.time)));
+      entry.appendChild(span("log-time" + (showFullDate ? " log-time-full" : ""), showFullDate ? fmtShortDate(l.time) : fmtTime(l.time)));
       var icon = span("log-icon");
       icon.appendChild(levelIconEl(l.level));
       entry.appendChild(icon);
@@ -2174,6 +2287,7 @@ function submitAddTask(){
   var proj = document.getElementById("add-project").value;
   var desc = document.getElementById("add-desc").value.trim();
   var pri = document.getElementById("add-priority").value;
+  var assignee = document.getElementById("add-assignee").value;
   if(!desc){ document.getElementById("add-desc").focus(); return; }
   var suffix = taskSuffix(proj);
   if(suffix && desc.indexOf("party-mode") === -1){
@@ -2181,7 +2295,7 @@ function submitAddTask(){
   }
   var addBtn = document.querySelector("#modal-add .btn-primary");
   var restore = btnLoading(addBtn, "ADDING\u2026");
-  api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri}, function(d){
+  api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri, assignee:assignee}, function(d){
     if(restore) restore();
     closeModal("modal-add");
     if(d.id){ selectedTaskID = d.id; toast("Task #"+d.id+" created", "success"); }
@@ -2261,6 +2375,16 @@ function fmtNum(n){
 }
 function fmtCost(n){ return n.toFixed(2); }
 
+function fmtUptime(sec){
+  if(!sec || sec < 0) return "0s";
+  var d = Math.floor(sec / 86400);
+  var h = Math.floor((sec % 86400) / 3600);
+  var m = Math.floor((sec % 3600) / 60);
+  if(d > 0) return d + "d " + h + "h " + m + "m";
+  if(h > 0) return h + "h " + m + "m";
+  return m + "m " + (sec % 60) + "s";
+}
+
 function fmtTime(ts){
   if(!ts) return "";
   var d = new Date(ts);
@@ -2273,6 +2397,43 @@ function fmtDate(ts){
   if(!ts) return "\u2014";
   var d = new Date(ts);
   return d.toLocaleDateString()+" "+fmtTime(ts);
+}
+
+function dateStr(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function fmtShortDate(ts){
+  if(!ts) return "";
+  var d = new Date(ts);
+  var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return months[d.getMonth()]+" "+d.getDate()+" "+String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");
+}
+function applyDatePreset(preset){
+  logFilterDatePreset = preset;
+  var today = new Date(); today.setHours(0,0,0,0);
+  switch(preset){
+    case "today":
+      logFilterDateFrom = dateStr(today);
+      logFilterDateTo = dateStr(today);
+      break;
+    case "yesterday":
+      var y = new Date(today); y.setDate(y.getDate()-1);
+      logFilterDateFrom = dateStr(y);
+      logFilterDateTo = dateStr(y);
+      break;
+    case "7d":
+      var w = new Date(today); w.setDate(w.getDate()-6);
+      logFilterDateFrom = dateStr(w);
+      logFilterDateTo = dateStr(today);
+      break;
+    case "30d":
+      var m = new Date(today); m.setDate(m.getDate()-29);
+      logFilterDateFrom = dateStr(m);
+      logFilterDateTo = dateStr(today);
+      break;
+    default:
+      logFilterDateFrom = "";
+      logFilterDateTo = "";
+      break;
+  }
 }
 
 function fmtRelDate(ts){
@@ -2401,13 +2562,13 @@ function renderChat(container){
       projSel.appendChild(o);
     }
   }
-  projSel.onchange = function(){ chatProject = this.value; };
+  projSel.onchange = function(){ chatProject = this.value; chatMessages = []; chatCounter++; render(); };
   topBar.appendChild(projSel);
 
   var clearBtn = el("button","btn btn-sm btn-danger");
   clearBtn.textContent = "Clear";
   clearBtn.onclick = function(){
-    api("POST","/api/chat/clear",{},function(){
+    api("POST","/api/chat/clear",{project:chatProject},function(){
       chatMessages = [];
       chatInitSteps = [];
       chatToolCalls = [];
@@ -2464,15 +2625,21 @@ function renderChat(container){
   } else {
     for(var i=0;i<chatMessages.length;i++){
       var m = chatMessages[i];
+      if(m.project !== undefined && m.project !== chatProject) continue;
       if(m.role === "user"){
-        var userBubble = el("div","chat-bubble user");
-        userBubble.textContent = m.content;
+        var userBubble = el("div","chat-bubble user" + (m.isSystem ? " chat-bubble-system" : ""));
+        if(m.isSystem){
+          var sysBadge = el("span","chat-system-badge",["SYSTEM"]);
+          userBubble.appendChild(sysBadge);
+          userBubble.appendChild(document.createTextNode(" "));
+        }
+        userBubble.appendChild(document.createTextNode(m.isSystem ? m.content.replace(/^\/system /,"") : m.content));
         msgArea.appendChild(userBubble);
       } else {
         var bwrap = el("div","chat-bubble-wrap");
         bwrap.style.alignSelf = "flex-start";
         bwrap.style.maxWidth = "95%";
-        var aBubble = el("div","chat-bubble assistant");
+        var aBubble = el("div","chat-bubble assistant" + (m.isSystem ? " chat-bubble-system" : ""));
         aBubble.style.maxWidth = "100%";
 
         // Typing indicator for empty loading bubble
@@ -2537,10 +2704,37 @@ function renderChat(container){
 
   // Input bar
   var inputBar = el("div","chat-input-bar");
+
+  // System mode toggle
+  var sysToggle = el("button","chat-system-toggle" + (chatSystemMode ? " active" : ""));
+  sysToggle.title = "System mode — run system admin commands";
+  var sysIcon = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  sysIcon.setAttribute("width","16");
+  sysIcon.setAttribute("height","16");
+  sysIcon.setAttribute("viewBox","0 0 24 24");
+  sysIcon.setAttribute("fill","none");
+  sysIcon.setAttribute("stroke","currentColor");
+  sysIcon.setAttribute("stroke-width","2");
+  var r1 = document.createElementNS("http://www.w3.org/2000/svg","rect");
+  r1.setAttribute("x","2"); r1.setAttribute("y","3"); r1.setAttribute("width","20"); r1.setAttribute("height","14"); r1.setAttribute("rx","2");
+  var l1 = document.createElementNS("http://www.w3.org/2000/svg","line");
+  l1.setAttribute("x1","8"); l1.setAttribute("y1","21"); l1.setAttribute("x2","16"); l1.setAttribute("y2","21");
+  var l2 = document.createElementNS("http://www.w3.org/2000/svg","line");
+  l2.setAttribute("x1","12"); l2.setAttribute("y1","17"); l2.setAttribute("x2","12"); l2.setAttribute("y2","21");
+  sysIcon.appendChild(r1); sysIcon.appendChild(l1); sysIcon.appendChild(l2);
+  sysToggle.appendChild(sysIcon);
+  sysToggle.onclick = function(){
+    chatSystemMode = !chatSystemMode;
+    this.classList.toggle("active", chatSystemMode);
+    var ta = document.getElementById("chat-textarea");
+    if(ta) ta.placeholder = chatSystemMode ? "System command\u2026" : "Type a message\u2026";
+  };
+  inputBar.appendChild(sysToggle);
+
   var textarea = el("textarea","chat-input");
   textarea.id = "chat-textarea";
   textarea.rows = 2;
-  textarea.placeholder = "Type a message\u2026";
+  textarea.placeholder = chatSystemMode ? "System command\u2026" : "Type a message\u2026";
   textarea.onkeydown = function(e){
     if(e.key === "Enter" && !e.shiftKey){
       e.preventDefault();
@@ -2564,7 +2758,7 @@ function renderChat(container){
 
   // Load history on first render
   if(chatMessages.length === 0 && !chatLoading){
-    api("GET","/api/chat/history",null,function(d){
+    api("GET","/api/chat/history?project="+encodeURIComponent(chatProject),null,function(d){
       if(d && d.messages && d.messages.length > 0){
         chatMessages = d.messages;
         chatCounter++;
@@ -2580,11 +2774,16 @@ function sendChatMessage(){
   var msg = ta.value.trim();
   if(!msg || chatLoading) return;
 
+  // Auto-prepend /system if system mode is active and user didn't type it
+  if(chatSystemMode && msg.indexOf("/system ") !== 0){
+    msg = "/system " + msg;
+  }
+  var isSystem = msg.indexOf("/system ") === 0;
   chatLoading = true;
   chatToolCalls = [];
   chatTurnStartMs = Date.now();
-  chatMessages.push({role:"user", content:msg, project:chatProject});
-  chatMessages.push({role:"assistant", content:"", project:chatProject});
+  chatMessages.push({role:"user", content:msg, project:chatProject, isSystem:isSystem});
+  chatMessages.push({role:"assistant", content:"", project:chatProject, isSystem:isSystem});
   chatCounter++;
   render();
   ta.value = "";
@@ -2773,7 +2972,7 @@ function sendChatMessage(){
                         idSpan.textContent = "#" + ct.id;
                         metaSpan.appendChild(idSpan);
                         var assSpan = document.createElement("span");
-                        assSpan.className = "chat-task-card-assignee" + (ct.assignee === "agent" ? " assignee-agent" : "");
+                        assSpan.className = "chat-task-card-assignee" + (ct.assignee === "agent" ? " assignee-agent" : ct.assignee === "system" ? " assignee-system" : "");
                         assSpan.textContent = ct.assignee || "human";
                         metaSpan.appendChild(assSpan);
                         card.appendChild(metaSpan);
@@ -2824,7 +3023,7 @@ function renderCanvas(container){
 
   // Assignee filter
   var assigneeSel = el("select","filter-select");
-  var assigneeOpts = [["","All Assignees"],["agent","Agent"],["human","Human"],["review","Review"]];
+  var assigneeOpts = [["","All Assignees"],["agent","Agent"],["human","Human"],["review","Review"],["system","System"]];
   for(var i=0;i<assigneeOpts.length;i++){
     assigneeSel.appendChild(mkOption(assigneeOpts[i][0],assigneeOpts[i][1],canvasFilterAssignee===assigneeOpts[i][0]));
   }
@@ -2946,7 +3145,7 @@ function makeCanvasCard(t, colId){
   var labels = el("div","canvas-card-labels");
   if(t.project) labels.appendChild(span("canvas-label canvas-label-proj",t.project));
   if(t.assignee){
-    var asnText = {agent:"Agent",human:"Human",review:"Review"}[t.assignee] || t.assignee;
+    var asnText = {agent:"Agent",human:"Human",review:"Review",system:"System"}[t.assignee] || t.assignee;
     labels.appendChild(span("canvas-label canvas-label-"+t.assignee, asnText));
   }
   if(t.auto_pilot) labels.appendChild(span("canvas-label canvas-label-ap","AP"));
@@ -3122,6 +3321,19 @@ api("GET","/api/data", null, function(d){
   checkOnboarding();
 });
 connectSSE();
+document.addEventListener("visibilitychange", function(){
+  if(!document.hidden){
+    prevDataStr = "";
+    prevContentKey = "";
+    if(currentSSE){ try{ currentSSE.close(); }catch(e){} currentSSE = null; }
+    connectSSE();
+    api("GET","/api/data",null,function(d){
+      D = d;
+      isDataUpdate = true;
+      render();
+    });
+  }
+});
 
 /* Export for inline event handlers in index.html */
 window.closeModal = closeModal;
@@ -3690,7 +3902,7 @@ function renderConfig(root){
 
   // Sub-tab bar: Paths | Server | Budget | Autopilot
   var subTabs = div("config-subtabs");
-  [["Paths","paths"],["Server","server"],["Limits","limits"],["Autopilot","autopilot"]].forEach(function(pair){
+  [["Paths","paths"],["Server","server"],["Limits","limits"],["Autopilot","autopilot"],["Security","security"]].forEach(function(pair){
     var tb = el("button", "config-subtab-btn" + (configSubTab === pair[1] ? " active" : ""), [pair[0]]);
     tb.onclick = function(){ configSubTab = pair[1]; configEditing = null; render(); };
     subTabs.appendChild(tb);
@@ -3702,6 +3914,7 @@ function renderConfig(root){
     case "server": renderConfigServer(root); break;
     case "limits": renderConfigLimits(root); break;
     case "autopilot": renderConfigAutopilot(root); break;
+    case "security": renderConfigSecurity(root); break;
   }
 }
 
@@ -3887,6 +4100,63 @@ function renderConfigAutopilot(root){
   }
   skSec.appendChild(skList);
   root.appendChild(skSec);
+}
+
+function renderConfigSecurity(root){
+  var c = configData;
+
+  // ── System Executor Section ──
+  var sec = div("config-section");
+  var hdr = div("section-header");
+  hdr.appendChild(el("h3","config-section-title",["System Executor"]));
+  sec.appendChild(hdr);
+
+  var grid = div("config-grid");
+  var sudoRow = div("config-field");
+  var sudoLbl = el("label","config-label",["Sudo Enabled"]);
+  sudoRow.appendChild(sudoLbl);
+  var sudoToggle = el("label","toggle-switch");
+  var sudoCb = document.createElement("input");
+  sudoCb.type = "checkbox";
+  sudoCb.checked = !!c.sudo_enabled;
+  sudoCb.onchange = function(){
+    api("POST","/api/config/save",{sudo_enabled:sudoCb.checked},function(){
+      toast("Sudo " + (sudoCb.checked ? "enabled" : "disabled"), "success");
+      fetchConfig();
+    });
+  };
+  sudoToggle.appendChild(sudoCb);
+  sudoToggle.appendChild(el("span","toggle-slider"));
+  sudoRow.appendChild(sudoToggle);
+  var sudoDesc = el("div","config-field-desc",["Allow spawned Claude sessions to use sudo. Specific destructive operations (sudo rm, sudo chmod, sudo chown) remain blocked regardless."]);
+  sudoRow.appendChild(sudoDesc);
+  grid.appendChild(sudoRow);
+  sec.appendChild(grid);
+  root.appendChild(sec);
+
+  // ── Active Guardrails Section ──
+  var grSec = div("config-section");
+  var grHdr = div("section-header");
+  grHdr.appendChild(el("h3","config-section-title",["Active Guardrails"]));
+  grSec.appendChild(grHdr);
+
+  var guardrails = [
+    ["Git Safety", "Blocks force push, reset --hard, rebase, stash drop, blind staging, branch -D"],
+    ["Filesystem", "Blocks rm -rf /, chmod 777, destructive removals"],
+    ["Process Control", "Blocks kill -9, killall, systemctl stop/disable"],
+    ["Remote Execution", "Blocks piping curl/wget to shell or sudo"],
+    ["Cloud/SQL", "Blocks DROP TABLE, terraform destroy, aws s3 --delete, direct lambda updates"]
+  ];
+
+  var grList = el("div","config-guardrails-list");
+  guardrails.forEach(function(g){
+    var item = div("config-guardrail-item");
+    item.appendChild(el("span","guardrail-name",[g[0]]));
+    item.appendChild(el("span","guardrail-desc",[g[1]]));
+    grList.appendChild(item);
+  });
+  grSec.appendChild(grList);
+  root.appendChild(grSec);
 }
 
 function renderConfigMarketplace(root){

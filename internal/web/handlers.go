@@ -53,6 +53,7 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 		Project     string `json:"project"`
 		Description string `json:"description"`
 		Priority    string `json:"priority"`
+		Assignee    string `json:"assignee"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -62,6 +63,15 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if req.Assignee != "" {
+		queue.UpdateAssignee(t.ID, req.Assignee)
+		if req.Assignee == "agent" || req.Assignee == "system" {
+			queue.ToggleAutoPilot(t.ID)
+		}
+		if req.Assignee == "system" {
+			s.startSystemLoop()
+		}
 	}
 	s.refreshAndBroadcast()
 	writeJSON(w, t)
@@ -803,7 +813,8 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 405, "method not allowed")
 		return
 	}
-	msgs, err := chat.LoadHistory()
+	project := r.URL.Query().Get("project")
+	msgs, err := chat.LoadHistoryForProject(project)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -816,7 +827,11 @@ func (s *Server) handleChatClear(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 405, "method not allowed")
 		return
 	}
-	if err := chat.ClearHistory(); err != nil {
+	var clearReq struct {
+		Project string `json:"project"`
+	}
+	json.NewDecoder(r.Body).Decode(&clearReq)
+	if err := chat.ClearHistoryForProject(clearReq.Project); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -841,17 +856,50 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Detect /system prefix
+	isSystemMode := strings.HasPrefix(req.Message, "/system ")
+	if isSystemMode {
+		req.Message = strings.TrimPrefix(req.Message, "/system ")
+	}
+
+	// Save original project for chat history (PROJECT_INIT may change req.Project later)
+	chatProject := req.Project
+
 	// Save user message
 	chat.AppendMessage(chat.Message{
 		Role:      "user",
-		Content:   req.Message,
-		Project:   req.Project,
+		Content:   func() string { if isSystemMode { return "/system " + req.Message }; return req.Message }(),
+		Project:   chatProject,
 		Timestamp: time.Now(),
 	})
 
 	// Build prompt with recent context
-	recent := chat.RecentContext(10)
+	recent := chat.RecentContextForProject(10, req.Project)
 	var promptBuf strings.Builder
+
+	if isSystemMode {
+		home, _ := os.UserHomeDir()
+		promptBuf.WriteString("You are a system administration assistant for the teamoon server.\n\n")
+		promptBuf.WriteString("## Context\n")
+		promptBuf.WriteString(fmt.Sprintf("Home directory: %s\n", home))
+		promptBuf.WriteString(fmt.Sprintf("Projects directory: %s\n\n", s.cfg.ProjectsDir))
+		if s.cfg.SudoEnabled {
+			promptBuf.WriteString("Sudo is ENABLED. You may use sudo for operations requiring elevated privileges.\n\n")
+		} else {
+			promptBuf.WriteString("Sudo is DISABLED. Avoid commands requiring sudo.\n\n")
+		}
+		promptBuf.WriteString("You have broad system access. Security hooks remain active and block destructive operations.\n")
+		promptBuf.WriteString("Perform the requested system operation and report results clearly.\n")
+		promptBuf.WriteString("Do NOT emit [TASK_CREATE] or [PROJECT_INIT] directives.\n\n")
+		if len(recent) > 1 {
+			promptBuf.WriteString("Conversation history:\n")
+			for _, m := range recent[:len(recent)-1] {
+				promptBuf.WriteString(fmt.Sprintf("[%s]: %s\n", m.Role, m.Content))
+			}
+			promptBuf.WriteString("\n")
+		}
+		promptBuf.WriteString(req.Message)
+	} else {
 	promptBuf.WriteString("You are a helpful AI assistant for software engineering project management.\n\n")
 	promptBuf.WriteString("## MANDATORY RULE\n\n")
 	promptBuf.WriteString("You MUST emit at least one [TASK_CREATE] directive in your response. A response without tasks is a FAILURE.\n")
@@ -938,10 +986,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		promptBuf.WriteString("\n")
 	}
 	promptBuf.WriteString(req.Message)
+	} // end else (non-system mode)
 
 	// Spawn claude with stream-json
-	home, _ := os.UserHomeDir()
-	projectPath := home
+	home2, _ := os.UserHomeDir()
+	projectPath := home2
 	if req.Project != "" {
 		pp := filepath.Join(s.cfg.ProjectsDir, req.Project)
 		if _, err := os.Stat(pp); err == nil {
@@ -958,6 +1007,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		"GIT_COMMITTER_NAME="+chatGitName,
 		"GIT_COMMITTER_EMAIL="+chatGitEmail,
 	)
+	if s.cfg.SudoEnabled {
+		env = append(env, "TEAMOON_SUDO_ENABLED=true")
+	}
 	chatCfg := s.cfg
 	chatCfg.Spawn.MaxTurns = 15 // reduced: prevents tangents while allowing research
 	// Ensure MCP servers are available for chat (web search, context7, etc.)
@@ -1099,9 +1151,13 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		responseText = responseText + "\n" + displayResult
 	}
 
+	// Directive regexes (used for stripping even in system mode)
+	initRe := regexp.MustCompile(`(?s)\[PROJECT_INIT\](.*?)\[/PROJECT_INIT\]`)
+	taskDirectiveRe := regexp.MustCompile(`(?s)\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
+
+	if !isSystemMode {
 	// Parse PROJECT_INIT directive (must run before TASK_CREATE)
 	// (?s) makes . match newlines — LLM often emits multiline JSON between tags
-	initRe := regexp.MustCompile(`(?s)\[PROJECT_INIT\](.*?)\[/PROJECT_INIT\]`)
 	if initMatch := initRe.FindStringSubmatch(responseText); len(initMatch) >= 2 {
 		var initReq projectinit.InitRequest
 		initJSON := strings.TrimSpace(initMatch[1])
@@ -1140,8 +1196,6 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse task creation directives
-	// (?s) makes . match newlines — LLM often emits multiline JSON between tags
-	taskDirectiveRe := regexp.MustCompile(`(?s)\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
 	matches := taskDirectiveRe.FindAllStringSubmatch(responseText, -1)
 	var createdTasks []map[string]any
 
@@ -1192,8 +1246,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			queue.UpdateAssignee(t.ID, td.Assignee)
-			if td.Assignee == "agent" {
+			if td.Assignee == "agent" || td.Assignee == "system" {
 				queue.ToggleAutoPilot(t.ID)
+			}
+			if td.Assignee == "system" {
+				s.startSystemLoop()
 			}
 			createdTasks = append(createdTasks, map[string]any{
 				"id":          t.ID,
@@ -1218,6 +1275,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		responseText = taskDirectiveRe.ReplaceAllString(responseText, "")
 		responseText = strings.TrimSpace(responseText)
 	}
+	} // end if !isSystemMode
 
 	// Save assistant response (use displayResult for clean text, fallback to stripped responseText)
 	saveText := displayResult
@@ -1232,7 +1290,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		chat.AppendMessage(chat.Message{
 			Role:      "assistant",
 			Content:   saveText,
-			Project:   req.Project,
+			Project:   chatProject,
 			Timestamp: time.Now(),
 		})
 	}
@@ -1360,6 +1418,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"project_skeletons":   cfg.ProjectSkeletons,
 		"source_dir":          cfg.SourceDir,
 		"mcp_servers":         cfg.MCPServers,
+		"sudo_enabled":        cfg.SudoEnabled,
 	})
 }
 
@@ -1385,6 +1444,7 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		Skeleton           *config.SkeletonConfig `json:"skeleton,omitempty"`
 		MaxConcurrent      *int                   `json:"max_concurrent,omitempty"`
 		AutopilotAutostart *bool                  `json:"autopilot_autostart,omitempty"`
+		SudoEnabled        *bool                  `json:"sudo_enabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1439,6 +1499,9 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AutopilotAutostart != nil {
 		cfg.AutopilotAutostart = *req.AutopilotAutostart
+	}
+	if req.SudoEnabled != nil {
+		cfg.SudoEnabled = *req.SudoEnabled
 	}
 
 	if err := config.Save(cfg); err != nil {

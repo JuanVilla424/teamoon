@@ -147,6 +147,8 @@ Filterable log stream with level, task, project, and agent filters. Auto-scrolls
 
 Direct chat interface for interacting with Claude. Send messages, view responses with per-turn cost tracking.
 
+![Chat](docs/screenshots/chat-tetris.png)
+
 ![Chat](docs/screenshots/chat.png)
 
 ### ⚙️ Configuration
