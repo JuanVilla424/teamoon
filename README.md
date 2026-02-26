@@ -54,9 +54,9 @@ Single command that installs all prerequisites and teamoon:
 curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/main/install.sh | bash
 ```
 
-Installs system packages, Go, Node.js, Python, Rust, GitHub CLI, Claude Code, then builds and installs teamoon with systemd service. Skips anything already installed — safe to re-run.
+Installs system packages, Go, Node.js, Python, Rust, GitHub CLI, Claude Code, then builds and installs teamoon as a service. Skips anything already installed — safe to re-run.
 
-> Requires Ubuntu/Debian with sudo access. See [INSTALL.md](INSTALL.md) for full details.
+> Supports **Ubuntu/Debian**, **RHEL/Rocky Linux 8+**, and **macOS** (Apple Silicon + Intel). See [INSTALL.md](INSTALL.md) for full details.
 
 ### Manual Install
 
@@ -67,7 +67,7 @@ make build
 make install
 ```
 
-Prerequisites: [Go](https://go.dev/) 1.24+, [Node.js](https://nodejs.org/) 18+, [Git](https://git-scm.com/), [Make](https://www.gnu.org/software/make/).
+Prerequisites: [Go](https://go.dev/) 1.24+, [Node.js](https://nodejs.org/) 18+, [Git](https://git-scm.com/), [Make](https://www.gnu.org/software/make/). Works on Linux and macOS.
 
 ### 🧙 Onboarding
 
@@ -235,18 +235,18 @@ Each step can be enabled/disabled per-project via the skeleton configuration. Fa
 
 Stored at `~/.config/teamoon/config.json`. Editable from the web UI under **Config > General**.
 
-| Field                  | Type   | Default      | Description                              |
-| ---------------------- | ------ | ------------ | ---------------------------------------- |
-| `projects_dir`         | string | `~/Projects` | Directory to scan for projects           |
-| `claude_dir`           | string | `~/.claude`  | Claude Code data directory               |
-| `refresh_interval_sec` | int    | `30`         | Dashboard refresh interval in seconds    |
-| `context_limit`        | int    | `0`          | Context window limit (0 = model default) |
-| `log_retention_days`   | int    | `20`         | Days to retain log entries               |
-| `web_enabled`          | bool   | `false`      | Enable web dashboard on startup          |
-| `web_port`             | int    | `7777`       | Web dashboard port                       |
-| `web_password`         | string | `""`         | Basic auth password (empty = no auth)    |
-| `webhook_url`          | string | `""`         | Webhook URL for task event notifications |
-| `max_concurrent`       | int    | `3`          | Max concurrent autopilot sessions        |
+| Field                  | Type   | Default      | Description                                          |
+| ---------------------- | ------ | ------------ | ---------------------------------------------------- |
+| `projects_dir`         | string | `~/Projects` | Directory to scan for projects                       |
+| `claude_dir`           | string | `~/.claude`  | Claude Code data directory                           |
+| `refresh_interval_sec` | int    | `30`         | Dashboard refresh interval in seconds                |
+| `context_limit`        | int    | `0`          | Context window limit (0 = model default)             |
+| `log_retention_days`   | int    | `20`         | Days to retain log entries                           |
+| `web_enabled`          | bool   | `false`      | Enable web dashboard on startup                      |
+| `web_port`             | int    | `7777`       | Web dashboard port                                   |
+| `web_password`         | string | `""`         | Session auth password, bcrypt hash (empty = no auth) |
+| `webhook_url`          | string | `""`         | Webhook URL for task event notifications             |
+| `max_concurrent`       | int    | `3`          | Max concurrent autopilot sessions                    |
 
 ### 🎛️ Spawn Settings (`spawn`)
 

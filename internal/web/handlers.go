@@ -19,10 +19,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/JuanVilla424/teamoon/internal/chat"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
+	"github.com/JuanVilla424/teamoon/internal/jobs"
 	"github.com/JuanVilla424/teamoon/internal/onboarding"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
@@ -31,6 +33,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/projects"
 	"github.com/JuanVilla424/teamoon/internal/queue"
 	"github.com/JuanVilla424/teamoon/internal/templates"
+	"github.com/JuanVilla424/teamoon/internal/uploads"
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -44,16 +47,93 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+
+	pw := s.cfg.WebPassword
+	if pw == "" {
+		writeErr(w, 400, "no password configured")
+		return
+	}
+
+	if config.IsPasswordHashed(pw) {
+		if err := bcrypt.CompareHashAndPassword([]byte(pw), []byte(req.Password)); err != nil {
+			writeErr(w, 401, "invalid password")
+			return
+		}
+	} else {
+		if req.Password != pw {
+			writeErr(w, 401, "invalid password")
+			return
+		}
+		// Migrate plain-text to bcrypt on first successful login
+		if hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost); err == nil {
+			cfg, _ := config.Load()
+			cfg.WebPassword = string(hash)
+			config.Save(cfg)
+			s.cfg.WebPassword = string(hash)
+			log.Printf("[auth] password migrated to bcrypt")
+		}
+	}
+
+	token, err := s.sessions.create()
+	if err != nil {
+		writeErr(w, 500, "session error")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   isSecure(r),
+		MaxAge:   int(sessionDuration.Seconds()),
+	})
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		s.sessions.delete(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   isSecure(r),
+		MaxAge:   -1,
+	})
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
 func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, 405, "method not allowed")
 		return
 	}
 	var req struct {
-		Project     string `json:"project"`
-		Description string `json:"description"`
-		Priority    string `json:"priority"`
-		Assignee    string `json:"assignee"`
+		Project     string   `json:"project"`
+		Description string   `json:"description"`
+		Priority    string   `json:"priority"`
+		Assignee    string   `json:"assignee"`
+		Attachments []string `json:"attachments,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -63,6 +143,9 @@ func (s *Server) handleTaskAdd(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	for _, uid := range req.Attachments {
+		queue.AttachToTask(t.ID, uid)
 	}
 	if req.Assignee != "" {
 		queue.UpdateAssignee(t.ID, req.Assignee)
@@ -263,6 +346,11 @@ func (s *Server) webSend(taskID int) func(tea.Msg) {
 			s.scheduleRefresh() // debounced — avoid flooding SSE on rapid log output
 			return
 		case engine.TaskStateMsg:
+			if m.Message == "planning" {
+				s.setGenerating(m.TaskID)
+			} else if m.State == queue.StatePlanned || m.State == queue.StatePending {
+				s.clearGenerating(m.TaskID)
+			}
 			s.store.logBuf.Add(logs.LogEntry{
 				Time:    time.Now(),
 				TaskID:  m.TaskID,
@@ -326,7 +414,12 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 			Agent:   e.Agent,
 		}
 	}
-	writeJSON(w, map[string]any{"task_id": id, "logs": logJSON})
+	task, _ := queue.GetTask(id)
+	var attMeta []uploads.Attachment
+	if len(task.Attachments) > 0 {
+		attMeta = uploads.ResolveIDs(task.Attachments)
+	}
+	writeJSON(w, map[string]any{"task_id": id, "logs": logJSON, "attachments": attMeta})
 }
 
 func (s *Server) handleProjectPRs(w http.ResponseWriter, r *http.Request) {
@@ -342,6 +435,27 @@ func (s *Server) handleProjectPRs(w http.ResponseWriter, r *http.Request) {
 	}
 	depBot := projects.FilterDependabot(prs)
 	writeJSON(w, map[string]any{"prs": prs, "dependabot": depBot})
+}
+
+func (s *Server) handleProjectPRDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	repo := r.URL.Query().Get("repo")
+	numStr := r.URL.Query().Get("number")
+	var num int
+	fmt.Sscanf(numStr, "%d", &num)
+	if repo == "" || num == 0 {
+		writeErr(w, 400, "repo and number required")
+		return
+	}
+	detail, err := projects.FetchPRDetail(repo, num)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, detail)
 }
 
 func (s *Server) handleMergeDependabot(w http.ResponseWriter, r *http.Request) {
@@ -819,7 +933,18 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, map[string]any{"messages": msgs})
+	type enrichedMsg struct {
+		chat.Message
+		AttachmentMeta []uploads.Attachment `json:"attachment_meta,omitempty"`
+	}
+	enriched := make([]enrichedMsg, len(msgs))
+	for i, m := range msgs {
+		enriched[i] = enrichedMsg{Message: m}
+		if len(m.Attachments) > 0 {
+			enriched[i].AttachmentMeta = uploads.ResolveIDs(m.Attachments)
+		}
+	}
+	writeJSON(w, map[string]any{"messages": enriched})
 }
 
 func (s *Server) handleChatClear(w http.ResponseWriter, r *http.Request) {
@@ -844,8 +969,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Message string `json:"message"`
-		Project string `json:"project"`
+		Message     string   `json:"message"`
+		Project     string   `json:"project"`
+		Attachments []string `json:"attachments,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -867,10 +993,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 
 	// Save user message
 	chat.AppendMessage(chat.Message{
-		Role:      "user",
-		Content:   func() string { if isSystemMode { return "/system " + req.Message }; return req.Message }(),
-		Project:   chatProject,
-		Timestamp: time.Now(),
+		Role:        "user",
+		Content:     func() string { if isSystemMode { return "/system " + req.Message }; return req.Message }(),
+		Project:     chatProject,
+		Timestamp:   time.Now(),
+		Attachments: req.Attachments,
 	})
 
 	// Build prompt with recent context
@@ -987,6 +1114,28 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 	promptBuf.WriteString(req.Message)
 	} // end else (non-system mode)
+
+	// Inject attachment context into prompt
+	if len(req.Attachments) > 0 {
+		promptBuf.WriteString("\n\n## Attached Files\n")
+		for _, uid := range req.Attachments {
+			att, err := uploads.GetByID(uid)
+			if err != nil {
+				continue
+			}
+			if uploads.IsTextMIME(att.MIMEType) {
+				data, err := os.ReadFile(uploads.AbsPath(att))
+				if err != nil {
+					continue
+				}
+				promptBuf.WriteString(fmt.Sprintf("\n### %s\n```\n%s\n```\n", att.OrigName, string(data)))
+			} else if strings.HasPrefix(att.MIMEType, "image/") {
+				promptBuf.WriteString(fmt.Sprintf("\n### %s (image)\nPath: %s\n", att.OrigName, uploads.AbsPath(att)))
+			} else {
+				promptBuf.WriteString(fmt.Sprintf("\n### %s (%s, %d bytes)\n", att.OrigName, att.MIMEType, att.Size))
+			}
+		}
+	}
 
 	// Spawn claude with stream-json
 	home2, _ := os.UserHomeDir()
@@ -1476,7 +1625,20 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only update password if not masked
 	if req.WebPassword != "***" {
-		cfg.WebPassword = req.WebPassword
+		passwordChanged := req.WebPassword != cfg.WebPassword
+		if req.WebPassword != "" && !config.IsPasswordHashed(req.WebPassword) {
+			hash, err := bcrypt.GenerateFromPassword([]byte(req.WebPassword), bcrypt.DefaultCost)
+			if err != nil {
+				writeErr(w, 500, "bcrypt error")
+				return
+			}
+			cfg.WebPassword = string(hash)
+		} else {
+			cfg.WebPassword = req.WebPassword
+		}
+		if passwordChanged {
+			s.sessions.invalidateAll()
+		}
 	}
 	cfg.WebhookURL = req.WebhookURL
 	if req.SpawnModel != nil {
@@ -2133,6 +2295,14 @@ func (s *Server) handleOnboardingConfig(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, 405, "method not allowed")
 		return
 	}
+	// If password is set, require session (prevents unauthenticated config overwrite)
+	if s.cfg.WebPassword != "" {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || !s.sessions.validate(cookie.Value) {
+			writeErr(w, 401, "unauthorized")
+			return
+		}
+	}
 	var wc onboarding.WebConfig
 	if err := json.NewDecoder(r.Body).Decode(&wc); err != nil {
 		writeErr(w, 400, err.Error())
@@ -2359,4 +2529,200 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 		return nil
 	})
+}
+
+// ── Jobs handlers ──
+
+func (s *Server) handleJobsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	list, err := jobs.ListAll()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"jobs": list})
+}
+
+func (s *Server) handleJobAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Schedule    string `json:"schedule"`
+		Project     string `json:"project"`
+		Instruction string `json:"instruction"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Name == "" || req.Schedule == "" || req.Instruction == "" {
+		writeErr(w, 400, "name, schedule, and instruction required")
+		return
+	}
+	job, err := jobs.Add(req.Name, req.Schedule, req.Project, req.Instruction)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]any{"ok": true, "job": job})
+}
+
+func (s *Server) handleJobUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		ID          int    `json:"id"`
+		Name        string `json:"name"`
+		Schedule    string `json:"schedule"`
+		Project     string `json:"project"`
+		Instruction string `json:"instruction"`
+		Enabled     bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := jobs.Update(req.ID, req.Name, req.Schedule, req.Project, req.Instruction, req.Enabled); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := jobs.Delete(req.ID); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleJobRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		ID int `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	job, found := jobs.GetByID(req.ID)
+	if !found {
+		writeErr(w, 404, "job not found")
+		return
+	}
+	if job.Status == jobs.StatusRunning {
+		writeErr(w, 409, "job already running")
+		return
+	}
+	cfg := s.cfg
+	go func() {
+		jobs.RunJob(context.Background(), job, cfg)
+		s.refreshAndBroadcast()
+	}()
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// ── Upload handlers ──
+
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, uploads.MaxUploadSize+1024)
+	if err := r.ParseMultipartForm(uploads.MaxUploadSize); err != nil {
+		writeErr(w, 400, "file too large or bad request")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeErr(w, 400, "file required")
+		return
+	}
+	defer file.Close()
+
+	mimeType := header.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	att, err := uploads.Save(file, header.Filename, mimeType, header.Size)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, att)
+}
+
+func (s *Server) handleUploadServe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, "/api/uploads/")
+	id := strings.SplitN(name, ".", 2)[0]
+	if id == "" {
+		writeErr(w, 400, "id required")
+		return
+	}
+	att, err := uploads.GetByID(id)
+	if err != nil {
+		writeErr(w, 404, "not found")
+		return
+	}
+	w.Header().Set("Content-Type", att.MIMEType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, att.OrigName))
+	http.ServeFile(w, r, uploads.AbsPath(att))
+}
+
+func (s *Server) handleTaskAttach(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		ID       int    `json:"id"`
+		UploadID string `json:"upload_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if _, err := uploads.GetByID(req.UploadID); err != nil {
+		writeErr(w, 404, "attachment not found")
+		return
+	}
+	if err := queue.AttachToTask(req.ID, req.UploadID); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	s.refreshAndBroadcast()
+	writeJSON(w, map[string]bool{"ok": true})
 }

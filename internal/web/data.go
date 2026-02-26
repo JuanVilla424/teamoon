@@ -7,6 +7,7 @@ import (
 
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
+	"github.com/JuanVilla424/teamoon/internal/jobs"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/metrics"
 	"github.com/JuanVilla424/teamoon/internal/plan"
@@ -66,8 +67,10 @@ type DataSnapshot struct {
 	Effort            string   `json:"effort"`
 	Version           string   `json:"version"`
 	BuildNum          string   `json:"build_num"`
-	ProjectAutopilots []string `json:"project_autopilots"`
+	ProjectAutopilots []string  `json:"project_autopilots"`
 	UptimeSec         int64    `json:"uptime_sec"`
+	AuthEnabled       bool     `json:"auth_enabled"`
+	Jobs              []jobs.Job `json:"jobs"`
 }
 
 type Store struct {
@@ -219,6 +222,10 @@ func (s *Store) Refresh() {
 		BuildNum:           BuildNum,
 		ProjectAutopilots: activeLoops,
 		UptimeSec:         int64(time.Since(s.startTime).Seconds()),
+		AuthEnabled:       s.cfg.WebPassword != "",
+	}
+	if jl, err := jobs.ListAll(); err == nil {
+		snap.Jobs = jl
 	}
 
 	s.mu.Lock()

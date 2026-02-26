@@ -146,7 +146,7 @@ var logFilterDatePreset = "";
 var prevView = "";
 var isDataUpdate = false;
 var taskLogAutoScroll = true;
-var templatesCache = [];
+var templatesCache = null;
 var editingTemplateId = 0;
 var planCollapsed = true;
 var taskLogsCache = {};
@@ -171,6 +171,11 @@ var chatCounter = 0;
 var chatCreatedTasks = [];
 var chatToolCalls = [];
 var chatTurnStartMs = 0;
+var chatPendingAttachments = [];
+var chatRecording = false;
+var chatMediaRecorder = null;
+var chatAudioChunks = [];
+var taskModalAttachments = [];
 var canvasFilterAssignee = "";
 var canvasFilterProject = "";
 var canvasDragTaskId = 0;
@@ -355,7 +360,16 @@ function connectSSE(){
   };
   es.onerror = function(){
     es.close();
-    setTimeout(connectSSE, 3000);
+    // Check if 401 (auth required) before reconnecting
+    fetch("/api/data").then(function(r){
+      if(r.status === 401){
+        location.hash = "#login";
+        D = null;
+        render();
+      } else {
+        setTimeout(connectSSE, 3000);
+      }
+    }).catch(function(){ setTimeout(connectSSE, 3000); });
   };
 }
 
@@ -395,9 +409,15 @@ function api(method, path, body, cb){
   if(body) opts.body = JSON.stringify(body);
   fetch(path, opts)
     .then(function(r){
+      if(r.status === 401 && path !== "/api/auth/login"){
+        location.hash = "#login";
+        render();
+        return null;
+      }
       return r.json().then(function(d){ return {ok: r.ok, data: d}; });
     })
     .then(function(res){
+      if(!res) return;
       if(cb) cb(res.data, res.ok);
     })
     .catch(function(e){
@@ -530,12 +550,18 @@ function showEnvVarsPrompt(srv, installBtn){
 /* ── Router ── */
 function getView(){
   var h = location.hash.replace("#","") || "dashboard";
-  if(["dashboard","queue","canvas","projects","logs","chat","config","setup"].indexOf(h) < 0) h = "dashboard";
+  if(["dashboard","queue","canvas","projects","logs","chat","jobs","config","setup","login"].indexOf(h) < 0) h = "dashboard";
   return h;
 }
 
 /* ── Safe DOM helpers ── */
 function txt(s){ return document.createTextNode(s || ""); }
+function escHtml(s){
+  var d = document.createElement("div");
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+
 function el(tag, cls, children){
   var e = document.createElement(tag);
   if(cls) e.className = cls;
@@ -562,7 +588,7 @@ function span(cls, text){
 function div(cls, children){ return el("div", cls, children); }
 
 function computeContentKey(v){
-  if(!D && v !== "setup") return "";
+  if(!D && v !== "setup" && v !== "login") return "";
   var tasks = D ? (D.tasks || []) : [];
   var logs = D ? (D.log_entries || []) : [];
   var projs = D ? (D.projects || []) : [];
@@ -598,8 +624,15 @@ function computeContentKey(v){
       var ck = canvasFilterAssignee + ":" + canvasFilterProject + ":";
       for(var i=0;i<tasks.length;i++) ck += tasks[i].id + tasks[i].effective_state + (tasks[i].assignee||"") + ",";
       return "cv:" + ck;
+    case "jobs":
+      var jbs = D ? (D.jobs || []) : [];
+      var jk = "";
+      for(var i=0;i<jbs.length;i++) jk += jbs[i].id + "," + jbs[i].status + "," + jbs[i].enabled + ";";
+      return "j:" + jk;
     case "config":
-      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + templatesCache.length + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "");
+      return "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + (templatesCache ? templatesCache.length : 0) + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "");
+    case "login":
+      return "login:1";
     case "setup":
       return "s:" + setupStep + ":" + JSON.stringify(setupStepDone) + ":" + JSON.stringify(setupStepError);
     default:
@@ -609,7 +642,19 @@ function computeContentKey(v){
 
 function render(){
   var v = getView();
-  if(!D && v !== "setup") return;
+  if(!D && v !== "setup" && v !== "login") return;
+  // Hide chrome on login
+  var topbar = document.querySelector(".topbar");
+  var dock = document.getElementById("dock");
+  var logoutBtn = document.getElementById("topbar-logout");
+  if(v === "login"){
+    if(topbar) topbar.style.display = "none";
+    if(dock) dock.style.display = "none";
+  } else {
+    if(topbar) topbar.style.display = "";
+    if(dock) dock.style.display = "";
+    if(logoutBtn) logoutBtn.style.display = (D && D.auth_enabled) ? "" : "none";
+  }
   if(D) updateTopbar();
   var nav = document.querySelectorAll("#dock a");
   for(var i=0;i<nav.length;i++){
@@ -739,6 +784,11 @@ function render(){
     if(!atBottom) taskLogAutoScroll = false;
   }
 
+  // Save plan content scroll position
+  var planContentScroll = 0;
+  var existingPlanContent = content.querySelector(".plan-content");
+  if(existingPlanContent) planContentScroll = existingPlanContent.scrollTop;
+
   // Build new content into temp container
   var tmp = document.createElement("div");
   switch(v){
@@ -748,13 +798,20 @@ function render(){
     case "projects": renderProjects(tmp); break;
     case "logs": renderLogs(tmp); break;
     case "chat": renderChat(tmp); break;
+    case "jobs": renderJobs(tmp); break;
     case "config": renderConfig(tmp); break;
+    case "login": renderLogin(tmp); break;
     case "setup": renderSetup(tmp); break;
   }
 
   // Atomic swap
+  var wasLogin = prevView === "login" && v !== "login";
   content.textContent = "";
   while(tmp.firstChild) content.appendChild(tmp.firstChild);
+  if(wasLogin){
+    content.classList.add("view-enter");
+    setTimeout(function(){ content.classList.remove("view-enter"); }, 500);
+  }
 
   // Update incremental log counters after full render
   if(v === "logs"){
@@ -823,6 +880,10 @@ function render(){
     };
   }
 
+  // Restore plan content scroll position
+  var newPlanContent = content.querySelector(".plan-content");
+  if(newPlanContent) newPlanContent.scrollTop = planContentScroll;
+
   // Scroll to selected task in queue after navigation from project detail
   if(willScrollToTask){
     var selNode = content.querySelector(".tl-node.selected");
@@ -864,6 +925,19 @@ document.getElementById("theme-toggle").addEventListener("click", function() {
   var meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = next === "light" ? "#f5f5f5" : "#050505";
 });
+
+// Logout button in topbar
+(function(){
+  var btn = document.getElementById("topbar-logout");
+  if(!btn) return;
+  btn.addEventListener("click", function(){
+    fetch("/api/auth/logout", {method:"POST"}).then(function(){
+      location.hash = "#login";
+      D = null;
+      render();
+    });
+  });
+})();
 
 /* ── Topbar ── */
 function updateTopbar(){
@@ -1372,6 +1446,51 @@ function renderTaskDetail(parent, t){
   actions.appendChild(archBtn);
 
   parent.appendChild(actions);
+
+  // ── Attachments section ──
+  if(t.attachments && t.attachments.length > 0){
+    var attSec = div("detail-card detail-section");
+    var attTitle = div("detail-section-title");
+    attTitle.appendChild(txt("Attachments"));
+    attSec.appendChild(attTitle);
+    var attRow = div("task-detail-attachments");
+    attRow.id = "task-att-" + t.id;
+    // Fetch attachment metadata
+    api("GET","/api/tasks/detail?id="+t.id,null,function(d){
+      var area = document.getElementById("task-att-" + t.id);
+      if(!area || !d.attachments) return;
+      d.attachments.forEach(function(att){
+        if(att.mime_type && att.mime_type.indexOf("image/") === 0){
+          var img = document.createElement("img");
+          img.className = "chat-att-image";
+          img.src = "/api/uploads/" + att.id;
+          img.alt = att.orig_name;
+          img.onclick = function(){ window.open(img.src,"_blank"); };
+          area.appendChild(img);
+        } else if(att.mime_type && att.mime_type.indexOf("audio/") === 0){
+          var audio = document.createElement("audio");
+          audio.className = "chat-att-audio";
+          audio.controls = true;
+          audio.src = "/api/uploads/" + att.id;
+          area.appendChild(audio);
+        } else {
+          var a = document.createElement("a");
+          a.className = "chat-att-link";
+          a.href = "/api/uploads/" + att.id;
+          a.target = "_blank";
+          a.textContent = att.orig_name || att.id;
+          area.appendChild(a);
+        }
+      });
+    });
+    attSec.appendChild(attRow);
+    // Attach more button
+    var moreBtn = el("button","btn btn-sm",["Add File"]);
+    moreBtn.style.marginTop = "8px";
+    moreBtn.onclick = function(){ attachToExistingTask(t.id); };
+    attSec.appendChild(moreBtn);
+    parent.appendChild(attSec);
+  }
 
   // ── Plan section (collapsible) ──
   if(t.has_plan){
@@ -2108,10 +2227,76 @@ function showPRs(repo){
         var isDep = false;
         for(var j=0;j<dep.length;j++) if(dep[j].number===p.number) isDep=true;
         if(isDep) item.appendChild(span("pr-dep", "bot"));
+        item.style.cursor = "pointer";
+        item.onclick = (function(num){ return function(){ showPRDetail(repo, num); }; })(p.number);
         content.appendChild(item);
       }
     }
     if(dep.length > 0) document.getElementById("btn-merge-dep").style.display = "";
+  });
+}
+
+function showPRDetail(repo, number){
+  var ct = document.getElementById("pr-detail-content");
+  ct.textContent = "Loading\u2026";
+  ct.className = "loading-text";
+  document.getElementById("pr-detail-title").textContent = "PR #" + number;
+  document.getElementById("pr-detail-link").href = "#";
+  openModal("modal-pr-detail");
+  api("GET","/api/projects/pr-detail?repo="+encodeURIComponent(repo)+"&number="+number, null, function(d){
+    ct.className = "";
+    ct.textContent = "";
+    if(d.error){ ct.textContent = "Error: " + d.error; return; }
+    document.getElementById("pr-detail-title").textContent = "#" + d.number + " " + d.title;
+    if(d.url) document.getElementById("pr-detail-link").href = d.url;
+
+    // State + draft badge row
+    var meta = div("pr-detail-meta");
+    var stCls = "pr-badge pr-state-" + (d.state || "open").toLowerCase();
+    if(d.isDraft) stCls += " pr-draft";
+    var stLabel = d.isDraft ? "Draft" : (d.state || "OPEN");
+    meta.appendChild(span(stCls, stLabel));
+    meta.appendChild(span("pr-detail-branch", (d.headRefName || "?") + " \u2192 " + (d.baseRefName || "?")));
+    meta.appendChild(span("pr-detail-author", (d.author && d.author.login) || ""));
+    ct.appendChild(meta);
+
+    // Stats
+    var stats = div("pr-detail-stats");
+    stats.appendChild(span("pr-stat-add", "+" + (d.additions || 0)));
+    stats.appendChild(span("pr-stat-del", "\u2212" + (d.deletions || 0)));
+    stats.appendChild(span("pr-stat-files", (d.changedFiles || 0) + " files"));
+    ct.appendChild(stats);
+
+    // Labels
+    if(d.labels && d.labels.length > 0){
+      var lbRow = div("pr-detail-labels");
+      for(var i=0;i<d.labels.length;i++){
+        lbRow.appendChild(span("pr-label", d.labels[i].name));
+      }
+      ct.appendChild(lbRow);
+    }
+
+    // Review decision
+    if(d.reviewDecision){
+      var rv = div("pr-detail-review");
+      var rvCls = "pr-badge pr-review-" + d.reviewDecision.toLowerCase().replace(/_/g,"-");
+      var rvLabel = d.reviewDecision.replace(/_/g," ");
+      rv.appendChild(span(rvCls, rvLabel));
+      ct.appendChild(rv);
+    }
+
+    // Body
+    if(d.body){
+      var body = div("pr-detail-body");
+      body.textContent = d.body;
+      ct.appendChild(body);
+    }
+
+    // Dates
+    var dates = div("pr-detail-dates");
+    if(d.createdAt) dates.appendChild(span("pr-date", "Created: " + new Date(d.createdAt).toLocaleString()));
+    if(d.updatedAt) dates.appendChild(span("pr-date", "Updated: " + new Date(d.updatedAt).toLocaleString()));
+    ct.appendChild(dates);
   });
 }
 
@@ -2263,6 +2448,8 @@ function openAddTask(proj){
   document.getElementById("add-priority").value = "med";
   document.getElementById("tmpl-name").value = "";
   editingTemplateId = 0;
+  taskModalAttachments = [];
+  renderTaskAttachPreview();
   document.getElementById("tmpl-select").onchange = onTemplateSelect;
   loadTemplates();
   updateTemplateSaveBtn();
@@ -2295,11 +2482,68 @@ function submitAddTask(){
   }
   var addBtn = document.querySelector("#modal-add .btn-primary");
   var restore = btnLoading(addBtn, "ADDING\u2026");
-  api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri, assignee:assignee}, function(d){
+  var attIds = taskModalAttachments.map(function(a){ return a.id; });
+  api("POST","/api/tasks/add",{project:proj, description:desc, priority:pri, assignee:assignee, attachments:attIds.length?attIds:undefined}, function(d){
+    taskModalAttachments = [];
     if(restore) restore();
     closeModal("modal-add");
     if(d.id){ selectedTaskID = d.id; toast("Task #"+d.id+" created", "success"); }
   });
+}
+
+function taskAttachFile(){
+  var inp = document.createElement("input");
+  inp.type = "file"; inp.multiple = true;
+  inp.onchange = function(){
+    for(var i=0;i<this.files.length;i++) taskUploadAttachment(this.files[i]);
+  };
+  inp.click();
+}
+
+function taskUploadAttachment(file){
+  var fd = new FormData(); fd.append("file", file);
+  fetch("/api/upload",{method:"POST",body:fd})
+  .then(function(r){ return r.json(); })
+  .then(function(att){
+    taskModalAttachments.push(att);
+    renderTaskAttachPreview();
+    toast("Attached: " + att.orig_name, "success");
+  }).catch(function(){ toast("Upload failed","error"); });
+}
+
+function renderTaskAttachPreview(){
+  var area = document.getElementById("task-attach-preview");
+  if(!area) return;
+  area.innerHTML = "";
+  taskModalAttachments.forEach(function(att, idx){
+    var chip = document.createElement("div");
+    chip.className = "task-att-chip";
+    chip.innerHTML = '<span>' + escHtml(att.orig_name) + '</span><button class="remove-att" onclick="taskModalAttachments.splice('+idx+',1);renderTaskAttachPreview()">\u00d7</button>';
+    area.appendChild(chip);
+  });
+}
+
+function attachToExistingTask(taskId){
+  var inp = document.createElement("input");
+  inp.type = "file"; inp.multiple = true;
+  inp.onchange = function(){
+    for(var i=0;i<this.files.length;i++){
+      (function(f){
+        var fd = new FormData(); fd.append("file", f);
+        fetch("/api/upload",{method:"POST",body:fd})
+        .then(function(r){ return r.json(); })
+        .then(function(att){
+          return fetch("/api/tasks/attach",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({id:taskId, upload_id:att.id})
+          });
+        }).then(function(){ toast("File attached to #"+taskId,"success"); })
+        .catch(function(){ toast("Attach failed","error"); });
+      })(this.files[i]);
+    }
+  };
+  inp.click();
 }
 
 /* ── Modals ── */
@@ -2634,6 +2878,7 @@ function renderChat(container){
           userBubble.appendChild(document.createTextNode(" "));
         }
         userBubble.appendChild(document.createTextNode(m.isSystem ? m.content.replace(/^\/system /,"") : m.content));
+        renderAttachmentPreviews(userBubble, m.attachment_meta);
         msgArea.appendChild(userBubble);
       } else {
         var bwrap = el("div","chat-bubble-wrap");
@@ -2731,6 +2976,37 @@ function renderChat(container){
   };
   inputBar.appendChild(sysToggle);
 
+  // Attach file button
+  var attachBtn = el("button","chat-attach-btn");
+  attachBtn.title = "Attach file";
+  attachBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>';
+  attachBtn.onclick = function(){
+    var inp = document.createElement("input");
+    inp.type = "file"; inp.multiple = true;
+    inp.onchange = function(){ for(var i=0;i<this.files.length;i++) chatUploadFile(this.files[i]); };
+    inp.click();
+  };
+  inputBar.appendChild(attachBtn);
+
+  // Voice record button
+  var voiceBtn = el("button","chat-voice-btn" + (chatRecording ? " recording" : ""));
+  voiceBtn.title = chatRecording ? "Stop recording" : "Record voice note";
+  voiceBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
+  voiceBtn.onclick = chatToggleRecording;
+  inputBar.appendChild(voiceBtn);
+
+  // Attachment preview strip
+  if(chatPendingAttachments.length > 0){
+    var strip = el("div","chat-attach-strip");
+    chatPendingAttachments.forEach(function(att,idx){
+      var chip = el("div","chat-attach-chip");
+      chip.innerHTML = '<span>' + escHtml(att.orig_name) + '</span><button class="remove-att" data-idx="'+idx+'">\u00d7</button>';
+      chip.querySelector(".remove-att").onclick = function(){ chatPendingAttachments.splice(idx,1); chatCounter++; render(); };
+      strip.appendChild(chip);
+    });
+    inputBar.appendChild(strip);
+  }
+
   var textarea = el("textarea","chat-input");
   textarea.id = "chat-textarea";
   textarea.rows = 2;
@@ -2782,7 +3058,10 @@ function sendChatMessage(){
   chatLoading = true;
   chatToolCalls = [];
   chatTurnStartMs = Date.now();
-  chatMessages.push({role:"user", content:msg, project:chatProject, isSystem:isSystem});
+  var sendAtts = chatPendingAttachments.map(function(a){ return a.id; });
+  var sendAttMeta = chatPendingAttachments.slice();
+  chatPendingAttachments = [];
+  chatMessages.push({role:"user", content:msg, project:chatProject, isSystem:isSystem, attachment_meta:sendAttMeta});
   chatMessages.push({role:"assistant", content:"", project:chatProject, isSystem:isSystem});
   chatCounter++;
   render();
@@ -2791,7 +3070,7 @@ function sendChatMessage(){
   fetch("/api/chat/send",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({message:msg, project:chatProject})
+    body:JSON.stringify({message:msg, project:chatProject, attachments:sendAtts.length?sendAtts:undefined})
   }).then(function(res){
     if(!res.ok && !res.headers.get("content-type")?.startsWith("text/event-stream")){
       chatMessages[chatMessages.length-1].content = "Error: server returned " + res.status;
@@ -3006,6 +3285,74 @@ function sendChatMessage(){
     chatCounter++;
     render();
   });
+}
+
+function chatUploadFile(file){
+  var fd = new FormData();
+  fd.append("file", file);
+  toast("Uploading " + file.name + "...", "info");
+  fetch("/api/upload",{method:"POST",body:fd})
+  .then(function(r){ return r.json(); })
+  .then(function(att){
+    chatPendingAttachments.push(att);
+    chatCounter++; render();
+    toast("Attached: " + att.orig_name, "success");
+  }).catch(function(){ toast("Upload failed: " + file.name, "error"); });
+}
+
+function chatToggleRecording(){
+  if(!chatRecording){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      toast("Microphone not available","error"); return;
+    }
+    navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+      chatMediaRecorder = new MediaRecorder(stream);
+      chatAudioChunks = [];
+      chatMediaRecorder.ondataavailable = function(e){ chatAudioChunks.push(e.data); };
+      chatMediaRecorder.onstop = function(){
+        var blob = new Blob(chatAudioChunks, {type:"audio/webm"});
+        var file = new File([blob], "voice-note.webm", {type:"audio/webm"});
+        stream.getTracks().forEach(function(t){ t.stop(); });
+        chatUploadFile(file);
+      };
+      chatMediaRecorder.start();
+      chatRecording = true;
+      chatCounter++; render();
+    }).catch(function(){ toast("Microphone not available","error"); });
+  } else {
+    if(chatMediaRecorder) chatMediaRecorder.stop();
+    chatRecording = false;
+    chatCounter++; render();
+  }
+}
+
+function renderAttachmentPreviews(parent, metas){
+  if(!metas || !metas.length) return;
+  var row = el("div","chat-message-attachments");
+  metas.forEach(function(att){
+    if(att.mime_type && att.mime_type.indexOf("image/") === 0){
+      var img = document.createElement("img");
+      img.className = "chat-att-image";
+      img.src = "/api/uploads/" + att.id;
+      img.alt = att.orig_name;
+      img.onclick = function(){ window.open(img.src, "_blank"); };
+      row.appendChild(img);
+    } else if(att.mime_type && att.mime_type.indexOf("audio/") === 0){
+      var audio = document.createElement("audio");
+      audio.className = "chat-att-audio";
+      audio.controls = true;
+      audio.src = "/api/uploads/" + att.id;
+      row.appendChild(audio);
+    } else {
+      var a = document.createElement("a");
+      a.className = "chat-att-link";
+      a.href = "/api/uploads/" + att.id;
+      a.target = "_blank";
+      a.textContent = att.orig_name || att.id;
+      row.appendChild(a);
+    }
+  });
+  parent.appendChild(row);
 }
 
 /* ── Canvas View ── */
@@ -3391,6 +3738,125 @@ function loadSetupStatus(){
     setupStatusLoaded = true;
     if(!setupRunning) render();
   }).catch(function(){ setupStatusFetching = false; });
+}
+
+function renderLogin(root){
+  var wrap = div("login-wrap");
+
+  // Ambient glow behind card
+  wrap.appendChild(div("login-glow"));
+
+  var card = div("login-card");
+
+  // Moon icon
+  var iconWrap = div("login-icon");
+  var svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("viewBox","0 0 24 24");
+  svg.setAttribute("fill","none");
+  svg.setAttribute("stroke","currentColor");
+  svg.setAttribute("stroke-width","1.5");
+  svg.setAttribute("stroke-linecap","round");
+  svg.setAttribute("stroke-linejoin","round");
+  svg.setAttribute("width","36");
+  svg.setAttribute("height","36");
+  var path = document.createElementNS("http://www.w3.org/2000/svg","path");
+  path.setAttribute("d","M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z");
+  svg.appendChild(path);
+  iconWrap.appendChild(svg);
+  card.appendChild(iconWrap);
+
+  card.appendChild(el("h2", "login-title", ["teamoon"]));
+  card.appendChild(el("p", "login-subtitle", ["Enter your password to continue"]));
+
+  var form = document.createElement("form");
+  form.className = "login-form";
+  form.addEventListener("submit", function(e){
+    e.preventDefault();
+    var pwInput = form.querySelector(".login-input");
+    var statusEl = form.querySelector(".login-status");
+    var btn = form.querySelector(".login-btn");
+    if(!pwInput.value.trim()){ statusEl.textContent = "Password required"; return; }
+    btn.disabled = true;
+    btn.classList.add("login-btn-loading");
+    statusEl.textContent = "";
+    fetch("/api/auth/login", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({password: pwInput.value})
+    }).then(function(r){ return r.json().then(function(d){ return {ok:r.ok, data:d}; }); })
+    .then(function(res){
+      if(res.ok && res.data.ok){
+        // Animate out then switch
+        var loginWrap = document.querySelector(".login-wrap");
+        if(loginWrap) loginWrap.classList.add("login-exit");
+        setTimeout(function(){
+          location.hash = "#dashboard";
+          D = null;
+          connectSSE();
+        }, 400);
+        return;
+      } else {
+        btn.disabled = false;
+        btn.classList.remove("login-btn-loading");
+        statusEl.textContent = res.data.error || "Login failed";
+        pwInput.classList.add("login-input-error");
+        setTimeout(function(){ pwInput.classList.remove("login-input-error"); }, 600);
+      }
+    }).catch(function(){
+      btn.disabled = false;
+      btn.classList.remove("login-btn-loading");
+      statusEl.textContent = "Network error";
+    });
+  });
+
+  // Password field with lock icon
+  var fieldWrap = div("login-field");
+  var lockSvg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  lockSvg.setAttribute("class","login-lock");
+  lockSvg.setAttribute("viewBox","0 0 24 24");
+  lockSvg.setAttribute("fill","none");
+  lockSvg.setAttribute("stroke","currentColor");
+  lockSvg.setAttribute("stroke-width","2");
+  lockSvg.setAttribute("width","16");
+  lockSvg.setAttribute("height","16");
+  var rect = document.createElementNS("http://www.w3.org/2000/svg","rect");
+  rect.setAttribute("x","3"); rect.setAttribute("y","11"); rect.setAttribute("width","18"); rect.setAttribute("height","11"); rect.setAttribute("rx","2"); rect.setAttribute("ry","2");
+  var lockPath = document.createElementNS("http://www.w3.org/2000/svg","path");
+  lockPath.setAttribute("d","M7 11V7a5 5 0 0 1 10 0v4");
+  lockSvg.appendChild(rect);
+  lockSvg.appendChild(lockPath);
+  fieldWrap.appendChild(lockSvg);
+
+  var pwInput = document.createElement("input");
+  pwInput.type = "password";
+  pwInput.className = "login-input";
+  pwInput.placeholder = "Password";
+  pwInput.autocomplete = "current-password";
+  fieldWrap.appendChild(pwInput);
+  form.appendChild(fieldWrap);
+
+  var btn = document.createElement("button");
+  btn.type = "submit";
+  btn.className = "login-btn";
+  var btnText = document.createElement("span");
+  btnText.className = "login-btn-text";
+  btnText.textContent = "Sign In";
+  btn.appendChild(btnText);
+  form.appendChild(btn);
+
+  var status = el("div", "login-status");
+  form.appendChild(status);
+
+  card.appendChild(form);
+
+  var footer = el("p", "login-footer", ["AI-powered task autopilot"]);
+  card.appendChild(footer);
+
+  wrap.appendChild(card);
+  root.appendChild(wrap);
+
+  // Auto-focus password field
+  setTimeout(function(){ pwInput.focus(); }, 50);
 }
 
 function renderSetup(root){
@@ -3851,6 +4317,193 @@ function loadConfig(cb){
   });
 }
 
+/* ── Jobs View ── */
+
+function renderJobs(root){
+  var jobs = D.jobs || [];
+
+  var header = div("view-header");
+  header.appendChild(span("view-title", "Jobs"));
+  header.appendChild(span("proj-count", jobs.length + " jobs"));
+  var addBtn = el("button","btn btn-sm btn-primary");
+  addBtn.textContent = "+ Add Job";
+  addBtn.onclick = function(){ openJobModal(null); };
+  header.appendChild(addBtn);
+  root.appendChild(header);
+
+  if(jobs.length === 0){
+    var empty = div("jobs-empty");
+    empty.textContent = "No jobs configured. Create a scheduled job to run Claude on a cron schedule.";
+    root.appendChild(empty);
+    return;
+  }
+
+  var list = div("jobs-list");
+
+  var thead = div("job-row job-row-header");
+  thead.appendChild(span("job-col-name","NAME"));
+  thead.appendChild(span("job-col-schedule","SCHEDULE"));
+  thead.appendChild(span("job-col-project","PROJECT"));
+  thead.appendChild(span("job-col-instruction","INSTRUCTION"));
+  thead.appendChild(span("job-col-status","STATUS"));
+  thead.appendChild(span("job-col-last","LAST RUN"));
+  thead.appendChild(span("job-col-actions",""));
+  list.appendChild(thead);
+
+  for(var i=0;i<jobs.length;i++){
+    (function(j){
+      var row = div("job-row");
+
+      row.appendChild(span("job-col-name", j.name));
+
+      var schedEl = span("job-col-schedule","");
+      schedEl.title = j.schedule;
+      schedEl.textContent = j.schedule_human || j.schedule;
+      row.appendChild(schedEl);
+
+      row.appendChild(span("job-col-project", j.project === "_system" ? "System" : j.project));
+
+      var instrEl = span("job-col-instruction","");
+      instrEl.textContent = (j.instruction||"").length > 60 ? j.instruction.substring(0,60) + "..." : (j.instruction||"");
+      instrEl.title = j.instruction || "";
+      row.appendChild(instrEl);
+
+      var statusBadge = span("job-status job-status-" + (j.status||"idle"), (j.status||"idle").toUpperCase());
+      row.appendChild(span("job-col-status","", [statusBadge]));
+
+      var lastEl = span("job-col-last","");
+      if(j.last_run_at && j.last_run_at !== "0001-01-01T00:00:00Z"){
+        var d = new Date(j.last_run_at);
+        lastEl.textContent = d.toLocaleDateString() + " " + d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+        if(j.last_result) lastEl.title = j.last_result;
+      } else {
+        lastEl.textContent = "\u2014";
+      }
+      row.appendChild(lastEl);
+
+      var acts = div("job-col-actions");
+
+      var toggleBtn = el("button","btn btn-sm " + (j.enabled ? "btn-success" : ""));
+      toggleBtn.textContent = j.enabled ? "ON" : "OFF";
+      toggleBtn.onclick = function(e){
+        e.stopPropagation();
+        api("POST","/api/jobs/update",{id:j.id, name:j.name, schedule:j.schedule, project:j.project, instruction:j.instruction, enabled:!j.enabled}, function(){ toast(j.enabled ? "Job disabled" : "Job enabled","info"); });
+      };
+      acts.appendChild(toggleBtn);
+
+      var runBtn = el("button","btn btn-sm btn-primary");
+      runBtn.textContent = "Run";
+      runBtn.onclick = function(e){
+        e.stopPropagation();
+        var restore = btnLoading(runBtn, "...");
+        api("POST","/api/jobs/run",{id:j.id}, function(){ if(restore) restore(); toast("Job triggered","success"); });
+      };
+      acts.appendChild(runBtn);
+
+      var editBtn = el("button","btn btn-sm");
+      editBtn.textContent = "Edit";
+      editBtn.onclick = function(e){
+        e.stopPropagation();
+        openJobModal(j);
+      };
+      acts.appendChild(editBtn);
+
+      var delBtn = el("button","btn btn-sm btn-danger");
+      delBtn.textContent = "Del";
+      delBtn.onclick = function(e){
+        e.stopPropagation();
+        if(!confirm("Delete job \"" + j.name + "\"?")) return;
+        api("POST","/api/jobs/delete",{id:j.id}, function(){ toast("Job deleted","success"); });
+      };
+      acts.appendChild(delBtn);
+
+      row.appendChild(acts);
+      list.appendChild(row);
+    })(jobs[i]);
+  }
+  root.appendChild(list);
+}
+
+function openJobModal(job){
+  var projs = D.projects || [];
+  var sel = document.getElementById("job-project");
+  while(sel.firstChild) sel.removeChild(sel.firstChild);
+  var sysOpt = document.createElement("option");
+  sysOpt.value = "_system";
+  sysOpt.textContent = "System";
+  sel.appendChild(sysOpt);
+  for(var i=0;i<projs.length;i++){
+    var opt = document.createElement("option");
+    opt.value = projs[i].name;
+    opt.textContent = projs[i].name;
+    sel.appendChild(opt);
+  }
+
+  if(job){
+    document.getElementById("job-modal-title").textContent = "Edit Job";
+    document.getElementById("job-edit-id").value = job.id;
+    document.getElementById("job-name").value = job.name;
+    document.getElementById("job-schedule").value = job.schedule;
+    document.getElementById("job-project").value = job.project;
+    document.getElementById("job-instruction").value = job.instruction;
+    document.getElementById("job-enabled").value = job.enabled ? "true" : "false";
+    document.getElementById("job-submit").textContent = "Save";
+    document.getElementById("job-submit").onclick = function(){ submitJobUpdate(); };
+  } else {
+    document.getElementById("job-modal-title").textContent = "New Job";
+    document.getElementById("job-edit-id").value = "";
+    document.getElementById("job-name").value = "";
+    document.getElementById("job-schedule").value = "";
+    document.getElementById("job-project").value = "_system";
+    document.getElementById("job-instruction").value = "";
+    document.getElementById("job-enabled").value = "true";
+    document.getElementById("job-submit").textContent = "Create Job";
+    document.getElementById("job-submit").onclick = function(){ submitJobAdd(); };
+  }
+  openModal("modal-job");
+}
+
+function submitJobAdd(){
+  var name = document.getElementById("job-name").value.trim();
+  var schedule = document.getElementById("job-schedule").value.trim();
+  var project = document.getElementById("job-project").value;
+  var instruction = document.getElementById("job-instruction").value.trim();
+  var enabled = document.getElementById("job-enabled").value === "true";
+  if(!name || !schedule || !instruction){ toast("Fill all fields","error"); return; }
+  var btn = document.getElementById("job-submit");
+  var restore = btnLoading(btn, "Creating...");
+  api("POST","/api/jobs/add",{name:name,schedule:schedule,project:project,instruction:instruction,enabled:enabled}, function(){
+    if(restore) restore();
+    closeModal("modal-job");
+    toast("Job created","success");
+  });
+}
+
+function submitJobUpdate(){
+  var id = parseInt(document.getElementById("job-edit-id").value);
+  var name = document.getElementById("job-name").value.trim();
+  var schedule = document.getElementById("job-schedule").value.trim();
+  var project = document.getElementById("job-project").value;
+  var instruction = document.getElementById("job-instruction").value.trim();
+  var enabled = document.getElementById("job-enabled").value === "true";
+  if(!name || !schedule || !instruction){ toast("Fill all fields","error"); return; }
+  var btn = document.getElementById("job-submit");
+  var restore = btnLoading(btn, "Saving...");
+  api("POST","/api/jobs/update",{id:id,name:name,schedule:schedule,project:project,instruction:instruction,enabled:enabled}, function(){
+    if(restore) restore();
+    closeModal("modal-job");
+    toast("Job updated","success");
+  });
+}
+
+function submitJob(){
+  var editId = document.getElementById("job-edit-id").value;
+  if(editId) submitJobUpdate();
+  else submitJobAdd();
+}
+
+/* ── Config View ── */
+
 function renderConfig(root){
   var header = div("view-header");
   header.appendChild(span("view-title", "Configuration"));
@@ -3902,7 +4555,7 @@ function renderConfig(root){
 
   // Sub-tab bar: Paths | Server | Budget | Autopilot
   var subTabs = div("config-subtabs");
-  [["Paths","paths"],["Server","server"],["Limits","limits"],["Autopilot","autopilot"],["Security","security"]].forEach(function(pair){
+  [["Paths","paths"],["Server","server"],["Limits","limits"],["Autopilot","autopilot"]].forEach(function(pair){
     var tb = el("button", "config-subtab-btn" + (configSubTab === pair[1] ? " active" : ""), [pair[0]]);
     tb.onclick = function(){ configSubTab = pair[1]; configEditing = null; render(); };
     subTabs.appendChild(tb);
@@ -3914,7 +4567,7 @@ function renderConfig(root){
     case "server": renderConfigServer(root); break;
     case "limits": renderConfigLimits(root); break;
     case "autopilot": renderConfigAutopilot(root); break;
-    case "security": renderConfigSecurity(root); break;
+    case "security": renderConfigLimits(root); break;
   }
 }
 
@@ -4100,63 +4753,6 @@ function renderConfigAutopilot(root){
   }
   skSec.appendChild(skList);
   root.appendChild(skSec);
-}
-
-function renderConfigSecurity(root){
-  var c = configData;
-
-  // ── System Executor Section ──
-  var sec = div("config-section");
-  var hdr = div("section-header");
-  hdr.appendChild(el("h3","config-section-title",["System Executor"]));
-  sec.appendChild(hdr);
-
-  var grid = div("config-grid");
-  var sudoRow = div("config-field");
-  var sudoLbl = el("label","config-label",["Sudo Enabled"]);
-  sudoRow.appendChild(sudoLbl);
-  var sudoToggle = el("label","toggle-switch");
-  var sudoCb = document.createElement("input");
-  sudoCb.type = "checkbox";
-  sudoCb.checked = !!c.sudo_enabled;
-  sudoCb.onchange = function(){
-    api("POST","/api/config/save",{sudo_enabled:sudoCb.checked},function(){
-      toast("Sudo " + (sudoCb.checked ? "enabled" : "disabled"), "success");
-      fetchConfig();
-    });
-  };
-  sudoToggle.appendChild(sudoCb);
-  sudoToggle.appendChild(el("span","toggle-slider"));
-  sudoRow.appendChild(sudoToggle);
-  var sudoDesc = el("div","config-field-desc",["Allow spawned Claude sessions to use sudo. Specific destructive operations (sudo rm, sudo chmod, sudo chown) remain blocked regardless."]);
-  sudoRow.appendChild(sudoDesc);
-  grid.appendChild(sudoRow);
-  sec.appendChild(grid);
-  root.appendChild(sec);
-
-  // ── Active Guardrails Section ──
-  var grSec = div("config-section");
-  var grHdr = div("section-header");
-  grHdr.appendChild(el("h3","config-section-title",["Active Guardrails"]));
-  grSec.appendChild(grHdr);
-
-  var guardrails = [
-    ["Git Safety", "Blocks force push, reset --hard, rebase, stash drop, blind staging, branch -D"],
-    ["Filesystem", "Blocks rm -rf /, chmod 777, destructive removals"],
-    ["Process Control", "Blocks kill -9, killall, systemctl stop/disable"],
-    ["Remote Execution", "Blocks piping curl/wget to shell or sudo"],
-    ["Cloud/SQL", "Blocks DROP TABLE, terraform destroy, aws s3 --delete, direct lambda updates"]
-  ];
-
-  var grList = el("div","config-guardrails-list");
-  guardrails.forEach(function(g){
-    var item = div("config-guardrail-item");
-    item.appendChild(el("span","guardrail-name",[g[0]]));
-    item.appendChild(el("span","guardrail-desc",[g[1]]));
-    grList.appendChild(item);
-  });
-  grSec.appendChild(grList);
-  root.appendChild(grSec);
 }
 
 function renderConfigMarketplace(root){
@@ -5315,6 +5911,7 @@ function renderConfigServer(root){
   sec.appendChild(grid);
   if(editing) sec.appendChild(configEditActions("server"));
   root.appendChild(sec);
+
 }
 
 function renderConfigLimits(root){
@@ -5338,6 +5935,54 @@ function renderConfigLimits(root){
   sec.appendChild(grid);
   if(editing) sec.appendChild(configEditActions("limits"));
   root.appendChild(sec);
+
+  // ── System Executor Section ──
+  var seSec = div("config-section");
+  var seHdr = div("section-header");
+  seHdr.appendChild(el("h3","config-section-title",["System Executor"]));
+  seSec.appendChild(seHdr);
+  var seGrid = div("config-grid");
+  var sudoRow = div("config-field");
+  sudoRow.appendChild(el("label","config-label",["Sudo Enabled"]));
+  var sudoToggle = el("label","toggle-switch");
+  var sudoCb = document.createElement("input");
+  sudoCb.type = "checkbox";
+  sudoCb.checked = !!c.sudo_enabled;
+  sudoCb.onchange = function(){
+    api("POST","/api/config/save",{sudo_enabled:sudoCb.checked},function(){
+      toast("Sudo " + (sudoCb.checked ? "enabled" : "disabled"), "success");
+      fetchConfig();
+    });
+  };
+  sudoToggle.appendChild(sudoCb);
+  sudoToggle.appendChild(el("span","toggle-slider"));
+  sudoRow.appendChild(sudoToggle);
+  sudoRow.appendChild(el("div","config-field-desc",["Allow spawned Claude sessions to use sudo. Specific destructive operations (sudo rm, sudo chmod, sudo chown) remain blocked regardless."]));
+  seGrid.appendChild(sudoRow);
+  seSec.appendChild(seGrid);
+  root.appendChild(seSec);
+
+  // ── Active Guardrails Section ──
+  var grSec = div("config-section");
+  var grHdr = div("section-header");
+  grHdr.appendChild(el("h3","config-section-title",["Active Guardrails"]));
+  grSec.appendChild(grHdr);
+  var guardrails = [
+    ["Git Safety", "Blocks force push, reset --hard, rebase, stash drop, blind staging, branch -D"],
+    ["Filesystem", "Blocks rm -rf /, chmod 777, destructive removals"],
+    ["Process Control", "Blocks kill -9, killall, systemctl stop/disable"],
+    ["Remote Execution", "Blocks piping curl/wget to shell or sudo"],
+    ["Cloud/SQL", "Blocks DROP TABLE, terraform destroy, aws s3 --delete, direct lambda updates"]
+  ];
+  var grList = el("div","config-guardrails-list");
+  guardrails.forEach(function(g){
+    var item = div("config-guardrail-item");
+    item.appendChild(el("span","guardrail-name",[g[0]]));
+    item.appendChild(el("span","guardrail-desc",[g[1]]));
+    grList.appendChild(item);
+  });
+  grSec.appendChild(grList);
+  root.appendChild(grSec);
 }
 
 function configEditActions(section){
@@ -5352,11 +5997,11 @@ function configEditActions(section){
 }
 
 function renderConfigTemplates(root){
-  if(!templatesCache.length && !templatesLoading){
+  if(templatesCache === null && !templatesLoading){
     templatesLoading = true;
     api("GET","/api/templates/list",null,function(d){
       templatesLoading = false;
-      if(d.templates) templatesCache = d.templates;
+      templatesCache = d.templates || [];
       render();
     });
     var loadingEl = div("config-section");

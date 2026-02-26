@@ -2,8 +2,8 @@
 
 ### Prerequisites
 
-- Ubuntu/Debian-based system **or** RHEL / Rocky Linux 8+
-- sudo access (non-root user recommended)
+- **Linux**: Ubuntu/Debian **or** RHEL / Rocky Linux 8+ (with sudo access)
+- **macOS**: macOS 12+ with Apple Silicon (M1/M2/M3/M4) or Intel
 
 ---
 
@@ -15,18 +15,20 @@ Single command that installs all prerequisites and teamoon:
 curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/main/install.sh | bash
 ```
 
-This handles everything automatically:
+The installer auto-detects your OS (Ubuntu/Debian, RHEL/Rocky, macOS) and handles everything:
 
-| Step | What it installs                                                    |
-| ---- | ------------------------------------------------------------------- |
-| 1    | System packages (build-essential, libssl-dev, jq, shellcheck, etc.) |
-| 2    | GitHub CLI (gh)                                                     |
-| 3    | Go 1.24                                                             |
-| 4    | nvm + Node.js LTS                                                   |
-| 5    | Python 3.11 (via pyenv)                                             |
-| 6    | Rust (via rustup)                                                   |
-| 7    | Claude Code CLI                                                     |
-| 8    | Clones, builds, and installs teamoon with systemd service           |
+| Step | What it installs                                      |
+| ---- | ----------------------------------------------------- |
+| 1    | System packages (Homebrew on macOS, apt/dnf on Linux) |
+| 2    | Go 1.24                                               |
+| 3    | nvm + Node.js LTS                                     |
+| 4    | GitHub CLI (gh)                                       |
+| 5    | Rust (via rustup)                                     |
+| 6    | Python 3.11 (via pyenv)                               |
+| 7    | Claude Code CLI                                       |
+| 8    | Clones, builds, and installs teamoon as a service     |
+
+Service management: **systemd** on Linux, **launchd** on macOS.
 
 Each step checks if already installed and skips if so — safe to re-run for updates.
 
@@ -187,6 +189,93 @@ The installer does this automatically when firewalld is active.
 ### Environment File
 
 On RHEL, the systemd service reads `/etc/sysconfig/teamoon` for environment variables (the RHEL convention). The installer creates this file automatically.
+
+---
+
+## 🍎 macOS Install
+
+### Prerequisites
+
+- macOS 12 Monterey or later
+- Apple Silicon (M1/M2/M3/M4) or Intel
+- Xcode Command Line Tools (`xcode-select --install`)
+
+### Quick Install (recommended)
+
+Same single command — the installer auto-detects macOS:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/JuanVilla424/teamoon/main/install.sh | bash
+```
+
+The installer uses **Homebrew** for packages and **launchd** instead of systemd.
+
+### Manual — Homebrew Packages
+
+```bash
+# Install Homebrew (if not already installed)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Install prerequisites
+brew install go jq htop tree tmux shellcheck openssl readline
+```
+
+### Manual — Build and Install
+
+```bash
+git clone https://github.com/JuanVilla424/teamoon.git
+cd teamoon
+make build
+make install
+```
+
+`make install` on macOS:
+
+- Copies the binary to `/usr/local/bin/teamoon`
+- Generates a launchd user agent (`~/Library/LaunchAgents/com.teamoon.plist`)
+- Loads and starts the agent via `launchctl`
+
+### Service Management
+
+```bash
+# Check status
+launchctl list | grep teamoon
+
+# Stop
+launchctl bootout gui/$(id -u)/com.teamoon
+
+# Start
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.teamoon.plist
+
+# View logs
+tail -f ~/Library/Logs/teamoon.log
+```
+
+### Apple Silicon vs Intel
+
+The installer and Makefile auto-detect your architecture. Homebrew installs to:
+
+- **Apple Silicon**: `/opt/homebrew/`
+- **Intel**: `/usr/local/`
+
+Both paths are included in the launchd environment.
+
+### Pre-Built Binaries
+
+Download pre-compiled binaries from [GitHub Releases](https://github.com/JuanVilla424/teamoon/releases):
+
+| Platform            | File                                 |
+| ------------------- | ------------------------------------ |
+| macOS Apple Silicon | `teamoon-vX.Y.Z-darwin-arm64.tar.gz` |
+| macOS Intel         | `teamoon-vX.Y.Z-darwin-amd64.tar.gz` |
+| Linux amd64         | `teamoon-vX.Y.Z-linux-amd64.tar.gz`  |
+| Linux arm64         | `teamoon-vX.Y.Z-linux-arm64.tar.gz`  |
+
+```bash
+tar xzf teamoon-*.tar.gz
+sudo mv teamoon /usr/local/bin/
+teamoon serve
+```
 
 ---
 

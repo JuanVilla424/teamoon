@@ -184,6 +184,7 @@ func StreamPrereqsInstall(progress ProgressFunc) error {
 var keySystemPackagesByDistro = map[distroFamily][]string{
 	distroDebian: {"build-essential", "libssl-dev", "jq", "shellcheck"},
 	distroRHEL:   {"gcc", "openssl-devel", "jq", "ShellCheck"},
+	distroDarwin: {"jq", "shellcheck"},
 }
 
 func checkSystemPackages() (string, bool) {
@@ -194,9 +195,12 @@ func checkSystemPackages() (string, bool) {
 	missing := 0
 	for _, pkg := range pkgs {
 		var cmd *exec.Cmd
-		if currentDistro == distroRHEL {
+		switch currentDistro {
+		case distroRHEL:
 			cmd = exec.Command("rpm", "-q", pkg)
-		} else {
+		case distroDarwin:
+			cmd = exec.Command("brew", "list", "--formula", pkg)
+		default:
 			cmd = exec.Command("dpkg", "-s", pkg)
 		}
 		if err := cmd.Run(); err != nil {
@@ -351,6 +355,10 @@ var allSystemPackagesByDistro = map[distroFamily][]string{
 		"dnf-plugins-core", "pkgconf-pkg-config",
 		"python3-pip",
 	},
+	distroDarwin: {
+		"jq", "htop", "tree", "tmux",
+		"shellcheck", "openssl", "readline",
+	},
 }
 
 func installSystemPackages(progress ProgressFunc) error {
@@ -365,9 +373,12 @@ func installSystemPackages(progress ProgressFunc) error {
 	var missing []string
 	for _, pkg := range pkgs {
 		var cmd *exec.Cmd
-		if currentDistro == distroRHEL {
+		switch currentDistro {
+		case distroRHEL:
 			cmd = exec.Command("rpm", "-q", pkg)
-		} else {
+		case distroDarwin:
+			cmd = exec.Command("brew", "list", "--formula", pkg)
+		default:
 			cmd = exec.Command("dpkg", "-s", pkg)
 		}
 		if err := cmd.Run(); err != nil {
@@ -390,10 +401,14 @@ func installSystemPackages(progress ProgressFunc) error {
 	}
 
 	var cmd *exec.Cmd
-	if currentDistro == distroRHEL {
+	switch currentDistro {
+	case distroRHEL:
 		args := append([]string{"dnf", "install", "-y"}, missing...)
 		cmd = exec.Command("sudo", args...)
-	} else {
+	case distroDarwin:
+		args := append([]string{"install"}, missing...)
+		cmd = exec.Command("brew", args...)
+	default:
 		args := append([]string{"apt-get", "install", "-y", "-qq"}, missing...)
 		cmd = exec.Command("sudo", args...)
 	}
@@ -412,7 +427,7 @@ func installGo(progress ProgressFunc) error {
 	if arch == "" {
 		arch = "amd64"
 	}
-	tarball := fmt.Sprintf("go%s.linux-%s.tar.gz", goVersion, arch)
+	tarball := fmt.Sprintf("go%s.%s-%s.tar.gz", goVersion, runtime.GOOS, arch)
 	url := "https://go.dev/dl/" + tarball
 
 	progress(map[string]any{"type": "detail", "message": "Downloading Go " + goVersion})
@@ -444,11 +459,18 @@ func installGo(progress ProgressFunc) error {
 	return nil
 }
 
-// appendToShellProfile appends a line to .bashrc and also .bash_profile on RHEL.
+// appendToShellProfile appends a line to the user's shell profile.
+// Targets .bashrc on Linux (.bash_profile on RHEL), .zshrc on macOS.
 func appendToShellProfile(home, line string) {
-	files := []string{filepath.Join(home, ".bashrc")}
-	if currentDistro == distroRHEL {
-		files = append(files, filepath.Join(home, ".bash_profile"))
+	var files []string
+	shell := os.Getenv("SHELL")
+	if currentDistro == distroDarwin || strings.Contains(shell, "zsh") {
+		files = []string{filepath.Join(home, ".zshrc")}
+	} else {
+		files = []string{filepath.Join(home, ".bashrc")}
+		if currentDistro == distroRHEL {
+			files = append(files, filepath.Join(home, ".bash_profile"))
+		}
 	}
 	for _, f := range files {
 		content, _ := os.ReadFile(f)
@@ -544,10 +566,14 @@ func installRust(progress ProgressFunc) error {
 }
 
 func installGh(progress ProgressFunc) error {
-	if currentDistro == distroRHEL {
+	switch currentDistro {
+	case distroRHEL:
 		return installGhRHEL(progress)
+	case distroDarwin:
+		return installGhDarwin(progress)
+	default:
+		return installGhDebian(progress)
 	}
-	return installGhDebian(progress)
 }
 
 func installGhDebian(progress ProgressFunc) error {
@@ -581,6 +607,15 @@ func installGhRHEL(progress ProgressFunc) error {
 	cmd := exec.Command("bash", "-c", script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gh install failed (RHEL): %s — %s", err, trimOutput(out))
+	}
+	return nil
+}
+
+func installGhDarwin(progress ProgressFunc) error {
+	progress(map[string]any{"type": "detail", "message": "Installing GitHub CLI via Homebrew"})
+	cmd := exec.Command("brew", "install", "gh")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh install failed (brew): %s — %s", err, trimOutput(out))
 	}
 	return nil
 }

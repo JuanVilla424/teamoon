@@ -32,6 +32,8 @@ func AugmentPath() {
 		"/usr/bin",
 		"/usr/sbin",
 		"/usr/local/sbin",
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
 		"/snap/bin",
 	}
 

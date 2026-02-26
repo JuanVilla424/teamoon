@@ -73,6 +73,7 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 			if planErr != nil {
 				emit(logs.LevelError, fmt.Sprintf("Plan failed for task #%d: %v", task.ID, planErr))
 				queue.SetFailReason(task.ID, "plan generation failed: "+planErr.Error())
+				send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: "plan_failed"})
 				continue
 			}
 			// Notify UI that plan is ready (PLN state)
@@ -157,6 +158,7 @@ func RunSystemLoop(ctx context.Context, cfg config.Config, planFn PlanFunc, send
 			if planErr != nil {
 				emit(logs.LevelError, fmt.Sprintf("Plan failed for system task #%d: %v", task.ID, planErr))
 				queue.SetFailReason(task.ID, "plan generation failed: "+planErr.Error())
+				send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: "plan_failed"})
 				continue
 			}
 			emit(logs.LevelSuccess, fmt.Sprintf("Plan ready for system task #%d", task.ID))

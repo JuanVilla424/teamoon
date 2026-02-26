@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type SkeletonStep struct {
@@ -109,6 +110,11 @@ func DefaultConfig() Config {
 		SourceDir:          filepath.Join(home, "Projects", "teamoon"),
 		LogRetentionDays:   20,
 	}
+}
+
+// IsPasswordHashed returns true if the password string is a bcrypt hash.
+func IsPasswordHashed(pw string) bool {
+	return strings.HasPrefix(pw, "$2a$") || strings.HasPrefix(pw, "$2b$")
 }
 
 func ConfigDir() string {
