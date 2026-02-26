@@ -98,6 +98,21 @@ func (s *Server) RecoverAndResume() {
 			log.Printf("[recovery] autopilot resumed for project: %s", project)
 		}
 	}
+
+	if sysTasks, _ := queue.ListAutopilotSystemPending(); len(sysTasks) > 0 {
+		s.startSystemLoop()
+		log.Printf("[recovery] system executor resumed with %d tasks", len(sysTasks))
+	}
+}
+
+func (s *Server) startSystemLoop() {
+	cfg := s.cfg
+	send := s.webSend(0)
+	s.store.engineMgr.StartProject("_system", cfg.MaxConcurrent, func(ctx context.Context) {
+		engine.RunSystemLoop(ctx, cfg, func(t queue.Task, sk config.SkeletonConfig) (plan.Plan, error) {
+			return plangen.GeneratePlan(t, sk, cfg)
+		}, send, s.store.engineMgr)
+	})
 }
 
 func (s *Server) Start(ctx context.Context) {
