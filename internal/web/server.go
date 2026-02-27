@@ -164,6 +164,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/onboarding/bmad", s.logRequest(s.handleOnboardingBMAD))
 	mux.HandleFunc("/api/onboarding/hooks", s.logRequest(s.handleOnboardingHooks))
 	mux.HandleFunc("/api/onboarding/mcp", s.logRequest(s.handleOnboardingMCP))
+	mux.HandleFunc("/api/onboarding/plugins", s.logRequest(s.handleOnboardingPlugins))
 
 	mux.HandleFunc("/api/auth/login", s.logRequest(s.handleLogin))
 	mux.HandleFunc("/api/auth/logout", s.logRequest(s.handleLogout))
@@ -205,6 +206,9 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/mcp/catalog", s.logRequest(s.authWrap(s.handleMCPCatalog)))
 	mux.HandleFunc("/api/mcp/install", s.logRequest(s.authWrap(s.handleMCPInstall)))
 	mux.HandleFunc("/api/mcp/uninstall", s.logRequest(s.authWrap(s.handleMCPUninstall)))
+	mux.HandleFunc("/api/plugins/list", s.logRequest(s.authWrap(s.handlePluginList)))
+	mux.HandleFunc("/api/plugins/install", s.logRequest(s.authWrap(s.handlePluginInstall)))
+	mux.HandleFunc("/api/plugins/uninstall", s.logRequest(s.authWrap(s.handlePluginUninstall)))
 	mux.HandleFunc("/api/skills/list", s.logRequest(s.authWrap(s.handleSkillsList)))
 	mux.HandleFunc("/api/skills/catalog", s.logRequest(s.authWrap(s.handleSkillsCatalog)))
 	mux.HandleFunc("/api/skills/install", s.logRequest(s.authWrap(s.handleSkillsInstall)))

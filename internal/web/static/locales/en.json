@@ -632,6 +632,7 @@
   "mkt.manage.saved": "MCP configuration saved",
 
   "mkt.subtab.mcp": "MCP",
+  "mkt.subtab.plugins": "Plugins",
   "mkt.subtab.skills": "Skills",
 
   "projects.status.active": "active",
@@ -687,10 +688,31 @@
   "config.setup.mcp.install_failed": "Install failed",
   "config.setup.mcp.already_configured": "already configured",
 
+  "config.setup.plugins.title": "Plugins",
+  "config.setup.plugins.desc": "Install Claude Code plugins for enhanced capabilities.",
+  "config.setup.plugins.install": "Install Plugins",
+  "config.setup.plugins.installed": "Plugins installed",
+  "config.setup.plugins.install_failed": "Install failed",
+  "config.setup.plugins.already_installed": "already installed",
+
   "config.setup.tab.bmad": "BMAD",
   "config.setup.tab.config": "Configuration",
   "config.setup.tab.hooks": "Hooks",
   "config.setup.tab.mcp": "MCP Servers",
+  "config.setup.tab.plugins": "Plugins",
   "config.setup.tab.prereqs": "Prerequisites",
-  "config.setup.tab.skills": "Skills"
+  "config.setup.tab.skills": "Skills",
+
+  "plugins.installed": "Installed",
+  "plugins.enabled": "Enabled",
+  "plugins.disabled": "Disabled",
+  "plugins.recommended": "Recommended",
+  "plugins.install": "Install",
+  "plugins.uninstall": "Uninstall",
+  "plugins.installing": "Installing...",
+  "plugins.uninstalling": "Uninstalling...",
+  "plugins.installed_toast": "{name} installed",
+  "plugins.uninstalled_toast": "{name} uninstalled",
+  "plugins.confirm_uninstall": "Uninstall {name}?",
+  "plugins.no_plugins": "No plugins installed"
 }

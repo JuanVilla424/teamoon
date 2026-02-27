@@ -18,7 +18,7 @@ type bmadVersions struct {
 }
 
 func installBMAD() error {
-	fmt.Println("\n[4/7] Installing BMAD commands...")
+	fmt.Println("\n[4/8] Installing BMAD commands...")
 
 	// Read versions manifest
 	data, err := bmadFS.ReadFile("assets/bmad/versions.json")

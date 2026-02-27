@@ -10,7 +10,7 @@ import (
 )
 
 func installGlobalHooks() error {
-	fmt.Println("\n[5/7] Installing global hooks...")
+	fmt.Println("\n[5/8] Installing global hooks...")
 
 	home, err := os.UserHomeDir()
 	if err != nil {

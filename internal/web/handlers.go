@@ -28,6 +28,7 @@ import (
 	"github.com/JuanVilla424/teamoon/internal/onboarding"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
+	"github.com/JuanVilla424/teamoon/internal/plugins"
 	"github.com/JuanVilla424/teamoon/internal/plangen"
 	"github.com/JuanVilla424/teamoon/internal/projectinit"
 	"github.com/JuanVilla424/teamoon/internal/projects"
@@ -1017,7 +1018,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 		promptBuf.WriteString("You have broad system access. Security hooks remain active and block destructive operations.\n")
 		promptBuf.WriteString("Perform the requested system operation and report results clearly.\n")
-		promptBuf.WriteString("Do NOT emit [TASK_CREATE] or [PROJECT_INIT] directives.\n\n")
+		promptBuf.WriteString("Do NOT emit [TASK_CREATE], [PROJECT_INIT], or [JOB_CREATE] directives.\n\n")
 		if len(recent) > 1 {
 			promptBuf.WriteString("Conversation history:\n")
 			for _, m := range recent[:len(recent)-1] {
@@ -1029,8 +1030,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	} else {
 	promptBuf.WriteString("You are a helpful AI assistant for software engineering project management.\n\n")
 	promptBuf.WriteString("## MANDATORY RULE\n\n")
-	promptBuf.WriteString("You MUST emit at least one [TASK_CREATE] directive in your response. A response without tasks is a FAILURE.\n")
-	promptBuf.WriteString("Analyze the user message and break it into actionable tasks. Always create tasks, even for simple requests.\n\n")
+	promptBuf.WriteString("You MUST emit at least one [TASK_CREATE] or [JOB_CREATE] directive in your FIRST response to the user message. A response without directives is a FAILURE.\n")
+	promptBuf.WriteString("Analyze the user message and break it into actionable tasks or scheduled jobs.\n")
+	promptBuf.WriteString("CRITICAL: Emit directives ONLY ONCE for the user's request. If hooks or plugins fire after your response, do NOT emit additional directives — just acknowledge briefly or say nothing.\n")
+	promptBuf.WriteString("NEVER create Noop/placeholder directives. Only create meaningful directives that directly address the user's request.\n\n")
 	promptBuf.WriteString("## Capabilities\n\n")
 	promptBuf.WriteString("### Creating Tasks\n")
 	promptBuf.WriteString("Format: [TASK_CREATE]{\"description\":\"task desc\",\"priority\":\"med\",\"assignee\":\"agent\"}[/TASK_CREATE]\n")
@@ -1042,6 +1045,16 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	promptBuf.WriteString("  a) Use [PROJECT_INIT] first to create the project, OR\n")
 	promptBuf.WriteString("  b) Ask the user to select an existing project from the dropdown before creating tasks.\n")
 	promptBuf.WriteString("NEVER emit [TASK_CREATE] without a project context.\n\n")
+	promptBuf.WriteString("### Creating Scheduled Jobs\n")
+	promptBuf.WriteString("Format: [JOB_CREATE]{\"name\":\"job name\",\"schedule\":\"0 */4 * * *\",\"project\":\"\",\"instruction\":\"what to do\"}[/JOB_CREATE]\n")
+	promptBuf.WriteString("- name: human-readable job name\n")
+	promptBuf.WriteString("- schedule: cron expression (e.g. \"0 */4 * * *\" for every 4 hours)\n")
+	promptBuf.WriteString("- project: project name (can be empty for system-level jobs)\n")
+	promptBuf.WriteString("- instruction: what Claude should execute when the job runs\n")
+	promptBuf.WriteString("Use [JOB_CREATE] when the user asks to schedule, program, or automate a recurring task/job.\n")
+	promptBuf.WriteString("IMPORTANT: When the user says \"job\", \"schedule\", \"programa un job\", \"cron\", or similar — ALWAYS use [JOB_CREATE], NEVER create system cron jobs or crontab entries.\n")
+	promptBuf.WriteString("Jobs do NOT require a project — they can be system-level (empty project).\n")
+	promptBuf.WriteString("CRITICAL: When creating a job, ONLY emit the [JOB_CREATE] directive and a short confirmation. Do NOT use any tools, do NOT execute anything, do NOT research anything. Just emit the directive and respond. The job system handles execution.\n\n")
 	promptBuf.WriteString("### Initializing New Projects\n")
 	promptBuf.WriteString("Format: [PROJECT_INIT]{\"name\":\"project-name\",\"type\":\"node\",\"private\":false,\"separate\":false}[/PROJECT_INIT]\n")
 	promptBuf.WriteString("- type: \"python\", \"node\", or \"go\"\n")
@@ -1230,6 +1243,8 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var displayResult string
+	jobsSeen := make(map[string]bool) // dedup inline JOB_CREATE parsing
+	inlineJobRe := regexp.MustCompile(`(?s)\[JOB_CREATE\](.*?)\[/JOB_CREATE\]`)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if s.cfg.Debug {
@@ -1257,6 +1272,51 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 						flusher.Flush()
 					}
 				}
+			// Inline JOB_CREATE: parse as soon as closing tag arrives
+			if !isSystemMode && strings.Contains(fullResponse.String(), "[/JOB_CREATE]") {
+				type jd struct {
+					Name        string `json:"name"`
+					Schedule    string `json:"schedule"`
+					Project     string `json:"project"`
+					Instruction string `json:"instruction"`
+				}
+				for _, m := range inlineJobRe.FindAllStringSubmatch(fullResponse.String(), -1) {
+					if len(m) < 2 {
+						continue
+					}
+					raw := strings.TrimSpace(m[1])
+					var j jd
+					if err := json.Unmarshal([]byte(raw), &j); err != nil || j.Name == "" || j.Schedule == "" || j.Instruction == "" {
+						continue
+					}
+					key := j.Name + "|" + j.Schedule
+					if jobsSeen[key] || strings.EqualFold(j.Name, "noop") || strings.EqualFold(j.Name, "placeholder") {
+						continue
+					}
+					jobsSeen[key] = true
+					if j.Project == "" && req.Project != "" {
+						j.Project = req.Project
+					}
+					job, err := jobs.Add(j.Name, j.Schedule, j.Project, j.Instruction)
+					if err != nil {
+						log.Printf("[chat] [JOB_CREATE] inline jobs.Add error: %v", err)
+						continue
+					}
+					log.Printf("[chat] [JOB_CREATE] created job #%d: %s", job.ID, j.Name)
+					jcData, _ := json.Marshal(map[string]any{"jobs_created": []map[string]any{{"id": job.ID, "name": j.Name, "schedule": j.Schedule}}})
+					fmt.Fprintf(w, "data: %s\n\n", jcData)
+					flusher.Flush()
+					s.refreshAndBroadcast()
+				}
+				// Job created — send done, kill process, stop reading
+				if len(jobsSeen) > 0 {
+					doneData, _ := json.Marshal(map[string]any{"done": true})
+					fmt.Fprintf(w, "data: %s\n\n", doneData)
+					flusher.Flush()
+					cmd.Process.Kill()
+					displayResult = " "
+				}
+			}
 			}
 		case "user":
 			log.Printf("[chat] tool_done")
@@ -1264,8 +1324,6 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", toolDoneData)
 			flusher.Flush()
 		case "result":
-			// Keep fullResponse intact (has ALL text including directives from all turns)
-			// Store evt.Result separately for display only
 			displayResult = evt.Result
 			doneData, _ := json.Marshal(map[string]any{
 				"done":      true,
@@ -1276,23 +1334,22 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", doneData)
 			flusher.Flush()
 		}
+		// Once we have the result, stop reading — parse directives immediately
+		if displayResult != "" {
+			break
+		}
 	}
 
-	if waitErr := cmd.Wait(); waitErr != nil {
-		errMsg := stderrBuf.String()
-		log.Printf("[chat] claude exited with error: %v", waitErr)
-		if errMsg != "" {
-			log.Printf("[chat] claude stderr: %s", errMsg)
+	// Wait for process exit in background — don't block directive parsing
+	go func() {
+		if waitErr := cmd.Wait(); waitErr != nil {
+			errMsg := stderrBuf.String()
+			log.Printf("[chat] claude exited with error: %v", waitErr)
+			if errMsg != "" {
+				log.Printf("[chat] claude stderr: %s", errMsg)
+			}
 		}
-		// Send error to client if no result was already sent
-		if displayResult == "" {
-			errData, _ := json.Marshal(map[string]any{"error": "Claude exited with error: " + waitErr.Error()})
-			fmt.Fprintf(w, "data: %s\n\n", errData)
-			doneData, _ := json.Marshal(map[string]any{"done": true})
-			fmt.Fprintf(w, "data: %s\n\n", doneData)
-			flusher.Flush()
-		}
-	}
+	}()
 
 	// Parse directives from response — check both streaming text and final result
 	responseText := fullResponse.String()
@@ -1303,6 +1360,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// Directive regexes (used for stripping even in system mode)
 	initRe := regexp.MustCompile(`(?s)\[PROJECT_INIT\](.*?)\[/PROJECT_INIT\]`)
 	taskDirectiveRe := regexp.MustCompile(`(?s)\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
+	jobDirectiveRe := regexp.MustCompile(`(?s)\[JOB_CREATE\](.*?)\[/JOB_CREATE\]`)
 
 	if !isSystemMode {
 	// Parse PROJECT_INIT directive (must run before TASK_CREATE)
@@ -1424,6 +1482,50 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		responseText = taskDirectiveRe.ReplaceAllString(responseText, "")
 		responseText = strings.TrimSpace(responseText)
 	}
+
+	// Parse JOB_CREATE directives (fallback — inline parsing in assistant handler already creates most)
+	jobMatches := jobDirectiveRe.FindAllStringSubmatch(responseText, -1)
+	if len(jobMatches) > 0 {
+		type jobDirective struct {
+			Name        string `json:"name"`
+			Schedule    string `json:"schedule"`
+			Project     string `json:"project"`
+			Instruction string `json:"instruction"`
+		}
+		var createdJobs []map[string]any
+		for _, m := range jobMatches {
+			if len(m) < 2 {
+				continue
+			}
+			raw := strings.TrimSpace(m[1])
+			var jd jobDirective
+			if err := json.Unmarshal([]byte(raw), &jd); err != nil || jd.Name == "" || jd.Schedule == "" || jd.Instruction == "" {
+				continue
+			}
+			key := jd.Name + "|" + jd.Schedule
+			if jobsSeen[key] {
+				continue
+			}
+			jobsSeen[key] = true
+			if jd.Project == "" && req.Project != "" {
+				jd.Project = req.Project
+			}
+			job, err := jobs.Add(jd.Name, jd.Schedule, jd.Project, jd.Instruction)
+			if err != nil {
+				continue
+			}
+			log.Printf("[chat] [JOB_CREATE] post-loop created job #%d: %s", job.ID, jd.Name)
+			createdJobs = append(createdJobs, map[string]any{"id": job.ID, "name": jd.Name, "schedule": jd.Schedule})
+		}
+		if len(createdJobs) > 0 {
+			jcData, _ := json.Marshal(map[string]any{"jobs_created": createdJobs})
+			fmt.Fprintf(w, "data: %s\n\n", jcData)
+			flusher.Flush()
+			s.refreshAndBroadcast()
+		}
+	}
+	responseText = jobDirectiveRe.ReplaceAllString(responseText, "")
+	responseText = strings.TrimSpace(responseText)
 	} // end if !isSystemMode
 
 	// Save assistant response (use displayResult for clean text, fallback to stripped responseText)
@@ -1434,6 +1536,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// Strip any remaining directives from saved text
 	saveText = taskDirectiveRe.ReplaceAllString(saveText, "")
 	saveText = initRe.ReplaceAllString(saveText, "")
+	saveText = jobDirectiveRe.ReplaceAllString(saveText, "")
 	saveText = strings.TrimSpace(saveText)
 	if saveText != "" {
 		chat.AppendMessage(chat.Message{
@@ -1878,6 +1981,16 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	installed := config.ReadGlobalMCPServers()
+	installedByPkg := make(map[string]bool)
+	installedByShort := make(map[string]bool)
+	for name, srv := range installed {
+		installedByShort[name] = true
+		for _, arg := range srv.Args {
+			if len(arg) > 0 && arg[0] != '-' {
+				installedByPkg[arg] = true
+			}
+		}
+	}
 	client := &http.Client{Timeout: 15 * time.Second}
 
 	var results []catalogEntry
@@ -1973,7 +2086,7 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 				RepoSource:    srv.Repository.Source,
 				WebsiteURL:    srv.WebsiteUrl,
 				RuntimeHint:   bestPkg.RuntimeHint,
-				Installed:     installed[srv.Name].Command != "",
+				Installed:     installed[srv.Name].Command != "" || installedByPkg[bestPkg.Identifier] || installedByShort[lastSegment(srv.Name)],
 			}
 			for _, ev := range bestPkg.EnvironmentVariables {
 				entry.EnvVars = append(entry.EnvVars, envVar{
@@ -2086,6 +2199,74 @@ func (s *Server) handleMCPUninstall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// --- Plugin handlers ---
+
+func (s *Server) handlePluginList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	installed := plugins.ReadInstalled()
+	if installed == nil {
+		installed = []plugins.Plugin{}
+	}
+	writeJSON(w, map[string]any{
+		"plugins":     installed,
+		"recommended": plugins.DefaultPlugins,
+	})
+}
+
+func (s *Server) handlePluginInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Marketplace string `json:"marketplace"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+	if err := plugins.Install(req.Name, req.Marketplace); err != nil {
+		writeErr(w, 500, "install failed: "+err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handlePluginUninstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if req.Name == "" {
+		writeErr(w, 400, "name required")
+		return
+	}
+	if err := plugins.Uninstall(req.Name); err != nil {
+		writeErr(w, 500, "uninstall failed: "+err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleOnboardingPlugins(w http.ResponseWriter, r *http.Request) {
+	s.sseOnboarding(w, r, onboarding.StreamPlugins)
 }
 
 // --- Skills handlers ---
@@ -2725,4 +2906,11 @@ func (s *Server) handleTaskAttach(w http.ResponseWriter, r *http.Request) {
 	}
 	s.refreshAndBroadcast()
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func lastSegment(name string) string {
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }

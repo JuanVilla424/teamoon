@@ -197,6 +197,7 @@ var skillsCatalogLoaded = false;
 var skillsCatalogTab = "all"; // "trending" | "all" | "installed"
 var skillsCatalogVersion = 0;
 var skillsShowCount = 100;
+var pluginsData = null;
 var projectAutopilots = [];
 var updateCheckResult = null;
 var updateRunning = false;
@@ -631,7 +632,7 @@ function computeContentKey(v){
       for(var i=0;i<jbs.length;i++) jk += jbs[i].id + "," + jbs[i].status + "," + jbs[i].enabled + ";";
       return lp + "j:" + jk;
     case "config":
-      return lp + "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + (templatesCache ? templatesCache.length : 0) + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "");
+      return lp + "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + (templatesCache ? templatesCache.length : 0) + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "") + ":" + (pluginsData ? "1" : "0");
     case "login":
       return lp + "login:1";
     case "setup":
@@ -3209,7 +3210,8 @@ function sendChatMessage(){
                 // Strip directives from stored/displayed content
                 var cleanContent = chatMessages[chatMessages.length-1].content
                   .replace(/\[TASK_CREATE\][\s\S]*?\[\/TASK_CREATE\]/g, "")
-                  .replace(/\[PROJECT_INIT\][\s\S]*?\[\/PROJECT_INIT\]/g, "").trim();
+                  .replace(/\[PROJECT_INIT\][\s\S]*?\[\/PROJECT_INIT\]/g, "")
+                  .replace(/\[JOB_CREATE\][\s\S]*?\[\/JOB_CREATE\]/g, "").trim();
                 chatMessages[chatMessages.length-1].content = cleanContent;
                 // Mark all pending tools as done
                 for(var tc=0;tc<chatToolCalls.length;tc++) chatToolCalls[tc].done=true;
@@ -4765,7 +4767,7 @@ function renderConfigMarketplace(root){
 
   var subTabs = div("config-subtabs");
   subTabs.setAttribute("role", "tablist");
-  [[t("mkt.subtab.mcp"),"mcp"],[t("mkt.subtab.skills"),"skills"]].forEach(function(pair){
+  [[t("mkt.subtab.mcp"),"mcp"],[t("mkt.subtab.skills"),"skills"],[t("mkt.subtab.plugins"),"plugins"]].forEach(function(pair){
     var tb = el("button", "config-subtab-btn" + (marketplaceSubTab === pair[1] ? " active" : ""), [pair[0]]);
     tb.setAttribute("role", "tab");
     tb.setAttribute("aria-selected", marketplaceSubTab === pair[1] ? "true" : "false");
@@ -4774,7 +4776,9 @@ function renderConfigMarketplace(root){
   });
   root.appendChild(subTabs);
 
-  if(marketplaceSubTab === "skills"){
+  if(marketplaceSubTab === "plugins"){
+    renderMarketplacePlugins(root);
+  } else if(marketplaceSubTab === "skills"){
     renderMarketplaceSkills(root);
   } else {
     renderMarketplaceMCP(root);
@@ -4892,7 +4896,7 @@ function renderMktDetail(root, item, type){
     img.alt = item.name;
     img.onerror = function(){ iconWrap.textContent = "\u2699"; img.remove(); };
     iconWrap.appendChild(img);
-  } else if(type === "mcp"){
+  } else if(type === "mcp" || type === "plugin"){
     iconWrap.textContent = "\u2699";
   } else {
     iconWrap.textContent = "\u26A1";
@@ -4907,6 +4911,17 @@ function renderMktDetail(root, item, type){
   if(type === "mcp"){
     if(item.title && item.title !== item.name) hInfo.appendChild(span("mkt-detail-subtitle", item.name));
     if(item.package) hInfo.appendChild(span("mkt-detail-source", item.package));
+  } else if(type === "plugin"){
+    if(item.marketplace){
+      var mktLink = document.createElement("a");
+      mktLink.className = "mkt-detail-source mkt-detail-link-inline";
+      var mktRepo = item.marketplace.indexOf("/") >= 0 ? item.marketplace : "anthropics/" + item.marketplace;
+      mktLink.href = "https://github.com/" + mktRepo;
+      mktLink.target = "_blank";
+      mktLink.rel = "noopener";
+      mktLink.textContent = item.marketplace;
+      hInfo.appendChild(mktLink);
+    }
   } else {
     if(item.source){
       var srcLink = document.createElement("a");
@@ -4932,6 +4947,7 @@ function renderMktDetail(root, item, type){
   if(type === "mcp" && item.status) badges.appendChild(span("mkt-version mkt-badge-status", item.status));
   if(type === "mcp" && item.is_latest) badges.appendChild(span("mkt-installed-badge", t("mkt.catalog.latest")));
   if(type === "skill" && item.installs > 0) badges.appendChild(span("mkt-installs", t("mkt.catalog.installs", {count: formatInstalls(item.installs)})));
+  if(type === "plugin") badges.appendChild(span("badge badge-" + (item.enabled !== false ? "success" : "muted"), item.enabled !== false ? t("plugins.enabled") : t("plugins.disabled")));
   if(item.installed) badges.appendChild(span("mkt-installed-badge", t("mkt.catalog.installed")));
   hInfo.appendChild(badges);
 
@@ -4946,7 +4962,7 @@ function renderMktDetail(root, item, type){
   header.appendChild(hInfo);
   root.appendChild(header);
 
-  // Links section (MCP only)
+  // Links section
   if(type === "mcp" && (item.repository_url || item.website_url)){
     var linksSec = div("mkt-detail-links");
     if(item.repository_url){
@@ -4967,6 +4983,27 @@ function renderMktDetail(root, item, type){
       webLink.textContent = "\uD83C\uDF10 Website";
       linksSec.appendChild(webLink);
     }
+    root.appendChild(linksSec);
+  } else if(type === "plugin" && item.marketplace){
+    var linksSec = div("mkt-detail-links");
+    var mktLnk = document.createElement("a");
+    mktLnk.className = "mkt-detail-link";
+    var mktR = item.marketplace.indexOf("/") >= 0 ? item.marketplace : "anthropics/" + item.marketplace;
+    mktLnk.href = "https://github.com/" + mktR;
+    mktLnk.target = "_blank";
+    mktLnk.rel = "noopener";
+    mktLnk.textContent = "\uD83D\uDCE6 Marketplace";
+    linksSec.appendChild(mktLnk);
+    root.appendChild(linksSec);
+  } else if(type === "skill" && item.source){
+    var linksSec = div("mkt-detail-links");
+    var srcLnk = document.createElement("a");
+    srcLnk.className = "mkt-detail-link";
+    srcLnk.href = "https://github.com/" + item.source;
+    srcLnk.target = "_blank";
+    srcLnk.rel = "noopener";
+    srcLnk.textContent = "\uD83D\uDCE6 Repository";
+    linksSec.appendChild(srcLnk);
     root.appendChild(linksSec);
   }
 
@@ -5007,13 +5044,15 @@ function renderMktDetail(root, item, type){
       return function(){
         if(!confirm(t("mkt.catalog.uninstall_confirm", {name: itm.name}))) return;
         var restore = btnLoading(btn, t("mkt.catalog.removing"));
-        var endpoint = tp === "mcp" ? "/api/mcp/uninstall" : "/api/skills/uninstall";
+        var endpoint = tp === "mcp" ? "/api/mcp/uninstall" : tp === "plugin" ? "/api/plugins/uninstall" : "/api/skills/uninstall";
         var payload = { name: itm.name };
         api("POST", endpoint, payload, function(d){
           if(restore) restore();
           if(d.ok){
             if(tp === "mcp"){
               mcpData = null; mcpCatalogLoaded = false;
+            } else if(tp === "plugin"){
+              pluginsData = null;
             } else {
               skillsData = null; skillsCatalogLoaded = false; skillsCatalogResults = null; skillsCatalogSearch = "";
             }
@@ -5074,6 +5113,25 @@ function renderMktDetail(root, item, type){
         })(item, instBtn);
         actSec.appendChild(instBtn);
       }
+    } else if(type === "plugin"){
+      var instBtn = el("button","btn btn-success",[t("plugins.install")]);
+      instBtn.onclick = (function(plug, btn){
+        return function(){
+          var restore = btnLoading(btn, t("plugins.installing"));
+          api("POST","/api/plugins/install",{name: plug.name, marketplace: plug.marketplace},function(d){
+            if(restore) restore();
+            if(d.ok){
+              pluginsData = null;
+              selectedMktItem = null; selectedMktType = "";
+              toast(t("plugins.installed_toast", {name: plug.name}), "success");
+              render();
+            } else {
+              toast(t("common.error", {error: d.error || "unknown"}), "error");
+            }
+          });
+        };
+      })(item, instBtn);
+      actSec.appendChild(instBtn);
     } else {
       var instBtn = el("button","btn btn-success",[t("mkt.catalog.install")]);
       instBtn.onclick = (function(skill, btn){
@@ -5319,6 +5377,138 @@ function renderMarketplaceSkills(root){
     moreBtn.onclick = function(){ skillsShowCount += 100; render(); };
     moreWrap.appendChild(moreBtn);
     root.appendChild(moreWrap);
+  }
+}
+
+function renderMarketplacePlugins(root){
+  if(selectedMktItem && selectedMktType === "plugin"){
+    renderMktDetail(root, selectedMktItem, "plugin");
+    return;
+  }
+  if(!pluginsData){
+    api("GET","/api/plugins/list",null,function(d){ pluginsData = d; render(); });
+    var shimmer = div("mkt-list mkt-loading");
+    for(var si=0;si<4;si++){
+      var ph = div("mkt-row");
+      ph.textContent = "\u00A0";
+      ph.style.height = "52px";
+      shimmer.appendChild(ph);
+    }
+    root.appendChild(shimmer);
+    return;
+  }
+
+  var installed = pluginsData.plugins || [];
+  var recommended = pluginsData.recommended || [];
+  var installedNames = {};
+  installed.forEach(function(p){ installedNames[p.name] = true; });
+
+  // Installed plugins section
+  var instSec = div("config-section");
+  instSec.appendChild(el("h3","config-section-title",[t("plugins.installed") + " (" + installed.length + ")"]));
+
+  if(installed.length === 0){
+    instSec.appendChild(span("mkt-empty", t("plugins.no_plugins")));
+  } else {
+    var list = div("mkt-list");
+    installed.forEach(function(p){
+      var plugDesc = "";
+      for(var ri = 0; ri < recommended.length; ri++){
+        if(recommended[ri].name === p.name){ plugDesc = recommended[ri].description || ""; break; }
+      }
+      var detailItem = {name: p.name, marketplace: p.marketplace, enabled: p.enabled, installed: true, description: plugDesc};
+      var row = div("mkt-row");
+      row.style.cursor = "pointer";
+      row.onclick = (function(itm){ return function(){
+        selectedMktItem = itm; selectedMktType = "plugin"; render();
+      }; })(detailItem);
+      var iconWrap = div("mkt-icon");
+      iconWrap.textContent = "\u2699";
+      row.appendChild(iconWrap);
+      var info = div("mkt-info");
+      info.appendChild(span("mkt-name", p.name));
+      if(p.marketplace) info.appendChild(span("mkt-source", p.marketplace));
+      row.appendChild(info);
+      var meta = div("mkt-meta");
+      meta.appendChild(span("badge badge-" + (p.enabled ? "success" : "muted"), p.enabled ? t("plugins.enabled") : t("plugins.disabled")));
+      row.appendChild(meta);
+      var action = div("mkt-action");
+      var unBtn = el("button","btn btn-sm btn-danger",[t("plugins.uninstall")]);
+      unBtn.onclick = (function(plug, btn){ return function(e){
+        e.stopPropagation();
+        if(!confirm(t("plugins.confirm_uninstall",{name:plug.name}))) return;
+        var restore = btnLoading(btn, t("plugins.uninstalling"));
+        api("POST","/api/plugins/uninstall",{name:plug.name},function(d){
+          if(restore) restore();
+          if(d.ok){
+            pluginsData = null;
+            toast(t("plugins.uninstalled_toast",{name:plug.name}),"success");
+            render();
+          } else {
+            toast(t("common.error_unknown",{error:d.error||"unknown"}),"error");
+          }
+        });
+      }; })(p, unBtn);
+      action.appendChild(unBtn);
+      row.appendChild(action);
+      list.appendChild(row);
+    });
+    instSec.appendChild(list);
+  }
+  root.appendChild(instSec);
+
+  // Recommended section
+  if(recommended.length > 0){
+    var sep = document.createElement("hr");
+    sep.className = "mkt-separator";
+    root.appendChild(sep);
+
+    var recSec = div("config-section");
+    recSec.appendChild(el("h3","config-section-title",[t("plugins.recommended")]));
+
+    var recList = div("mkt-list");
+    recommended.forEach(function(r){
+      var isInst = !!installedNames[r.name];
+      var detailItem = {name: r.name, marketplace: r.marketplace, enabled: isInst, installed: isInst, description: r.description || ""};
+      var row = div("mkt-row");
+      row.style.cursor = "pointer";
+      row.onclick = (function(itm){ return function(){
+        selectedMktItem = itm; selectedMktType = "plugin"; render();
+      }; })(detailItem);
+      var iconWrap = div("mkt-icon");
+      iconWrap.textContent = "\u2699";
+      row.appendChild(iconWrap);
+      var info = div("mkt-info");
+      info.appendChild(span("mkt-name", r.name));
+      info.appendChild(span("mkt-source", r.marketplace));
+      if(r.description) info.appendChild(span("mkt-desc", r.description));
+      row.appendChild(info);
+      var action = div("mkt-action");
+      if(isInst){
+        action.appendChild(span("mkt-installed-badge", t("plugins.installed")));
+      } else {
+        var installBtn = el("button","btn btn-success btn-sm",[t("plugins.install")]);
+        installBtn.onclick = (function(rec, btn){ return function(e){
+          e.stopPropagation();
+          var restore = btnLoading(btn, t("plugins.installing"));
+          api("POST","/api/plugins/install",{name:rec.name, marketplace:rec.marketplace},function(d){
+            if(restore) restore();
+            if(d.ok){
+              pluginsData = null;
+              toast(t("plugins.installed_toast",{name:rec.name}),"success");
+              render();
+            } else {
+              toast(t("common.error_unknown",{error:d.error||"unknown"}),"error");
+            }
+          });
+        }; })(r, installBtn);
+        action.appendChild(installBtn);
+      }
+      row.appendChild(action);
+      recList.appendChild(row);
+    });
+    recSec.appendChild(recList);
+    root.appendChild(recSec);
   }
 }
 
@@ -5585,7 +5775,8 @@ var CONFIG_SETUP_TABS = [
   {id:"skills", label:t("config.setup.tab.skills")},
   {id:"bmad", label:t("config.setup.tab.bmad")},
   {id:"hooks", label:t("config.setup.tab.hooks")},
-  {id:"mcp", label:t("config.setup.tab.mcp")}
+  {id:"mcp", label:t("config.setup.tab.mcp")},
+  {id:"plugins", label:t("config.setup.tab.plugins")}
 ];
 
 function renderConfigSetup(root){
@@ -5605,6 +5796,7 @@ function renderConfigSetup(root){
     case "bmad":    renderCfgSetupBMAD(sec);    break;
     case "hooks":   renderCfgSetupHooks(sec);   break;
     case "mcp":     renderCfgSetupMCP(sec);     break;
+    case "plugins": renderCfgSetupPlugins(sec); break;
   }
   root.appendChild(sec);
 }
@@ -5853,6 +6045,38 @@ function renderCfgSetupMCP(container){
       if(restore) restore();
       if(status === "success") prog.appendChild(div("setup-status ok",[t("config.setup.mcp.installed")]));
       else prog.appendChild(div("setup-status err",[t("config.setup.mcp.install_failed")]));
+    });
+  };
+  container.appendChild(btn);
+  container.appendChild(prog);
+}
+
+function renderCfgSetupPlugins(container){
+  container.appendChild(el("h3","config-section-title",[t("config.setup.plugins.title")]));
+  container.appendChild(el("p","config-section-desc",[t("config.setup.plugins.desc")]));
+  var prog = div("setup-progress");
+  var running = false;
+
+  var btn = el("button","btn btn-primary btn-sm",[t("config.setup.plugins.install")]);
+  btn.onclick = function(){
+    if(running) return;
+    running = true;
+    prog.textContent = "";
+    var restore = btnLoading(btn, t("setup.installing"));
+    streamStepStandalone("/api/onboarding/plugins", null, prog, function(p, evt){
+      var ok = evt.status === "done";
+      var skipped = evt.status === "skipped";
+      var cls = "setup-progress-item " + (ok ? "ok" : skipped ? "skip" : "error");
+      var item = div(cls);
+      item.appendChild(span("icon", ok ? "\u2713" : skipped ? "~" : "\u2717"));
+      item.appendChild(span("label", evt.name || "plugin"));
+      if(skipped) item.appendChild(span("version",t("config.setup.plugins.already_installed")));
+      p.appendChild(item);
+    }, function(status){
+      running = false;
+      if(restore) restore();
+      if(status === "success") prog.appendChild(div("setup-status ok",[t("config.setup.plugins.installed")]));
+      else prog.appendChild(div("setup-status err",[t("config.setup.plugins.install_failed")]));
     });
   };
   container.appendChild(btn);

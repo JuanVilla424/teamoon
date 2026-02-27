@@ -19,7 +19,7 @@ var defaultMCPServers = []defaultMCP{
 }
 
 func installMCPServers() error {
-	fmt.Println("\n[6/7] Installing MCP servers...")
+	fmt.Println("\n[6/8] Installing MCP servers...")
 
 	existing := config.ReadGlobalMCPServers()
 

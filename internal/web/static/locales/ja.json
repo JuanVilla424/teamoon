@@ -632,6 +632,7 @@
   "mkt.manage.saved": "MCP 設定を保存しました",
 
   "mkt.subtab.mcp": "MCP",
+  "mkt.subtab.plugins": "プラグイン",
   "mkt.subtab.skills": "スキル",
 
   "projects.status.active": "アクティブ",
@@ -687,10 +688,31 @@
   "config.setup.mcp.install_failed": "インストールに失敗しました",
   "config.setup.mcp.already_configured": "設定済み",
 
+  "config.setup.plugins.title": "プラグイン",
+  "config.setup.plugins.desc": "Claude Code プラグインをインストールして機能を拡張します。",
+  "config.setup.plugins.install": "プラグインをインストール",
+  "config.setup.plugins.installed": "プラグインをインストールしました",
+  "config.setup.plugins.install_failed": "インストールに失敗しました",
+  "config.setup.plugins.already_installed": "インストール済み",
+
   "config.setup.tab.bmad": "BMAD",
   "config.setup.tab.config": "設定",
   "config.setup.tab.hooks": "フック",
   "config.setup.tab.mcp": "MCP サーバー",
+  "config.setup.tab.plugins": "プラグイン",
   "config.setup.tab.prereqs": "前提条件",
-  "config.setup.tab.skills": "スキル"
+  "config.setup.tab.skills": "スキル",
+
+  "plugins.installed": "インストール済み",
+  "plugins.enabled": "有効",
+  "plugins.disabled": "無効",
+  "plugins.recommended": "おすすめ",
+  "plugins.install": "インストール",
+  "plugins.uninstall": "アンインストール",
+  "plugins.installing": "インストール中...",
+  "plugins.uninstalling": "アンインストール中...",
+  "plugins.installed_toast": "{name} をインストールしました",
+  "plugins.uninstalled_toast": "{name} をアンインストールしました",
+  "plugins.confirm_uninstall": "{name} をアンインストールしますか？",
+  "plugins.no_plugins": "プラグインがインストールされていません"
 }

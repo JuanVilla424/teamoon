@@ -86,7 +86,7 @@ func init() {
 // ── CLI check (legacy) ──────────────────────────────────
 
 func checkPrereqs() error {
-	fmt.Println("\n[1/7] Checking prerequisites...")
+	fmt.Println("\n[1/8] Checking prerequisites...")
 
 	var missing []string
 	for _, tool := range tools {
