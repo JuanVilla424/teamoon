@@ -204,15 +204,23 @@ type spawnResult struct {
 
 // BuildSpawnArgs assembles CLI arguments for spawning claude, respecting config.
 // Returns the args slice and an optional cleanup function (for temp MCP config file).
-// ResolveModel maps teamoon meta-models to actual Claude CLI model IDs.
-// "opusplan" is resolved based on the phase: "opus" for planning, "sonnet" for execution.
+// ResolveModel maps teamoon meta-models to full Claude CLI model IDs.
+// "opusplan" is resolved based on the phase: "claude-opus-4-6" for planning, "claude-sonnet-4-6" for execution.
 // Pass phase="plan" or phase="exec". Other model values are passed through unchanged.
 func ResolveModel(model, phase string) string {
 	if model == "opusplan" {
 		if phase == "plan" || phase == "chat" {
-			return "opus"
+			return "claude-opus-4-6"
 		}
-		return "sonnet"
+		return "claude-sonnet-4-6"
+	}
+	switch model {
+	case "opus":
+		return "claude-opus-4-6"
+	case "sonnet":
+		return "claude-sonnet-4-6"
+	case "haiku":
+		return "claude-haiku-4-5-20251001"
 	}
 	return model
 }
@@ -322,6 +330,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 	var sessionID string
 
 	total := len(p.Steps)
+	queue.SetTotalSteps(task.ID, total)
 	for _, step := range p.Steps {
 		// Skip steps already completed (resume after restart)
 		if step.Number <= task.CurrentStep {
@@ -360,6 +369,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 				return
 			}
 
+			queue.SetCurrentStep(task.ID, step.Number)
 			if retry == 0 {
 				emit(logs.LevelInfo, fmt.Sprintf("Step %d/%d: %s", step.Number, total, step.Title), agent)
 			} else {

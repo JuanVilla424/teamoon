@@ -451,8 +451,7 @@ func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Co
 
 	select {
 	case <-ctx.Done():
-		mgr.Stop(task.ID)
-		return
+		return // loop exits; task keeps running on its own
 	case <-taskDone:
 		// Task finished (done or back to pending), continue loop
 	}

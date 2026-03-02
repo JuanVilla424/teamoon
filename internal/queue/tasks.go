@@ -42,6 +42,7 @@ type Task struct {
 	PlanAttempts int      `json:"plan_attempts,omitempty"`
 	SessionID    string   `json:"session_id,omitempty"`
 	CurrentStep  int      `json:"current_step,omitempty"`
+	TotalSteps   int      `json:"total_steps,omitempty"`
 	Wave         int      `json:"wave,omitempty"`
 }
 
@@ -634,6 +635,23 @@ func SetCurrentStep(id int, step int) error {
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].CurrentStep = step
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
+func SetTotalSteps(id int, total int) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].TotalSteps = total
 			return saveStore(store)
 		}
 	}

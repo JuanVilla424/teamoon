@@ -150,6 +150,7 @@ var logAutoScroll = true;
 var queueFilterState = "";
 var queueFilterProject = "";
 var queueViewMode = "list";
+var pdWaveView = false;
 var logFilterLevel = "";
 var logFilterTask = "";
 var logFilterProject = "";
@@ -322,6 +323,9 @@ var ICON_SVGS = {};
   tmpl = document.createElement("template");
   tmpl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   ICON_SVGS.plus = tmpl.content.firstChild;
+  tmpl = document.createElement("template");
+  tmpl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
+  ICON_SVGS.refresh = tmpl.content.firstChild;
 })();
 function iconBtn(type, title, onclick){
   var b = document.createElement("button");
@@ -632,7 +636,7 @@ function computeContentKey(v){
         var p = projs[i];
         pk += p.name + "," + p.status_icon + "," + (p.modified||0) + "," + (p.branch||"") + ";";
       }
-      return lp + "p:" + selectedProjectName + ":" + pk;
+      return lp + "p:" + selectedProjectName + ":" + pdWaveView + ":" + pk;
     case "logs":
       return lp + "l:" + logFilterLevel + ":" + logFilterTask + ":" + logFilterProject + ":" + logFilterDateFrom + ":" + logFilterDateTo + ":" + logs.length;
     case "chat":
@@ -1030,6 +1034,17 @@ function renderDashboard(root){
   hero.appendChild(flowBar);
   hero.appendChild(div("hero-sub", [t("dashboard.tokens_cached",{in:fmtNum(tIn),out:fmtNum(tOut),cached:fmtNum(tCr)})]));
   var dashRoot = div("dashboard-root");
+  var dashHeader = div("view-header");
+  dashHeader.appendChild(span("view-title", t("nav.dashboard")));
+  var dashRefreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    dashRefreshBtn.classList.add("spinning");
+    api("GET", "/api/data", null, function(d, ok){
+      dashRefreshBtn.classList.remove("spinning");
+      if(ok && d){ D = d; render(); }
+    });
+  });
+  dashHeader.appendChild(dashRefreshBtn);
+  dashRoot.appendChild(dashHeader);
   dashRoot.appendChild(hero);
 
   // ── Bento Grid ──
@@ -1080,11 +1095,10 @@ function renderDashboard(root){
     sLabel.textContent = t("dashboard.session_usage",{pct:Math.round(sessUse)});
     costCard.appendChild(sLabel);
   }
-  // Daily usage bar (100/7 ≈ 14.29% daily cap) — only when fetcher has data
+  // Daily usage bar — today's cost as % of weekly limit
   if (weeklyUse > 0 && c.cost_week > 0) {
-    var dailyCap = 100 / 7;
-    var todayUtil = (todayCost / c.cost_week) * weeklyUse;
-    var dailyFill = Math.min(100, (todayUtil / dailyCap) * 100);
+    var weeklyLimit = c.cost_week * 100 / weeklyUse;
+    var dailyFill = Math.min(100, (todayCost / weeklyLimit) * 100);
     var dColor = dailyFill >= 90 ? "red" : dailyFill >= 60 ? "yellow" : "green";
     var dBar = div("progress");
     var dFill = div("progress-fill " + dColor);
@@ -1212,13 +1226,13 @@ function renderQueue(root){
   if(tasks.length > 0) titleWrap.appendChild(span("view-count", String(tasks.length)));
   header.appendChild(titleWrap);
   var headerBtns = div("view-header-btns");
-  var refreshBtn = el("button", "btn btn-sm", ["\u21bb"]);
-  refreshBtn.title = t("common.refresh") || "Refresh";
-  refreshBtn.onclick = function(){
+  var refreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    refreshBtn.classList.add("spinning");
     api("GET", "/api/data", null, function(d, ok){
+      refreshBtn.classList.remove("spinning");
       if(ok && d){ D = d; render(); }
     });
-  };
+  });
   headerBtns.appendChild(refreshBtn);
   var addBtn = el("button", "btn btn-primary btn-sm", [t("queue.add_task")]);
   addBtn.onclick = function(){ openAddTask(""); };
@@ -1299,7 +1313,11 @@ function renderTimelineNode(timeline, tsk){
   hdr.appendChild(info);
 
   var badges = div("tl-badges");
-  badges.appendChild(span("task-state " + tsk.effective_state, stateLabel(tsk.effective_state)));
+  var stateText = stateLabel(tsk.effective_state);
+  if(tsk.effective_state === "running" && tsk.total_steps > 0){
+    stateText += " @ " + (tsk.current_step || 1) + "/" + tsk.total_steps;
+  }
+  badges.appendChild(span("task-state " + tsk.effective_state, stateText));
   badges.appendChild(span("task-pri " + tsk.priority, (tsk.priority||"").toUpperCase()));
   if(tsk.wave > 0) badges.appendChild(span("task-wave", "W" + tsk.wave));
   if(tsk.is_running) badges.appendChild(div("running-dot"));
@@ -1365,6 +1383,12 @@ function renderTaskDetail(parent, tsk){
   var headerCard = div("detail-card detail-header");
   var headerTop = div("detail-header-top");
   headerTop.appendChild(span("detail-title-id", "#" + tsk.id));
+  var headerBtns = div(""); headerBtns.style.cssText = "display:flex;gap:6px;align-items:center;";
+  var refreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    refreshBtn.classList.add("spinning");
+    api("GET","/api/data",null,function(d,ok){ refreshBtn.classList.remove("spinning"); if(ok&&d){ D=d; render(); }});
+  });
+  headerBtns.appendChild(refreshBtn);
   var editable = (tsk.effective_state === "pending" || tsk.effective_state === "planned");
   if(editable){
     var editBtn = iconBtn("pencil", t("common.edit"), function(){});
@@ -1397,8 +1421,9 @@ function renderTaskDetail(parent, tsk){
       headerCard.appendChild(editActions);
       editArea.focus();
     };
-    headerTop.appendChild(editBtn);
+    headerBtns.appendChild(editBtn);
   }
+  headerTop.appendChild(headerBtns);
   headerCard.appendChild(headerTop);
   var descSpan = div("detail-title-desc");
   descSpan.textContent = tsk.description;
@@ -1414,7 +1439,11 @@ function renderTaskDetail(parent, tsk){
 
   var propState = div("detail-prop");
   propState.appendChild(span("detail-prop-label", t("task.state")));
-  var stateEl = span("task-state " + tsk.effective_state, stateLabel(tsk.effective_state));
+  var detailStateText = stateLabel(tsk.effective_state);
+  if(tsk.effective_state === "running" && tsk.total_steps > 0){
+    detailStateText += " @ " + (tsk.current_step || 1) + "/" + tsk.total_steps;
+  }
+  var stateEl = span("task-state " + tsk.effective_state, detailStateText);
   propState.appendChild(stateEl);
   props.appendChild(propState);
 
@@ -1436,6 +1465,12 @@ function renderTaskDetail(parent, tsk){
     engineVal.appendChild(div("running-dot"));
     propEngine.appendChild(engineVal);
     props.appendChild(propEngine);
+  }
+  if(tsk.wave > 0){
+    var propWave = div("detail-prop");
+    propWave.appendChild(span("detail-prop-label", t("task.wave")));
+    propWave.appendChild(span("task-wave", "W" + tsk.wave));
+    props.appendChild(propWave);
   }
   headerCard.appendChild(props);
   parent.appendChild(headerCard);
@@ -1716,12 +1751,21 @@ function renderProjects(root){
   var projs = D.projects || [];
 
   var header = div("view-header");
-  header.appendChild(span("view-title", t("projects.title")));
-  header.appendChild(span("proj-count", t("projects.count",{count:projs.length})));
+  var titleWrap = div("view-title-wrap");
+  titleWrap.appendChild(span("view-title", t("projects.title")));
+  titleWrap.appendChild(span("view-count", t("projects.count",{count:projs.length})));
+  header.appendChild(titleWrap);
+  var headerBtns = div("view-header-btns");
+  var refreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    refreshBtn.classList.add("spinning");
+    api("GET","/api/data",null,function(d,ok){ refreshBtn.classList.remove("spinning"); if(ok&&d){ D=d; render(); }});
+  });
+  headerBtns.appendChild(refreshBtn);
   var initBtn = el("button","btn btn-sm btn-primary");
   initBtn.textContent = t("projects.init_project");
   initBtn.onclick = function(){ openModal("modal-init"); };
-  header.appendChild(initBtn);
+  headerBtns.appendChild(initBtn);
+  header.appendChild(headerBtns);
   root.appendChild(header);
 
   var list = div("proj-list");
@@ -1767,6 +1811,7 @@ function renderProjects(root){
           var restore = btnLoading(stopAutoBtn, "...");
           api("POST","/api/projects/autopilot/stop",{project:p.name},function(){
             if(restore) restore();
+            api("GET","/api/data",null,function(d,ok){ if(ok&&d){ D=d; render(); }});
             scheduleActivePoll();
           });
         };
@@ -1780,7 +1825,10 @@ function renderProjects(root){
           api("POST","/api/projects/autopilot/start",{project:p.name},function(resp){
             if(restore) restore();
             if(resp.error) toast(resp.error, "error");
-            else toast(t("projects.autopilot_started",{name:p.name}), "success");
+            else {
+              toast(t("projects.autopilot_started",{name:p.name}), "success");
+              api("GET","/api/data",null,function(d,ok){ if(ok&&d){ D=d; render(); }});
+            }
             scheduleActivePoll();
           });
         };
@@ -1815,11 +1863,16 @@ function renderProjectDetail(root){
   header.appendChild(span("view-title", p.name));
   // Action buttons
   var acts = div("pd-actions");
+  var refreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    refreshBtn.classList.add("spinning");
+    api("GET","/api/data",null,function(d,ok){ refreshBtn.classList.remove("spinning"); if(ok&&d){ D=d; render(); }});
+  });
+  acts.appendChild(refreshBtn);
   if(p.autopilot_running){
     var stopBtn = el("button","btn btn-sm btn-danger",[t("projects.stop_auto")]);
     stopBtn.onclick = function(){
       var restore = btnLoading(stopBtn, t("projects.stopping"));
-      api("POST","/api/projects/autopilot/stop",{project:p.name},function(){ if(restore) restore(); scheduleActivePoll(); });
+      api("POST","/api/projects/autopilot/stop",{project:p.name},function(){ if(restore) restore(); api("GET","/api/data",null,function(d,ok){ if(ok&&d){ D=d; render(); }}); scheduleActivePoll(); });
     };
     acts.appendChild(stopBtn);
   } else {
@@ -1875,7 +1928,16 @@ function renderProjectDetail(root){
 
   // Tasks section
   var taskSec = div("pd-section");
-  taskSec.appendChild(span("pd-section-title",t("projects.detail.tasks_title")));
+  var taskSecHeader = div(""); taskSecHeader.style.cssText = "display:flex;align-items:center;gap:8px;";
+  taskSecHeader.appendChild(span("pd-section-title",t("projects.detail.tasks_title")));
+  var hasWavesForToggle = (D.tasks || []).some(function(tsk){ return tsk.project === p.name && tsk.wave > 0; });
+  if(hasWavesForToggle){
+    var waveToggle = el("button","btn btn-sm" + (pdWaveView ? " btn-primary" : ""),[t("queue.view_waves")]);
+    waveToggle.title = t("queue.view_waves_title");
+    waveToggle.onclick = function(){ pdWaveView = !pdWaveView; render(); };
+    taskSecHeader.appendChild(waveToggle);
+  }
+  taskSec.appendChild(taskSecHeader);
   var taskSummary = div("pd-task-summary");
   taskSummary.appendChild(span("pd-task-count", p.task_total + " " + t("projects.detail.task_total")));
   if(p.task_pending > 0) taskSummary.appendChild(span("pd-task-count pending", p.task_pending + " " + t("projects.detail.task_pending")));
@@ -1894,38 +1956,65 @@ function renderProjectDetail(root){
     taskSec.appendChild(span("pd-progress-label", t("projects.detail.pct_complete",{pct:pct})));
   }
 
-  // Task groups
+  // Task groups — grouped by wave, then by state within each wave
   var allTasks = (D.tasks || []).filter(function(tsk){ return tsk.project === p.name; });
-  var groups = [
-    {label:"Running", state:"running", open:true},
-    {label:"Generating", state:"generating", open:true},
-    {label:"Pending", state:"pending", open:allTasks.length < 30},
-    {label:"Planned", state:"planned", open:true},
-    {label:"Done", state:"done", open:false},
-  ];
-  for(var g=0;g<groups.length;g++){
-    var grp = groups[g];
-    var grpTasks = allTasks.filter(function(tsk){ return tsk.effective_state === grp.state; });
-    if(grpTasks.length === 0) continue;
-    var details = document.createElement("details");
-    details.className = "pd-task-group";
-    if(grp.open) details.open = true;
-    var summary = document.createElement("summary");
-    summary.className = "pd-task-group-summary";
-    summary.textContent = grp.label + " (" + grpTasks.length + ")";
-    details.appendChild(summary);
-    for(var ti=0;ti<grpTasks.length;ti++){
-      var gt = grpTasks[ti];
-      var trow = div("pd-task-row");
-      trow.appendChild(span("pd-task-id","#" + gt.id));
-      trow.appendChild(span("pd-task-desc", gt.description.length > 80 ? gt.description.substring(0,80)+"\u2026" : gt.description));
-      trow.appendChild(span("task-state " + gt.effective_state, stateLabel(gt.effective_state)));
-      trow.appendChild(span("task-pri " + gt.priority, (gt.priority||"").toUpperCase()));
-      trow.onclick = (function(tid){ return function(){ selectedTaskID = tid; cameFromProjects = true; window.location.hash = "#queue"; render(); }; })(gt.id);
-      trow.style.cursor = "pointer";
-      details.appendChild(trow);
+  function renderPdTaskGroup(container, tasks, openDefault){
+    var groups = [
+      {label:"Running", state:"running", open:true},
+      {label:"Generating", state:"generating", open:true},
+      {label:"Pending", state:"pending", open:openDefault},
+      {label:"Planned", state:"planned", open:true},
+      {label:"Done", state:"done", open:false},
+    ];
+    for(var g=0;g<groups.length;g++){
+      var grp = groups[g];
+      var grpTasks = tasks.filter(function(tsk){ return tsk.effective_state === grp.state; });
+      if(grpTasks.length === 0) continue;
+      var details = document.createElement("details");
+      details.className = "pd-task-group";
+      if(grp.open) details.open = true;
+      var summary = document.createElement("summary");
+      summary.className = "pd-task-group-summary";
+      summary.textContent = grp.label + " (" + grpTasks.length + ")";
+      details.appendChild(summary);
+      for(var ti=0;ti<grpTasks.length;ti++){
+        var gt = grpTasks[ti];
+        var trow = div("pd-task-row");
+        trow.appendChild(span("pd-task-id","#" + gt.id));
+        trow.appendChild(span("pd-task-desc", gt.description.length > 80 ? gt.description.substring(0,80)+"\u2026" : gt.description));
+        trow.appendChild(span("task-state " + gt.effective_state, stateLabel(gt.effective_state)));
+        trow.appendChild(span("task-pri " + gt.priority, (gt.priority||"").toUpperCase()));
+        if(gt.wave > 0) trow.appendChild(span("task-wave", "W" + gt.wave));
+        trow.onclick = (function(tid){ return function(){ selectedTaskID = tid; cameFromProjects = true; window.location.hash = "#queue"; render(); }; })(gt.id);
+        trow.style.cursor = "pointer";
+        details.appendChild(trow);
+      }
+      container.appendChild(details);
     }
-    taskSec.appendChild(details);
+  }
+
+  if(pdWaveView){
+    var waveMap = {}; var waveOrder = [];
+    for(var wi=0;wi<allTasks.length;wi++){
+      var w = allTasks[wi].wave || 0;
+      if(!waveMap[w]){ waveMap[w] = []; waveOrder.push(w); }
+      waveMap[w].push(allTasks[wi]);
+    }
+    waveOrder.sort(function(a,b){ if(a===0) return 1; if(b===0) return -1; return a-b; });
+    for(var wi2=0;wi2<waveOrder.length;wi2++){
+      var wNum = waveOrder[wi2];
+      var wTasks = waveMap[wNum];
+      var wLabel = wNum === 0
+        ? (t("queue.wave_none"))
+        : (t("queue.wave_header") || "Wave {wave}").replace("{wave}", wNum);
+      var wHeader = div("wave-group-header");
+      wHeader.appendChild(span("wave-group-title", wLabel));
+      wHeader.appendChild(span("wave-group-count", String(wTasks.length)));
+      taskSec.appendChild(wHeader);
+      renderPdTaskGroup(taskSec, wTasks, allTasks.length < 30);
+    }
+  } else {
+    renderPdTaskGroup(taskSec, allTasks, allTasks.length < 30);
   }
   root.appendChild(taskSec);
 
@@ -3103,6 +3192,10 @@ function renderChat(container){
   textarea.id = "chat-textarea";
   textarea.rows = 2;
   textarea.placeholder = chatSystemMode ? t("chat.placeholder_system") : t("chat.placeholder");
+  textarea.oninput = function(){
+    this.style.height = "auto";
+    this.style.height = this.scrollHeight + "px";
+  };
   textarea.onkeydown = function(e){
     if(e.key === "Enter" && !e.shiftKey){
       e.preventDefault();
@@ -3485,6 +3578,13 @@ function renderCanvas(container){
   }
   projSel.onchange = function(){ canvasFilterProject = this.value; render(); };
   controls.appendChild(projSel);
+
+  // Refresh button
+  var canvasRefreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    canvasRefreshBtn.classList.add("spinning");
+    api("GET","/api/data",null,function(d,ok){ canvasRefreshBtn.classList.remove("spinning"); if(ok&&d){ D=d; render(); }});
+  });
+  controls.appendChild(canvasRefreshBtn);
 
   // + Add Task button
   var addBtn = el("button","btn btn-primary btn-sm");
@@ -4427,12 +4527,21 @@ function renderJobs(root){
   var jobs = D.jobs || [];
 
   var header = div("view-header");
-  header.appendChild(span("view-title", t("jobs.title")));
-  header.appendChild(span("proj-count", t("jobs.count", {count: jobs.length})));
+  var jobsTitleWrap = div("view-title-wrap");
+  jobsTitleWrap.appendChild(span("view-title", t("jobs.title")));
+  jobsTitleWrap.appendChild(span("view-count", t("jobs.count", {count: jobs.length})));
+  header.appendChild(jobsTitleWrap);
+  var jobHeaderBtns = div("view-header-btns");
+  var jobRefreshBtn = iconBtn("refresh", t("common.refresh") || "Refresh", function(){
+    jobRefreshBtn.classList.add("spinning");
+    api("GET","/api/data",null,function(d,ok){ jobRefreshBtn.classList.remove("spinning"); if(ok&&d){ D=d; render(); }});
+  });
+  jobHeaderBtns.appendChild(jobRefreshBtn);
   var addBtn = el("button","btn btn-sm btn-primary");
   addBtn.textContent = t("jobs.create");
   addBtn.onclick = function(){ openJobModal(null); };
-  header.appendChild(addBtn);
+  jobHeaderBtns.appendChild(addBtn);
+  header.appendChild(jobHeaderBtns);
   root.appendChild(header);
 
   if(jobs.length === 0){
