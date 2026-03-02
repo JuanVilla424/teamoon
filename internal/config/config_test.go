@@ -32,6 +32,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.MCPServers != nil {
 		t.Error("MCPServers should be nil by default")
 	}
+	if cfg.Spawn.PlanMaxTurns != 15 {
+		t.Errorf("Spawn.PlanMaxTurns should default to 15, got %d", cfg.Spawn.PlanMaxTurns)
+	}
+	if cfg.Spawn.MaxPlanAttempts != 3 {
+		t.Errorf("Spawn.MaxPlanAttempts should default to 3, got %d", cfg.Spawn.MaxPlanAttempts)
+	}
 }
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -356,7 +362,10 @@ func TestDefaultSkeleton(t *testing.T) {
 	if !sk.WebSearch {
 		t.Error("WebSearch should default to true")
 	}
-if !sk.BuildVerify {
+	if !sk.DocSetup {
+		t.Error("DocSetup should default to true")
+	}
+	if !sk.BuildVerify {
 		t.Error("BuildVerify should default to true")
 	}
 	if !sk.Test {

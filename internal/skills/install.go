@@ -37,6 +37,13 @@ var defaultSkills = []struct {
 	{"vercel-labs/agent-browser@agent-browser", "agent-browser"},
 	// UI/UX Design (1)
 	{"nextlevelbuilder/ui-ux-pro-max-skill@ui-ux-pro-max", "ui-ux-pro-max"},
+	// BMAD Agents (6)
+	{"aj-geddes/claude-code-bmad-skills@bmad-orchestrator", "bmad-orchestrator"},
+	{"aj-geddes/claude-code-bmad-skills@business-analyst", "business-analyst"},
+	{"aj-geddes/claude-code-bmad-skills@product-manager", "product-manager"},
+	{"aj-geddes/claude-code-bmad-skills@ux-designer", "ux-designer"},
+	{"aj-geddes/claude-code-bmad-skills@system-architect", "system-architect"},
+	{"aj-geddes/claude-code-bmad-skills@creative-intelligence", "creative-intelligence"},
 }
 
 func Install() error {

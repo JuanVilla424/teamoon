@@ -58,7 +58,7 @@ func Run() error {
 	}
 
 	// Step 3: Skills
-	fmt.Println("\n[3/7] Installing Claude Code skills...")
+	fmt.Println("\n[3/8] Installing Claude Code skills...")
 	if err := skills.Install(); err != nil {
 		fmt.Printf("  [!] Some skills failed: %v\n", err)
 		steps = append(steps, stepStatus{name: "Skills", warning: err.Error()})
@@ -91,13 +91,21 @@ func Run() error {
 		steps = append(steps, stepStatus{name: "MCP Servers", done: true})
 	}
 
-	// Step 7: Summary
+	// Step 7: Plugins
+	if err := installPlugins(); err != nil {
+		fmt.Printf("  [!] Plugins: %v\n", err)
+		steps = append(steps, stepStatus{name: "Plugins", warning: err.Error()})
+	} else {
+		steps = append(steps, stepStatus{name: "Plugins", done: true})
+	}
+
+	// Step 8: Summary
 	printSummary(steps)
 	return nil
 }
 
 func printSummary(steps []stepStatus) {
-	fmt.Println("\n[7/7] Summary")
+	fmt.Println("\n[8/8] Summary")
 	fmt.Println("========================================")
 	for _, s := range steps {
 		if s.done {
@@ -156,6 +164,11 @@ func WebInstallHooks() error {
 // WebInstallMCP installs default MCP servers.
 func WebInstallMCP() error {
 	return installMCPServersQuiet()
+}
+
+// WebInstallPlugins installs default Claude Code plugins.
+func WebInstallPlugins() error {
+	return installPluginsQuiet()
 }
 
 // StreamSkills sets up the teamoon home symlink and installs skills with per-skill progress.

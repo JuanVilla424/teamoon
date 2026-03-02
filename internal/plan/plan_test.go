@@ -20,7 +20,7 @@ Read the source files and understand the architecture.
 Verify: Report created
 
 ### Step 2: Implement feature
-Agent: dev
+Agent: architect
 Edit src/main.go to add feature X.
 Add new function HandleX().
 Verify: go build succeeds
@@ -71,7 +71,7 @@ func TestParsePlan_Valid(t *testing.T) {
 	}
 
 	// Step 2
-	if p.Steps[1].Agent != "dev" {
+	if p.Steps[1].Agent != "architect" {
 		t.Errorf("Step 2 agent = %q", p.Steps[1].Agent)
 	}
 	if !strings.Contains(p.Steps[1].Body, "HandleX") {
@@ -150,12 +150,12 @@ Verify: It works
 	path := filepath.Join(tmpDir, "plan.md")
 	os.WriteFile(path, []byte(content), 0644)
 
-	p, err := ParsePlan(path)
-	if err != nil {
-		t.Fatal(err)
+	_, err := ParsePlan(path)
+	if err == nil {
+		t.Fatal("expected error for step without Agent")
 	}
-	if p.Steps[0].Agent != "" {
-		t.Errorf("Agent should be empty when not specified, got %q", p.Steps[0].Agent)
+	if !strings.Contains(err.Error(), "missing Agent") {
+		t.Errorf("error should mention missing Agent, got: %v", err)
 	}
 }
 
@@ -199,7 +199,7 @@ Read all files.
 Verify: findings summarized
 
 ### Step 2: Implement
-Agent: dev
+Agent: architect
 Edit the code.
 Verify: code compiles
 `
@@ -249,7 +249,7 @@ func TestParsePlan_ReadOnlyFalseOmitted(t *testing.T) {
 ## Steps
 
 ### Step 1: Code
-Agent: dev
+Agent: architect
 ReadOnly: false
 Write some code.
 Verify: works

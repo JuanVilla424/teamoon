@@ -10,7 +10,7 @@ import (
 )
 
 func installGlobalHooks() error {
-	fmt.Println("\n[5/7] Installing global hooks...")
+	fmt.Println("\n[5/8] Installing global hooks...")
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -56,24 +56,11 @@ type hookMatcher struct {
 }
 
 // globalPreToolUse returns the desired PreToolUse configuration using absolute hook paths.
+// globalPreToolUse returns the desired global PreToolUse configuration.
+// Bash hooks are NOT installed globally — they live per-project via InstallHooks().
+// This prevents duplication when Claude Code merges global + per-project settings.
 func globalPreToolUse(hooksDir string) []hookMatcher {
-	return []hookMatcher{
-		{
-			Matcher: "Bash",
-			Hooks: []hookEntry{
-				{Type: "command", Command: filepath.Join(hooksDir, "security-check.sh"), Timeout: 5000},
-				{Type: "command", Command: filepath.Join(hooksDir, "test-guard.sh"), Timeout: 5000},
-				{Type: "command", Command: filepath.Join(hooksDir, "build-guard.sh"), Timeout: 5000},
-				{Type: "command", Command: filepath.Join(hooksDir, "commit-format.sh"), Timeout: 5000},
-			},
-		},
-		{
-			Matcher: "Write|Edit",
-			Hooks: []hookEntry{
-				{Type: "command", Command: filepath.Join(hooksDir, "secrets-guard.sh"), Timeout: 5000},
-			},
-		},
-	}
+	return nil
 }
 
 // mergeHooksIntoSettings reads settings.json, merges new PreToolUse entries that

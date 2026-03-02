@@ -16,10 +16,11 @@ var defaultMCPServers = []defaultMCP{
 	{"context7", "npx", []string{"-y", "@context7/mcp-server"}},
 	{"memory", "npx", []string{"-y", "@modelcontextprotocol/server-memory"}},
 	{"sequential-thinking", "npx", []string{"-y", "@modelcontextprotocol/server-sequential-thinking"}},
+	{"chrome-devtools", "npx", []string{"-y", "chrome-devtools-mcp@latest", "--isolated=true", "--no-usage-statistics", "--chromeArg=--no-sandbox", "--chromeArg=--disable-setuid-sandbox", "--chromeArg=--disable-gpu", "--chromeArg=--disable-dev-shm-usage"}},
 }
 
 func installMCPServers() error {
-	fmt.Println("\n[6/7] Installing MCP servers...")
+	fmt.Println("\n[6/8] Installing MCP servers...")
 
 	existing := config.ReadGlobalMCPServers()
 

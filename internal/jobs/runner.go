@@ -28,7 +28,7 @@ func RunJob(ctx context.Context, job Job, cfg config.Config) string {
 		projectPath = home
 	}
 
-	args, cleanup := engine.BuildSpawnArgs(cfg, job.Instruction, nil)
+	args, cleanup := engine.BuildSpawnArgs(cfg, job.Instruction, nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}

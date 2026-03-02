@@ -9,15 +9,15 @@ type modelPricing struct {
 }
 
 var pricing = map[string]modelPricing{
-	"opus":   {Input: 15.0, Output: 75.0, CacheRead: 1.875, CacheWrite: 18.75},
-	"sonnet": {Input: 3.0, Output: 15.0, CacheRead: 0.30, CacheWrite: 3.75},
-	"haiku":  {Input: 0.80, Output: 4.0, CacheRead: 0.08, CacheWrite: 1.0},
+	"opus-4-6":  {Input: 15.0, Output: 75.0, CacheRead: 1.875, CacheWrite: 18.75},
+	"sonnet-4-6": {Input: 3.0, Output: 15.0, CacheRead: 0.30, CacheWrite: 3.75},
+	"haiku-4-5":  {Input: 0.80, Output: 4.0, CacheRead: 0.08, CacheWrite: 1.0},
 }
 
 func tokenCost(s TokenSummary) float64 {
 	if len(s.ByModel) == 0 {
-		// Fallback to sonnet pricing if no model info
-		p := pricing["sonnet"]
+		// Fallback to sonnet-4-6 pricing if no model info
+		p := pricing["sonnet-4-6"]
 		return (float64(s.Input)*p.Input +
 			float64(s.Output)*p.Output +
 			float64(s.CacheRead)*p.CacheRead +
@@ -27,7 +27,7 @@ func tokenCost(s TokenSummary) float64 {
 	for tier, mt := range s.ByModel {
 		p, ok := pricing[tier]
 		if !ok {
-			p = pricing["sonnet"]
+			p = pricing["sonnet-4-6"]
 		}
 		total += (float64(mt.Input)*p.Input +
 			float64(mt.Output)*p.Output +
