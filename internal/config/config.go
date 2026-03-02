@@ -30,17 +30,38 @@ var KnownSkeletonSteps = map[string]SkeletonStep{
 		Prompt:      "Use resolve-library-id then query-docs for each relevant library. Note relevant APIs and patterns.",
 		ReadOnly:    true,
 	},
+	"chrome-devtools": {
+		Label:       "Browser Verification",
+		Description: "Verify UI in browser using Chrome DevTools",
+		Prompt:      "Open the app in the browser, take a snapshot, verify the UI renders correctly and matches expectations. Check for console errors.",
+		ReadOnly:    false,
+	},
+}
+
+// SkeletonPhase represents a single phase in the task execution skeleton.
+// When Phases is set in SkeletonConfig, each phase is fully defined here.
+type SkeletonPhase struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Prompt   string `json:"prompt"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+	Generate bool   `json:"generate,omitempty"`
+	Enabled  bool   `json:"enabled"`
 }
 
 type SpawnConfig struct {
-	Model          string `json:"model"`
-	Effort         string `json:"effort"`
-	MaxTurns       int    `json:"max_turns"`
-	StepTimeoutMin int    `json:"step_timeout_min"`
+	Model           string `json:"model"`
+	Effort          string `json:"effort"`
+	MaxTurns        int    `json:"max_turns"`
+	StepTimeoutMin  int    `json:"step_timeout_min"`
+	PlanTimeoutMin  int    `json:"plan_timeout_min"`   // 0 = use default (15 min)
+	PlanMaxTurns    int    `json:"plan_max_turns"`     // 0 = unlimited (no --max-turns flag)
+	MaxPlanAttempts int    `json:"max_plan_attempts"`  // 0 falls back to default of 3
 }
 
 type SkeletonConfig struct {
 	WebSearch   bool `json:"web_search"`
+	DocSetup    bool `json:"doc_setup"`
 	BuildVerify bool `json:"build_verify"`
 	Test           bool `json:"test"`
 	PreCommit      bool `json:"pre_commit"`
@@ -51,6 +72,7 @@ type SkeletonConfig struct {
 func DefaultSkeleton() SkeletonConfig {
 	return SkeletonConfig{
 		WebSearch:   true,
+		DocSetup:    true,
 		BuildVerify: true,
 		Test:           true,
 		PreCommit:      true,
@@ -89,6 +111,21 @@ type Config struct {
 	Debug              bool                           `json:"debug,omitempty"`
 	LogRetentionDays   int                            `json:"log_retention_days"`
 	SudoEnabled        bool                           `json:"sudo_enabled,omitempty"`
+	PhaseHints         map[string]string              `json:"phase_hints,omitempty"`
+}
+
+// DefaultPhaseHints returns descriptions for each skeleton phase.
+// These hints are included in the skeleton JSON so the LLM knows what each phase means.
+func DefaultPhaseHints() map[string]string {
+	return map[string]string{
+		"doc_setup":    "MUST be the FIRST implementation step. Read CLAUDE.md, README.md. Create or update ARCHITECT.md with project architecture, patterns, conventions. Update CONTEXT.md.",
+		"web_search":   "Search the web for current best practices and documentation.",
+		"build_verify": "Compile/build the project. Create build tooling if missing. Verify clean build.",
+		"test":         "Run existing tests. Create new tests for changes. Set up test infra if missing.",
+		"pre_commit":   "Run linters/formatters. Install pre-commit hooks if missing.",
+		"commit":       "Single git commit: type(core): description. No emojis, no Co-Authored-By.",
+		"push":         "Push to remote repository.",
+	}
 }
 
 func DefaultConfig() Config {
@@ -102,13 +139,14 @@ func DefaultConfig() Config {
 		WebPort:            7777,
 		WebHost:            "",
 		WebPassword:        "",
-		Spawn:              SpawnConfig{Model: "opusplan", Effort: "high", MaxTurns: 15, StepTimeoutMin: 4},
+		Spawn:              SpawnConfig{Model: "opusplan", Effort: "high", MaxTurns: 15, StepTimeoutMin: 4, PlanMaxTurns: 15, MaxPlanAttempts: 3},
 		Skeleton:           DefaultSkeleton(),
 		MaxConcurrent:      3,
 		AutopilotAutostart: false,
 		MCPServers:         nil,
 		SourceDir:          filepath.Join(home, "Projects", "teamoon"),
 		LogRetentionDays:   20,
+		PhaseHints:         DefaultPhaseHints(),
 	}
 }
 
@@ -139,6 +177,17 @@ func Load() (Config, error) {
 
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
+	}
+	// Backfill missing phase hints for existing configs
+	defaults := DefaultPhaseHints()
+	if cfg.PhaseHints == nil {
+		cfg.PhaseHints = defaults
+	} else {
+		for k, v := range defaults {
+			if _, ok := cfg.PhaseHints[k]; !ok {
+				cfg.PhaseHints[k] = v
+			}
+		}
 	}
 	return cfg, nil
 }
@@ -233,19 +282,31 @@ func BuildMCPConfigJSON(servers map[string]MCPServer) (string, error) {
 	return f.Name(), nil
 }
 
+// AttachKnownSkeletonSteps ensures every MCP with a known skeleton step has it set.
+// Returns true if any step was attached (config needs saving).
+func AttachKnownSkeletonSteps(servers map[string]MCPServer) bool {
+	changed := false
+	for name, mcp := range servers {
+		if step, ok := KnownSkeletonSteps[name]; ok && mcp.SkeletonStep == nil {
+			mcp.SkeletonStep = &step
+			servers[name] = mcp
+			changed = true
+		}
+	}
+	return changed
+}
+
 // InitMCPFromGlobal populates MCPServers from global settings if nil (one-time bootstrap).
+// Persists config if skeleton steps were attached to existing servers.
 func InitMCPFromGlobal(cfg *Config) {
 	if cfg.MCPServers != nil {
+		if AttachKnownSkeletonSteps(cfg.MCPServers) {
+			Save(*cfg)
+		}
 		return
 	}
 	cfg.MCPServers = ReadGlobalMCPServers()
-	// Attach known skeleton steps
-	for name, mcp := range cfg.MCPServers {
-		if step, ok := KnownSkeletonSteps[name]; ok && mcp.SkeletonStep == nil {
-			mcp.SkeletonStep = &step
-			cfg.MCPServers[name] = mcp
-		}
-	}
+	AttachKnownSkeletonSteps(cfg.MCPServers)
 }
 
 // RemoveMCPFromGlobal removes an MCP server entry from ~/.claude/settings.json.
@@ -380,6 +441,22 @@ func InstallMCPToGlobalAt(path, name, command string, args []string, envVars map
 		return err
 	}
 	return os.WriteFile(path, out, 0644)
+}
+
+// planMCPAllowlist contains MCP servers suitable for plan generation (lightweight, read-only).
+var planMCPAllowlist = map[string]bool{"context7": true}
+
+// FilterPlanMCP returns only lightweight MCP servers suitable for plan generation.
+// Excludes heavy servers like chrome-devtools (spawns Chrome browser) and others
+// that add startup overhead without benefiting read-only investigation.
+func FilterPlanMCP(servers map[string]MCPServer) map[string]MCPServer {
+	result := make(map[string]MCPServer)
+	for name, s := range servers {
+		if s.Enabled && planMCPAllowlist[name] {
+			result[name] = s
+		}
+	}
+	return result
 }
 
 // FilterEnabledMCP returns only enabled servers from the map.

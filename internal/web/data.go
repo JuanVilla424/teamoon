@@ -105,8 +105,10 @@ func (s *Store) Refresh() {
 		isRunning := s.engineMgr.IsRunning(t.ID)
 		// Show "generating" if plan generation is in progress
 		generatingMu.Lock()
-		if effState == "pending" && generatingSet[t.ID] {
-			effState = "generating"
+		if effState == "pending" {
+			if _, genOk := generatingSet[t.ID]; genOk {
+				effState = "generating"
+			}
 		}
 		generatingMu.Unlock()
 		// Engine is authoritative: if running, override stale JSON state
