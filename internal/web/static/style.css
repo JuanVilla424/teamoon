@@ -591,6 +591,12 @@ a:hover { color: var(--text) }
 .task-pri.high { color: var(--danger) }
 .task-pri.med { color: var(--warning) }
 .task-pri.low { color: var(--text-muted) }
+.task-wave { font-size: 10px; font-weight: 700; font-family: var(--mono); letter-spacing: .3px; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 4px }
+.wave-group-header { display: flex; align-items: center; gap: 8px; margin: 20px 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--glass) }
+.wave-group-header:first-child { margin-top: 0 }
+.wave-group-title { font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; font-family: var(--mono); color: var(--accent) }
+.wave-group-count { font-size: 11px; font-family: var(--mono); color: var(--text-muted); background: var(--glass); padding: 2px 8px; border-radius: var(--r-full) }
+.view-header-btns { display: flex; gap: 6px; align-items: center }
 
 /* ── Detail Panel ── */
 .detail-card {
@@ -1757,7 +1763,7 @@ a:hover { color: var(--text) }
   animation:pulse-dot 1s infinite;
 }
 .chat-attach-strip {
-  display:flex;flex-wrap:wrap;gap:6px;padding:6px 0 0;width:100%;
+  display:flex;flex-wrap:wrap;gap:6px;padding:8px 0;width:100%;flex-shrink:0;
 }
 .chat-attach-chip,.task-att-chip {
   display:inline-flex;align-items:center;gap:6px;

@@ -69,6 +69,7 @@ func NewServer(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) 
 }
 
 func (s *Server) RecoverAndResume() {
+	// Phase 1: Reset tasks without session (legacy behavior)
 	recovered, err := queue.RecoverRunning()
 	if err != nil {
 		log.Printf("[recovery] error: %v", err)
@@ -78,11 +79,29 @@ func (s *Server) RecoverAndResume() {
 		log.Printf("[recovery] task #%d (%s) reset to %s", t.ID, t.Project, t.State)
 	}
 
+	// Phase 2: Resume tasks with session_id (can continue where they left off)
+	resumable, err := queue.ListResumable()
+	if err != nil {
+		log.Printf("[recovery] error listing resumable tasks: %v", err)
+	}
+	for _, t := range resumable {
+		p, parseErr := plan.ParsePlan(plan.PlanPath(t.ID))
+		if parseErr != nil {
+			log.Printf("[recovery] task #%d plan parse failed, falling back to planned: %v", t.ID, parseErr)
+			queue.UpdateState(t.ID, queue.StatePlanned)
+			continue
+		}
+		s.store.engineMgr.Start(t, p, s.cfg, s.webSend(t.ID))
+		log.Printf("[recovery] resuming task #%d (%s) from step %d with session %s",
+			t.ID, t.Project, t.CurrentStep, t.SessionID[:min(8, len(t.SessionID))]+"...")
+	}
+
 	if !s.cfg.AutopilotAutostart {
 		log.Printf("[recovery] autopilot autostart disabled, skipping resume")
 		return
 	}
 
+	// Phase 3: Autopilot autostart
 	projects, err := queue.AutopilotProjects()
 	if err != nil {
 		log.Printf("[recovery] error listing projects: %v", err)
@@ -92,8 +111,8 @@ func (s *Server) RecoverAndResume() {
 		cfg := s.cfg
 		send := s.webSend(0)
 		ok := s.store.engineMgr.StartProject(project, cfg.MaxConcurrent, func(ctx context.Context) {
-			engine.RunProjectLoop(ctx, project, cfg, func(t queue.Task, sk config.SkeletonConfig) (plan.Plan, error) {
-				return plangen.GeneratePlan(t, sk, cfg)
+			engine.RunProjectLoop(ctx, project, cfg, func(t queue.Task, sk config.SkeletonConfig, logFn func(string)) (plan.Plan, error) {
+				return plangen.GeneratePlan(t, sk, cfg, logFn)
 			}, send, s.store.engineMgr)
 		})
 		if ok {
@@ -111,8 +130,8 @@ func (s *Server) startSystemLoop() {
 	cfg := s.cfg
 	send := s.webSend(0)
 	s.store.engineMgr.StartProject("_system", cfg.MaxConcurrent, func(ctx context.Context) {
-		engine.RunSystemLoop(ctx, cfg, func(t queue.Task, sk config.SkeletonConfig) (plan.Plan, error) {
-			return plangen.GeneratePlan(t, sk, cfg)
+		engine.RunSystemLoop(ctx, cfg, func(t queue.Task, sk config.SkeletonConfig, logFn func(string)) (plan.Plan, error) {
+			return plangen.GeneratePlan(t, sk, cfg, logFn)
 		}, send, s.store.engineMgr)
 	})
 }

@@ -219,6 +219,62 @@ func TestResetPlan(t *testing.T) {
 	if all[0].Done {
 		t.Error("expected Done=false after reset")
 	}
+	if all[0].PlanAttempts != 0 {
+		t.Errorf("expected PlanAttempts=0 after reset, got %d", all[0].PlanAttempts)
+	}
+}
+
+func TestIncrementPlanAttempts(t *testing.T) {
+	setupTestEnv(t)
+
+	task, _ := Add("proj", "desc", "med")
+
+	count, err := IncrementPlanAttempts(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1, got %d", count)
+	}
+
+	count, err = IncrementPlanAttempts(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2, got %d", count)
+	}
+
+	all, _ := ListAll()
+	if all[0].PlanAttempts != 2 {
+		t.Errorf("persisted count should be 2, got %d", all[0].PlanAttempts)
+	}
+}
+
+func TestIncrementPlanAttempts_NotFound(t *testing.T) {
+	setupTestEnv(t)
+
+	_, err := IncrementPlanAttempts(999)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not found error, got %v", err)
+	}
+}
+
+func TestResetPlanClearsPlanAttempts(t *testing.T) {
+	setupTestEnv(t)
+
+	task, _ := Add("proj", "desc", "med")
+	IncrementPlanAttempts(task.ID)
+	IncrementPlanAttempts(task.ID)
+
+	if err := ResetPlan(task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	all, _ := ListAll()
+	if all[0].PlanAttempts != 0 {
+		t.Errorf("ResetPlan should clear PlanAttempts, got %d", all[0].PlanAttempts)
+	}
 }
 
 func TestSetFailReason(t *testing.T) {

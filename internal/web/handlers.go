@@ -2,7 +2,6 @@ package web
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -176,6 +175,7 @@ func (s *Server) handleTaskDone(w http.ResponseWriter, r *http.Request) {
 	if s.store.engineMgr.IsRunning(req.ID) {
 		s.store.engineMgr.Stop(req.ID)
 	}
+	s.clearGenerating(req.ID)
 	if err := queue.MarkDone(req.ID); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -199,6 +199,7 @@ func (s *Server) handleTaskArchive(w http.ResponseWriter, r *http.Request) {
 	if s.store.engineMgr.IsRunning(req.ID) {
 		s.store.engineMgr.Stop(req.ID)
 	}
+	s.clearGenerating(req.ID)
 	if err := queue.Archive(req.ID); err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -247,6 +248,7 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 	if s.store.engineMgr.IsRunning(req.ID) {
 		s.store.engineMgr.Stop(req.ID)
 	}
+	s.clearGenerating(req.ID)
 	s.refreshAndBroadcast()
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -289,12 +291,16 @@ func (s *Server) handleTaskAutopilot(w http.ResponseWriter, r *http.Request) {
 	switch state {
 	case queue.StatePending:
 		autoRun := req.Run == nil || *req.Run
-		s.setGenerating(found.ID)
+		s.setGenerating(found.ID, nil) // cancel set inside generatePlanAsync
 		s.refreshAndBroadcast()
 		go s.generatePlanAsync(found, autoRun)
 		writeJSON(w, map[string]string{"status": "generating"})
 
 	case queue.StatePlanned:
+		if s.store.engineMgr.IsTaskRunningForProject(found.Project) {
+			writeErr(w, 409, "another task is already running for project "+found.Project)
+			return
+		}
 		p, err := plan.ParsePlan(plan.PlanPath(found.ID))
 		if err != nil {
 			writeErr(w, 500, "plan parse error: "+err.Error())
@@ -315,26 +321,30 @@ func (s *Server) handleTaskAutopilot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// In-memory generating tracker
+// In-memory generating tracker — stores cancel func to kill plan gen Claude process.
 var (
-	generatingMu sync.Mutex
-	generatingSet = map[int]bool{}
+	generatingMu  sync.Mutex
+	generatingSet = map[int]context.CancelFunc{}
 )
 
 func (s *Server) isGenerating(id int) bool {
 	generatingMu.Lock()
 	defer generatingMu.Unlock()
-	return generatingSet[id]
+	_, exists := generatingSet[id]
+	return exists
 }
 
-func (s *Server) setGenerating(id int) {
+func (s *Server) setGenerating(id int, cancel context.CancelFunc) {
 	generatingMu.Lock()
-	generatingSet[id] = true
+	generatingSet[id] = cancel
 	generatingMu.Unlock()
 }
 
 func (s *Server) clearGenerating(id int) {
 	generatingMu.Lock()
+	if cancel, ok := generatingSet[id]; ok && cancel != nil {
+		cancel() // kill the Claude process
+	}
 	delete(generatingSet, id)
 	generatingMu.Unlock()
 }
@@ -348,7 +358,7 @@ func (s *Server) webSend(taskID int) func(tea.Msg) {
 			return
 		case engine.TaskStateMsg:
 			if m.Message == "planning" {
-				s.setGenerating(m.TaskID)
+				s.setGenerating(m.TaskID, nil) // autopilot path — cancel managed by engine
 			} else if m.State == queue.StatePlanned || m.State == queue.StatePending {
 				s.clearGenerating(m.TaskID)
 			}
@@ -578,20 +588,22 @@ BACKUP: Original project files are at %s — restore them first (copy all files 
 12. git add . && git commit -m "feat(core): initial project scaffold"
 13. git push -u origin dev
 
-PROHIBIDO: git push --force, git reset --hard, --no-verify en cualquier comando.
-
-usar /bmad:core:workflows:party-mode`, name, projectType, backupDir, manifest, manifest, typeWorkflow)
+PROHIBIDO: git push --force, git reset --hard, --no-verify en cualquier comando.`, name, projectType, backupDir, manifest, manifest, typeWorkflow)
 
 	return desc
 }
 
-func buildSkeletonPrompt(sk config.SkeletonConfig, mcpServers map[string]config.MCPServer) string {
-	return plangen.BuildSkeletonPrompt(sk, mcpServers)
+func buildSkeletonBlock(sk config.SkeletonConfig, mcpServers map[string]config.MCPServer, hints map[string]string) string {
+	return plangen.SkeletonJSON(sk, mcpServers, hints)
 }
 
+
 func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
+	// Ensure .bmad symlink for party-mode
+	projectinit.EnsureBMADLink(filepath.Join(s.cfg.ProjectsDir, t.Project))
+
 	sk := config.SkeletonFor(s.cfg, t.Project)
-	skeletonBlock := buildSkeletonPrompt(sk, s.cfg.MCPServers)
+	skeletonBlock := buildSkeletonBlock(sk, s.cfg.MCPServers, s.cfg.PhaseHints)
 	prompt := plangen.BuildPlanPrompt(t, skeletonBlock, s.cfg.ProjectsDir)
 
 	s.store.logBuf.Add(logs.LogEntry{
@@ -609,74 +621,146 @@ func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 		"GIT_COMMITTER_NAME="+gitName,
 		"GIT_COMMITTER_EMAIL="+gitEmail,
 	)
-	// Use BuildSpawnArgs but override output-format to json for plan generation
+	// Resolve meta-model for plan generation phase
 	planCfg := s.cfg
-	planCfg.Spawn.MaxTurns = 50 // plan gen needs more turns
-	args, spawnCleanup := engine.BuildSpawnArgs(planCfg, prompt, nil)
+	planCfg.Spawn.MaxTurns = s.cfg.Spawn.PlanMaxTurns
+	planCfg.Spawn.Model = engine.ResolveModel(s.cfg.Spawn.Model, "plan")
+	// No MCPs for plan gen — skeleton prompt already references MCP steps from full config.
+	// npx MCP startup adds minutes of overhead on this server.
+	planCfg.MCPServers = nil
+	args, spawnCleanup := engine.BuildSpawnArgs(planCfg, prompt, nil, "")
 	if spawnCleanup != nil {
 		defer spawnCleanup()
 	}
-	// Override stream-json to json for plan gen (we need full output, not streaming)
-	for i, a := range args {
-		if a == "--output-format" && i+1 < len(args) {
-			args[i+1] = "json"
-		}
-		if a == "--verbose" {
-			args = append(args[:i], args[i+1:]...)
-			break
-		}
+	// Plan generation runs in plan mode — read-only, no edits.
+	// Disallow tools that cause Claude to "execute" instead of just planning.
+	args = append(args, "--permission-mode", "plan",
+		"--disallowedTools",
+		"ExitPlanMode,EnterPlanMode,TodoWrite,Skill,Task,NotebookEdit,AskUserQuestion",
+	)
+	// Note: --verbose is required by stream-json output format — do NOT strip it.
+	// Apply plan-specific timeout (defaults to 15 min — plan gen needs more time than step execution)
+	planTimeout := time.Duration(s.cfg.Spawn.PlanTimeoutMin) * time.Minute
+	if planTimeout <= 0 {
+		planTimeout = 15 * time.Minute
 	}
-	cmd := exec.Command("claude", args...)
+	planCtx, planCancel := context.WithTimeout(context.Background(), planTimeout)
+	defer planCancel()
+	// Store cancel func so Stop/Replan/Done/Archive can kill the Claude process
+	s.setGenerating(t.ID, planCancel)
+
+	cmd := exec.CommandContext(planCtx, "claude", args...)
 	cmd.Env = env
-	var planStderr bytes.Buffer
-	cmd.Stderr = &planStderr
 
-	out, err := cmd.Output()
+	// Stream plan generation — full console output to task logs
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		stderrMsg := planStderr.String()
 		s.store.logBuf.Add(logs.LogEntry{
 			Time: time.Now(), TaskID: t.ID, Project: t.Project,
-			Message: fmt.Sprintf("Plan generation failed: %v — stderr: %s", err, stderrMsg), Level: logs.LevelError,
+			Message: "Plan generation pipe error: " + err.Error(), Level: logs.LevelError,
+		})
+		s.clearGenerating(t.ID)
+		s.refreshAndBroadcast()
+		return
+	}
+	cmd.Stderr = io.Discard
+
+	if err := cmd.Start(); err != nil {
+		s.store.logBuf.Add(logs.LogEntry{
+			Time: time.Now(), TaskID: t.ID, Project: t.Project,
+			Message: "Plan generation start error: " + err.Error(), Level: logs.LevelError,
 		})
 		s.clearGenerating(t.ID)
 		s.refreshAndBroadcast()
 		return
 	}
 
-	var result struct {
-		Result  string `json:"result"`
-		Type    string `json:"type"`
-		Subtype string `json:"subtype"`
-	}
-	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
-		// Try as plain text fallback
-		planText := strings.TrimSpace(string(out))
-		if planText == "" {
-			s.store.logBuf.Add(logs.LogEntry{
-				Time: time.Now(), TaskID: t.ID, Project: t.Project,
-				Message: "Plan generation returned empty output", Level: logs.LevelError,
-			})
-			s.clearGenerating(t.ID)
-			s.refreshAndBroadcast()
-			return
-		}
-		plan.SavePlan(t.ID, planText)
-	} else if result.Result == "" {
-		preview := string(out)
-		if len(preview) > 300 {
-			preview = preview[:300]
-		}
+	planStart := time.Now()
+
+	addLog := func(msg string, level logs.LogLevel) {
 		s.store.logBuf.Add(logs.LogEntry{
 			Time: time.Now(), TaskID: t.ID, Project: t.Project,
-			Message: "Plan result empty (subtype: " + result.Subtype + ") | raw: " + preview, Level: logs.LevelError,
+			Message: msg, Level: level,
+		})
+		s.scheduleRefresh()
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+
+	var planResult string
+	var planText strings.Builder
+	var sessionID string
+	planCaptured := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		var evt engine.StreamEvent
+		if json.Unmarshal([]byte(line), &evt) != nil {
+			continue
+		}
+
+		// Capture session_id from first event that has it
+		if evt.SessionID != "" && sessionID == "" {
+			sessionID = evt.SessionID
+		}
+
+		// Format and send to web UI as console output
+		if formatted := engine.FormatStreamEvent(evt); formatted != "" {
+			level := logs.LevelInfo
+			if evt.Type == "error" {
+				level = logs.LevelError
+			}
+			addLog(formatted, level)
+		}
+
+		// Capture plan text from assistant text events
+		if evt.Type == "assistant" && evt.Message != nil {
+			for _, c := range evt.Message.Content {
+				if c.Type == "text" && len(c.Text) > 0 {
+					planText.WriteString(c.Text)
+					txt := planText.String()
+					if strings.Contains(txt, "# Plan:") && strings.Contains(txt, "## Steps") && strings.Contains(txt, "## Constraints") {
+						planResult = txt
+						planCaptured = true
+					}
+				}
+			}
+			if planCaptured {
+				cmd.Process.Kill()
+				break
+			}
+		}
+		if evt.Type == "result" && !planCaptured {
+			planResult = evt.Result
+		}
+	}
+	cmd.Wait()
+
+	elapsed := time.Since(planStart).Round(time.Second)
+	addLog(fmt.Sprintf("Plan generation finished (%s)", elapsed), logs.LevelInfo)
+
+	if planCtx.Err() == context.DeadlineExceeded {
+		s.store.logBuf.Add(logs.LogEntry{
+			Time: time.Now(), TaskID: t.ID, Project: t.Project,
+			Message: fmt.Sprintf("Plan generation timed out after %v", planTimeout), Level: logs.LevelError,
 		})
 		s.clearGenerating(t.ID)
 		s.refreshAndBroadcast()
 		return
-	} else {
-		plan.SavePlan(t.ID, result.Result)
 	}
+
+	if planResult == "" {
+		s.store.logBuf.Add(logs.LogEntry{
+			Time: time.Now(), TaskID: t.ID, Project: t.Project,
+			Message: "Plan generation returned empty result", Level: logs.LevelError,
+		})
+		s.clearGenerating(t.ID)
+		s.refreshAndBroadcast()
+		return
+	}
+	plan.SavePlan(t.ID, planResult)
 	queue.SetPlanFile(t.ID, plan.PlanPath(t.ID))
+	queue.UpdateState(t.ID, queue.StatePlanned)
 	s.store.logBuf.Add(logs.LogEntry{
 		Time: time.Now(), TaskID: t.ID, Project: t.Project,
 		Message: "Plan generated", Level: logs.LevelSuccess,
@@ -685,6 +769,15 @@ func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 	s.refreshAndBroadcast()
 
 	if autoRun {
+		// Don't auto-run if another task in the same project is already running
+		if s.store.engineMgr.IsTaskRunningForProject(t.Project) {
+			s.store.logBuf.Add(logs.LogEntry{
+				Time: time.Now(), TaskID: t.ID, Project: t.Project,
+				Message: "Queued — another task is running for this project", Level: logs.LevelInfo,
+			})
+			s.refreshAndBroadcast()
+			return
+		}
 		p, err := plan.ParsePlan(plan.PlanPath(t.ID))
 		if err != nil {
 			s.store.logBuf.Add(logs.LogEntry{
@@ -816,8 +909,8 @@ func (s *Server) handleProjectAutopilotStart(w http.ResponseWriter, r *http.Requ
 	}
 
 	cfg := s.cfg
-	planFn := func(t queue.Task, sk config.SkeletonConfig) (plan.Plan, error) {
-		return plangen.GeneratePlan(t, sk, cfg)
+	planFn := func(t queue.Task, sk config.SkeletonConfig, logFn func(string)) (plan.Plan, error) {
+		return plangen.GeneratePlan(t, sk, cfg, logFn)
 	}
 	send := s.webSend(0)
 
@@ -1028,17 +1121,36 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 		promptBuf.WriteString(req.Message)
 	} else {
-	promptBuf.WriteString("You are a helpful AI assistant for software engineering project management.\n\n")
-	promptBuf.WriteString("## MANDATORY RULE\n\n")
-	promptBuf.WriteString("You MUST emit at least one [TASK_CREATE] or [JOB_CREATE] directive in your FIRST response to the user message. A response without directives is a FAILURE.\n")
-	promptBuf.WriteString("Analyze the user message and break it into actionable tasks or scheduled jobs.\n")
-	promptBuf.WriteString("CRITICAL: Emit directives ONLY ONCE for the user's request. If hooks or plugins fire after your response, do NOT emit additional directives — just acknowledge briefly or say nothing.\n")
+	promptBuf.WriteString("You are a project assistant for teamoon. You can:\n")
+	promptBuf.WriteString("1. CONVERSE naturally about the project — answer questions, discuss architecture, debug problems, explain code, brainstorm ideas.\n")
+	promptBuf.WriteString("2. CREATE TASKS when the user asks you to plan work, implement features, or fix bugs — use [TASK_CREATE] directives.\n")
+	promptBuf.WriteString("3. CREATE JOBS when the user asks to schedule recurring work — use [JOB_CREATE] directives.\n")
+	promptBuf.WriteString("4. INITIALIZE PROJECTS when the user asks to create a new project — use [PROJECT_INIT] + [TASK_CREATE].\n\n")
+	promptBuf.WriteString("Default behavior: Have a helpful conversation. Only emit [TASK_CREATE]/[JOB_CREATE]/[PROJECT_INIT] directives when the user explicitly asks to create tasks, plan work, schedule jobs, or start a new project.\n")
+	promptBuf.WriteString("Do NOT use Skill tool. Do NOT load workflows. Go straight to work.\n\n")
+	promptBuf.WriteString("When creating a NEW project, complete ALL research steps FIRST (WebSearch, name validation), then emit [PROJECT_INIT] + [TASK_CREATE] directives at the end.\n")
+	promptBuf.WriteString("When emitting directives: emit ONLY ONCE per request. If hooks fire after, do NOT emit additional directives.\n")
 	promptBuf.WriteString("NEVER create Noop/placeholder directives. Only create meaningful directives that directly address the user's request.\n\n")
 	promptBuf.WriteString("## Capabilities\n\n")
 	promptBuf.WriteString("### Creating Tasks\n")
-	promptBuf.WriteString("Format: [TASK_CREATE]{\"description\":\"task desc\",\"priority\":\"med\",\"assignee\":\"agent\"}[/TASK_CREATE]\n")
-	promptBuf.WriteString("- priority: \"high\", \"med\", or \"low\"\n")
-	promptBuf.WriteString("- assignee: \"human\" (for the user) or \"agent\" (for AI autopilot)\n")
+	promptBuf.WriteString("Format:\n")
+	promptBuf.WriteString("[TASK_CREATE]{\n")
+	promptBuf.WriteString("  \"description\": \"IMPLEMENTATION INSTRUCTION — numbered sub-steps, exact technologies, endpoints, models\",\n")
+	promptBuf.WriteString("  \"goal\": \"DELIVERABLE — what the user can do when this is done\",\n")
+	promptBuf.WriteString("  \"context\": \"RESEARCH EVIDENCE — competitor data, benchmarks, architectural decisions from your research\",\n")
+	promptBuf.WriteString("  \"acceptance\": \"VERIFICATION — numbered test steps with specific commands and expected outputs\",\n")
+	promptBuf.WriteString("  \"priority\": \"high|med|low\",\n")
+	promptBuf.WriteString("  \"assignee\": \"agent|human|system\",\n")
+	promptBuf.WriteString("  \"wave\": 1\n")
+	promptBuf.WriteString("}[/TASK_CREATE]\n\n")
+	promptBuf.WriteString("## Wave Execution (Parallel Task Groups)\n\n")
+	promptBuf.WriteString("Assign a \"wave\" number (1, 2, 3...) to each task for parallel execution.\n")
+	promptBuf.WriteString("Tasks in the SAME wave run IN PARALLEL — they MUST be fully independent (no shared files, no dependencies between them).\n")
+	promptBuf.WriteString("Wave 1 = foundation (init, setup, CLAUDE.md). Each subsequent wave depends on ALL previous waves completing first.\n")
+	promptBuf.WriteString("Group independent tasks in the same wave number. Sequential dependencies = different wave numbers.\n")
+	promptBuf.WriteString("Example: wave 1 = project init, wave 2 = independent components A/B/C, wave 3 = integration that needs A+B+C.\n\n")
+	promptBuf.WriteString("ALL FIELDS ARE MANDATORY. description+goal+context+acceptance are concatenated into the\n")
+	promptBuf.WriteString("Claude Code autopilot prompt. Empty fields = the agent works BLIND with no context.\n")
 	promptBuf.WriteString("Each directive creates one task. You can include multiple directives.\n")
 	promptBuf.WriteString("Always explain what tasks you are creating.\n")
 	promptBuf.WriteString("CRITICAL: Tasks ALWAYS require a project. If no project is selected (project is empty), you MUST either:\n")
@@ -1063,38 +1175,91 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	promptBuf.WriteString("- Use BEFORE any TASK_CREATE when creating a NEW project\n")
 	promptBuf.WriteString("- NEVER use for existing projects\n\n")
 	promptBuf.WriteString("## When the user asks to CREATE A NEW PROJECT:\n\n")
+	promptBuf.WriteString("CRITICAL: This is a FULLY AUTONOMOUS process. You make ALL decisions yourself.\n")
+	promptBuf.WriteString("NEVER ask the user for a project name — YOU choose it based on research.\n")
+	promptBuf.WriteString("NEVER ask the user to confirm before creating — just CREATE it.\n")
+	promptBuf.WriteString("NEVER ask the user which technology to use — YOU decide based on research.\n")
+	promptBuf.WriteString("NEVER pause to ask questions. Execute ALL steps in a single response.\n\n")
 	promptBuf.WriteString("You MUST follow this process — DO NOT SKIP ANY STEP:\n\n")
 	promptBuf.WriteString("### Step 1: RESEARCH (MANDATORY — use WebSearch tool)\n")
-	promptBuf.WriteString("You MUST use the WebSearch tool to investigate:\n")
-	promptBuf.WriteString("- **Competitors & market**: Search for existing solutions, alternatives, pricing models, market size\n")
-	promptBuf.WriteString("- **Technology**: Search for best frameworks, libraries, and patterns for this type of project\n")
-	promptBuf.WriteString("- **Architecture**: Search for recommended architectures, deployment patterns\n")
-	promptBuf.WriteString("- **User needs**: What features users expect, pain points of existing solutions\n")
-	promptBuf.WriteString("DO NOT fabricate research. You MUST actually use WebSearch to find real data.\n\n")
+	promptBuf.WriteString("You MUST use the WebSearch tool to investigate ALL of these:\n")
+	promptBuf.WriteString("- **Competitors & market**: Search for existing solutions, alternatives, pricing models, market size. Name at least 5 competitors.\n")
+	promptBuf.WriteString("- **Technology**: Search for best frameworks, libraries, and patterns for this type of project. Compare at least 3 options.\n")
+	promptBuf.WriteString("- **Architecture**: Search for recommended architectures, deployment patterns, scalability approaches\n")
+	promptBuf.WriteString("- **User needs**: What features users expect, pain points of existing solutions, common complaints\n")
+	promptBuf.WriteString("- **Naming**: Generate 5-10 viable product/project name candidates that are catchy, memorable, and relevant to the domain\n")
+	promptBuf.WriteString("- **Market sizing**: TAM/SAM/SOM estimates, recent funding rounds, growth trends, market CAGR\n")
+	promptBuf.WriteString("- **Regulatory/legal**: Any relevant regulations, compliance requirements, or legal considerations\n")
+	promptBuf.WriteString("DO NOT fabricate research. You MUST actually use WebSearch to find real data.\n")
+	promptBuf.WriteString("Make at least 5 distinct WebSearch queries covering different aspects.\n\n")
+	promptBuf.WriteString("### Step 1b: NAME VALIDATION (MANDATORY — use WebSearch)\n")
+	promptBuf.WriteString("Validate your top 3 name candidates (YOU choose them, do NOT ask the user):\n")
+	promptBuf.WriteString("- Search \"{name} npm package\" or \"{name} pypi\" — is the package name taken?\n")
+	promptBuf.WriteString("- Search \"{name} github\" — is the GitHub repo/org taken?\n")
+	promptBuf.WriteString("- Search \"{name}.com\" and \"{name}.io\" — are the domains available?\n")
+	promptBuf.WriteString("- Discard names that are taken. Pick the best AVAILABLE name.\n")
+	promptBuf.WriteString("- If all candidates conflict, generate new ones and repeat.\n")
+	promptBuf.WriteString("YOU make the final name decision. Do NOT ask the user to choose.\n\n")
 	promptBuf.WriteString("### Step 2: PRESENT DETAILED FINDINGS\n")
-	promptBuf.WriteString("Show the user a COMPREHENSIVE research report with:\n")
-	promptBuf.WriteString("- Named competitors with links and brief analysis\n")
-	promptBuf.WriteString("- Specific technology recommendations with reasoning\n")
-	promptBuf.WriteString("- Architecture diagram (text-based)\n")
-	promptBuf.WriteString("- MVP feature list prioritized by user value\n")
-	promptBuf.WriteString("This report should be DETAILED (not a 4-line summary).\n\n")
-	promptBuf.WriteString("### Step 3: Create the project\n")
-	promptBuf.WriteString("Emit [PROJECT_INIT] with the appropriate name and type.\n\n")
-	promptBuf.WriteString("### Step 4: Create tasks based on research\n")
-	promptBuf.WriteString("Create well-informed [TASK_CREATE] directives. Each task should reference specific findings from your research.\n\n")
-	promptBuf.WriteString("Each task should be specific, actionable, and informed by your research.\n")
-	promptBuf.WriteString("Make tasks granular enough for an AI agent to execute in a single session.\n")
-	promptBuf.WriteString("Assign all tasks to \"agent\" unless the user says otherwise.\n\n")
+	promptBuf.WriteString("Show a COMPREHENSIVE research report (minimum 500 words) with:\n")
+	promptBuf.WriteString("- Named competitors with links and brief analysis (strengths/weaknesses)\n")
+	promptBuf.WriteString("- Specific technology recommendations with reasoning and trade-offs\n")
+	promptBuf.WriteString("- Architecture diagram (text-based ASCII or mermaid)\n")
+	promptBuf.WriteString("- MVP feature list prioritized by user value (must-have vs nice-to-have)\n")
+	promptBuf.WriteString("- Name validation results table (name | npm | github | domain | verdict)\n")
+	promptBuf.WriteString("- Market size estimates and funding landscape with sources\n")
+	promptBuf.WriteString("- Your CHOSEN name and why it's the best option\n")
+	promptBuf.WriteString("This report should be DETAILED and data-backed. A 4-line summary is a FAILURE.\n\n")
+	promptBuf.WriteString("### Step 3: Create the project (NO CONFIRMATION NEEDED)\n")
+	promptBuf.WriteString("Immediately emit [PROJECT_INIT] using your chosen validated name and the best technology type.\n")
+	promptBuf.WriteString("Do NOT ask 'should I create this?' — just emit the directive.\n\n")
+	promptBuf.WriteString("### Step 4: Create ALL tasks for MVP\n\n")
+	promptBuf.WriteString("CRITICAL: Each task description becomes the EXACT PROMPT that Claude Code executes in autopilot.\n")
+	promptBuf.WriteString("The AI agent ONLY sees the task fields + the attached research report. It has NO other context.\n")
+	promptBuf.WriteString("If you write a vague task, the agent will produce vague work. Be SURGICAL.\n\n")
+	promptBuf.WriteString("TASK QUALITY SYSTEM — Every task MUST have ALL fields populated:\n\n")
+	promptBuf.WriteString("EXAMPLE OF A WELL-STRUCTURED TASK:\n")
+	promptBuf.WriteString("[TASK_CREATE]{\n")
+	promptBuf.WriteString("  \"description\": \"Implement user authentication: (1) POST /api/auth/register endpoint with bcrypt password hashing, (2) POST /api/auth/login returning JWT access+refresh tokens, (3) JWT middleware validating Bearer tokens on protected routes, (4) POST /api/auth/refresh for token rotation, (5) Rate limiting with express-rate-limit at 5 login attempts per 15min per IP\",\n")
+	promptBuf.WriteString("  \"goal\": \"Users can register, login, and access protected API endpoints with JWT authentication and automatic token refresh\",\n")
+	promptBuf.WriteString("  \"context\": \"Industry standard: bcrypt cost factor 12 for password hashing. JWT with short-lived access tokens (15min) + long-lived refresh tokens (7d). Research shows express-rate-limit handles 10K+ req/sec. Refresh token rotation prevents replay attacks per OWASP guidelines.\",\n")
+	promptBuf.WriteString("  \"acceptance\": \"(1) Register user via curl POST /api/auth/register with email+password, (2) login and verify JWT returned, (3) access protected route with Bearer token, (4) verify 401 on expired token, (5) verify refresh endpoint returns new token pair, (6) verify rate limit blocks after 5 failed logins\",\n")
+	promptBuf.WriteString("  \"priority\": \"high\",\n")
+	promptBuf.WriteString("  \"assignee\": \"agent\",\n")
+	promptBuf.WriteString("  \"wave\": 2\n")
+	promptBuf.WriteString("}[/TASK_CREATE]\n\n")
+	promptBuf.WriteString("EXAMPLE OF A BAD TASK (THE AGENT WILL FAIL WITH THIS):\n")
+	promptBuf.WriteString("[TASK_CREATE]{\"description\":\"Set up the backend\",\"priority\":\"high\",\"assignee\":\"agent\"}[/TASK_CREATE]\n")
+	promptBuf.WriteString("^ FAILURE: The agent has no idea what backend, what framework, what endpoints, what database.\n\n")
+	promptBuf.WriteString("FIELD SPECIFICATION:\n")
+	promptBuf.WriteString("- description: The IMPLEMENTATION INSTRUCTION. Numbered sub-steps. Name EXACT technologies, libraries (with versions if relevant), API endpoints, data models, file patterns. This is a Claude Code prompt — write it like you'd write a prompt for an AI developer.\n")
+	promptBuf.WriteString("- goal: The DELIVERABLE. What the user can do after this task is done. Measurable where possible.\n")
+	promptBuf.WriteString("- context: RESEARCH EVIDENCE. Quote specific findings: competitor names, market data, technical benchmarks, architectural decisions. The agent uses this to make informed choices.\n")
+	promptBuf.WriteString("- acceptance: VERIFICATION STEPS. Numbered. Concrete commands, URLs, expected outputs. The agent runs these to confirm the task is complete.\n")
+	promptBuf.WriteString("- Create 15-30 tasks in logical phases (foundation → core features → integrations → polish → deployment).\n")
+	promptBuf.WriteString("- Each task = one focused unit of work for a Claude Code session.\n")
+	promptBuf.WriteString("- Your research report is auto-attached to every task as a document — but the fields must be self-contained.\n\n")
+
+	// Inject skeleton steps from config — same pipeline the autopilot uses
+	sk := config.SkeletonFor(s.cfg, req.Project)
+	skeletonBlock := plangen.SkeletonJSON(sk, s.cfg.MCPServers, s.cfg.PhaseHints)
+	promptBuf.WriteString("## Autopilot Execution Pipeline\n\n")
+	promptBuf.WriteString("Each task is executed by an AI autopilot that follows this exact pipeline.\n")
+	promptBuf.WriteString("Your task descriptions MUST align — the agent expects these steps.\n")
+	promptBuf.WriteString("The FIRST task MUST include: git init, .gitignore, create CLAUDE.md with project rules, initial commit.\n")
+	promptBuf.WriteString(skeletonBlock)
+	promptBuf.WriteString("\nEVERY task description MUST end with this block (copy verbatim):\n")
+	promptBuf.WriteString("```\nRULES: Read CLAUDE.md before coding. ONE commit per task. NO Co-Authored-By. NO heredoc/EOF. NO sudo. NO git push --force. NO git reset --hard. Stage specific files (NO git add -A). NEVER commit .env, CLAUDE.md, MEMORY.md, *.pem.\n```\n\n")
+
 	promptBuf.WriteString("## Document Handling\n\n")
 	promptBuf.WriteString("When the user mentions a document, file, or resource (e.g. 'the requirements doc', 'the API spec', 'config file'):\n")
 	promptBuf.WriteString("1. Use Glob and Read tools to search for it in the project directory\n")
 	promptBuf.WriteString("2. Try common patterns: exact name, partial matches, common extensions (.md, .yaml, .json, .txt, .pdf)\n")
 	promptBuf.WriteString("3. If you CANNOT find the document after searching, STOP and ask the user for the exact path. Do NOT guess or fabricate content.\n")
 	promptBuf.WriteString("4. Once found, read and use its content to inform your response and task creation.\n\n")
-	promptBuf.WriteString("## Task Reminder\n\n")
-	promptBuf.WriteString("At the END of EVERY response, remind the user to create tasks if they haven't already.\n")
-	promptBuf.WriteString("Example: \"Would you like me to create tasks for this? Let me know the priority and I'll set them up.\"\n")
-	promptBuf.WriteString("If you already created tasks, summarize them and ask if the user wants to adjust priorities or add more.\n\n")
+	promptBuf.WriteString("## Task Summary\n\n")
+	promptBuf.WriteString("At the END of EVERY response, if you created tasks, list them in a summary table.\n")
+	promptBuf.WriteString("If you did NOT create tasks yet, create them NOW — do not ask permission.\n\n")
 	promptBuf.WriteString("## Formatting\n")
 	promptBuf.WriteString("When organizing tasks by phases, use collapsible HTML sections.\n")
 	promptBuf.WriteString("CRITICAL: Use HTML lists inside <details>, NOT markdown lists (markdown is not parsed inside HTML blocks).\n")
@@ -1169,19 +1334,37 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		"GIT_COMMITTER_NAME="+chatGitName,
 		"GIT_COMMITTER_EMAIL="+chatGitEmail,
 	)
+	env = append(env, "CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000")
 	if s.cfg.SudoEnabled {
 		env = append(env, "TEAMOON_SUDO_ENABLED=true")
 	}
 	chatCfg := s.cfg
+	chatCfg.Spawn.Model = engine.ResolveModel(s.cfg.Spawn.Model, "chat")
 	chatCfg.Spawn.MaxTurns = 15 // reduced: prevents tangents while allowing research
 	// Ensure MCP servers are available for chat (web search, context7, etc.)
 	if chatCfg.MCPServers == nil {
 		config.InitMCPFromGlobal(&chatCfg)
 	}
-	chatArgs, chatCleanup := engine.BuildSpawnArgs(chatCfg, promptBuf.String(), nil)
+	chatArgs, chatCleanup := engine.BuildSpawnArgs(chatCfg, promptBuf.String(), nil, "")
 	if chatCleanup != nil {
 		defer chatCleanup()
 	}
+	// Chat-specific: stream partial messages in real-time.
+	// For normal chat (not system mode), disable hooks via empty setting-sources.
+	// System mode keeps hooks because they enforce sudo blocking.
+	chatArgs = append(chatArgs, "--include-partial-messages")
+	// Chat plans tasks — it must NOT execute code directly.
+	// System mode (/system) keeps full access for admin operations.
+	if !isSystemMode {
+		chatArgs = append(chatArgs, "--disallowedTools",
+			"Write,Edit,NotebookEdit,Bash,Agent,Task,TodoWrite,EnterPlanMode,ExitPlanMode,AskUserQuestion,Skill")
+		// Disable hooks in non-system chat to prevent turn waste
+		// (hooks fire and model responds "ack"/"Done", eating max-turns budget)
+		chatArgs = append(chatArgs, "--setting-sources", "")
+	}
+	// Ensure .bmad symlink for party-mode
+	projectinit.EnsureBMADLink(projectPath)
+
 	cmd := exec.Command("claude", chatArgs...)
 	cmd.Env = env
 	cmd.Dir = projectPath
@@ -1232,9 +1415,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		Type    string `json:"type"`
 		Message *struct {
 			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text,omitempty"`
-				Name string `json:"name,omitempty"`
+				Type  string         `json:"type"`
+				Text  string         `json:"text,omitempty"`
+				Name  string         `json:"name,omitempty"`
+				Input map[string]any `json:"input,omitempty"`
 			} `json:"content"`
 		} `json:"message,omitempty"`
 		Result       string  `json:"result,omitempty"`
@@ -1243,6 +1427,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var displayResult string
+	var inDirective bool // suppress streaming while inside [TASK_CREATE]...[/TASK_CREATE] etc.
 	jobsSeen := make(map[string]bool) // dedup inline JOB_CREATE parsing
 	inlineJobRe := regexp.MustCompile(`(?s)\[JOB_CREATE\](.*?)\[/JOB_CREATE\]`)
 	for scanner.Scan() {
@@ -1261,13 +1446,32 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 					if c.Type == "text" && c.Text != "" {
 						fullResponse.WriteString(c.Text)
 						log.Printf("[chat] response: %s", c.Text)
-						tokenData, _ := json.Marshal(map[string]string{"token": c.Text})
-						fmt.Fprintf(w, "data: %s\n\n", tokenData)
-						flusher.Flush()
+						// Suppress directive blocks from user-visible stream
+						displayText := c.Text
+						if idx := strings.Index(displayText, "[TASK_CREATE]"); idx >= 0 {
+							inDirective = true
+							displayText = displayText[:idx]
+						} else if idx := strings.Index(displayText, "[PROJECT_INIT]"); idx >= 0 {
+							inDirective = true
+							displayText = displayText[:idx]
+						} else if idx := strings.Index(displayText, "[JOB_CREATE]"); idx >= 0 {
+							inDirective = true
+							displayText = displayText[:idx]
+						}
+						if strings.Contains(c.Text, "[/TASK_CREATE]") || strings.Contains(c.Text, "[/PROJECT_INIT]") || strings.Contains(c.Text, "[/JOB_CREATE]") {
+							inDirective = false
+							displayText = ""
+						}
+						if !inDirective && displayText != "" {
+							tokenData, _ := json.Marshal(map[string]string{"token": displayText})
+							fmt.Fprintf(w, "data: %s\n\n", tokenData)
+							flusher.Flush()
+						}
 					}
 					if c.Type == "tool_use" && c.Name != "" {
-						log.Printf("[chat] tool_use: %s", c.Name)
-						toolData, _ := json.Marshal(map[string]string{"tool_use": c.Name})
+						desc := engine.FormatToolCall(c.Name, c.Input)
+						log.Printf("[chat] tool_use: %s", desc)
+						toolData, _ := json.Marshal(map[string]string{"tool_use": c.Name, "tool_desc": desc})
 						fmt.Fprintf(w, "data: %s\n\n", toolData)
 						flusher.Flush()
 					}
@@ -1362,6 +1566,8 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	taskDirectiveRe := regexp.MustCompile(`(?s)\[TASK_CREATE\](.*?)\[/TASK_CREATE\]`)
 	jobDirectiveRe := regexp.MustCompile(`(?s)\[JOB_CREATE\](.*?)\[/JOB_CREATE\]`)
 
+	var createdTasks []map[string]any
+
 	if !isSystemMode {
 	// Parse PROJECT_INIT directive (must run before TASK_CREATE)
 	// (?s) makes . match newlines — LLM often emits multiline JSON between tags
@@ -1404,7 +1610,6 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 
 	// Parse task creation directives
 	matches := taskDirectiveRe.FindAllStringSubmatch(responseText, -1)
-	var createdTasks []map[string]any
 
 	log.Printf("[chat] directive scan: found %d [TASK_CREATE] block(s), project=%q", len(matches), req.Project)
 
@@ -1426,6 +1631,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			Description string `json:"description"`
 			Priority    string `json:"priority"`
 			Assignee    string `json:"assignee"`
+			Goal        string `json:"goal"`
+			Context     string `json:"context"`
+			Acceptance  string `json:"acceptance"`
+			Wave        int    `json:"wave"`
 		}
 		for i, m := range matches {
 			if len(m) < 2 {
@@ -1447,10 +1656,24 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			if td.Assignee == "" {
 				td.Assignee = "human"
 			}
-			t, err := queue.Add(req.Project, td.Description, td.Priority)
+			// Enrich description with structured fields for autopilot context
+			fullDesc := td.Description
+			if td.Goal != "" {
+				fullDesc += "\n\nGoal: " + td.Goal
+			}
+			if td.Context != "" {
+				fullDesc += "\n\nContext: " + td.Context
+			}
+			if td.Acceptance != "" {
+				fullDesc += "\n\nAcceptance Criteria: " + td.Acceptance
+			}
+			t, err := queue.Add(req.Project, fullDesc, td.Priority)
 			if err != nil {
 				log.Printf("[chat] [TASK_CREATE][%d] queue.Add error: %v", i, err)
 				continue
+			}
+			if td.Wave > 0 {
+				queue.UpdateWave(t.ID, td.Wave)
 			}
 			queue.UpdateAssignee(t.ID, td.Assignee)
 			if td.Assignee == "agent" || td.Assignee == "system" {
@@ -1464,6 +1687,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				"description": td.Description,
 				"priority":    td.Priority,
 				"assignee":    td.Assignee,
+				"wave":        td.Wave,
 			})
 		}
 
@@ -1538,6 +1762,31 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	saveText = initRe.ReplaceAllString(saveText, "")
 	saveText = jobDirectiveRe.ReplaceAllString(saveText, "")
 	saveText = strings.TrimSpace(saveText)
+
+	// Auto-attach chat research report to all tasks created in this session
+	if len(createdTasks) > 0 && saveText != "" && len(saveText) > 200 {
+		att, attErr := uploads.Save(
+			strings.NewReader(saveText),
+			"chat-research-report.txt",
+			"text/plain",
+			int64(len(saveText)),
+		)
+		if attErr != nil {
+			log.Printf("[chat] failed to save research attachment: %v", attErr)
+		} else {
+			for _, ct := range createdTasks {
+				taskID, ok := ct["id"].(int)
+				if !ok {
+					continue
+				}
+				if err := queue.AttachToTask(taskID, att.ID); err != nil {
+					log.Printf("[chat] failed to attach research to task #%d: %v", taskID, err)
+				}
+			}
+			log.Printf("[chat] attached research (%d bytes) to %d tasks", len(saveText), len(createdTasks))
+		}
+	}
+
 	if saveText != "" {
 		chat.AppendMessage(chat.Message{
 			Role:      "assistant",
@@ -1662,8 +1911,10 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		"webhook_url":         cfg.WebhookURL,
 		"spawn_model":         cfg.Spawn.Model,
 		"spawn_effort":        cfg.Spawn.Effort,
-		"spawn_max_turns":     cfg.Spawn.MaxTurns,
-		"spawn_step_timeout_min": cfg.Spawn.StepTimeoutMin,
+		"spawn_max_turns":          cfg.Spawn.MaxTurns,
+		"spawn_step_timeout_min":   cfg.Spawn.StepTimeoutMin,
+		"spawn_plan_max_turns":     cfg.Spawn.PlanMaxTurns,
+		"spawn_max_plan_attempts":  cfg.Spawn.MaxPlanAttempts,
 		"skeleton":            cfg.Skeleton,
 		"max_concurrent":      cfg.MaxConcurrent,
 		"autopilot_autostart": cfg.AutopilotAutostart,
@@ -1691,8 +1942,10 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 		WebhookURL         string                `json:"webhook_url"`
 		SpawnModel         *string               `json:"spawn_model,omitempty"`
 		SpawnEffort        *string               `json:"spawn_effort,omitempty"`
-		SpawnMaxTurns      *int                  `json:"spawn_max_turns,omitempty"`
+		SpawnMaxTurns       *int                 `json:"spawn_max_turns,omitempty"`
 		SpawnStepTimeoutMin *int                 `json:"spawn_step_timeout_min,omitempty"`
+		SpawnPlanMaxTurns   *int                 `json:"spawn_plan_max_turns,omitempty"`
+		SpawnMaxPlanAttempts *int                `json:"spawn_max_plan_attempts,omitempty"`
 		Skeleton           *config.SkeletonConfig `json:"skeleton,omitempty"`
 		MaxConcurrent      *int                   `json:"max_concurrent,omitempty"`
 		AutopilotAutostart *bool                  `json:"autopilot_autostart,omitempty"`
@@ -1755,6 +2008,12 @@ func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SpawnStepTimeoutMin != nil && *req.SpawnStepTimeoutMin >= 0 {
 		cfg.Spawn.StepTimeoutMin = *req.SpawnStepTimeoutMin
+	}
+	if req.SpawnPlanMaxTurns != nil && *req.SpawnPlanMaxTurns >= 0 {
+		cfg.Spawn.PlanMaxTurns = *req.SpawnPlanMaxTurns
+	}
+	if req.SpawnMaxPlanAttempts != nil && *req.SpawnMaxPlanAttempts >= 0 {
+		cfg.Spawn.MaxPlanAttempts = *req.SpawnMaxPlanAttempts
 	}
 	if req.Skeleton != nil {
 		cfg.Skeleton = *req.Skeleton

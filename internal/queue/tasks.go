@@ -37,8 +37,12 @@ type Task struct {
 	Done        bool      `json:"done"`
 	AutoPilot   bool      `json:"auto_pilot"`
 	Optional    bool      `json:"optional,omitempty"`
-	Assignee    string    `json:"assignee,omitempty"`
-	Attachments []string  `json:"attachments,omitempty"`
+	Assignee     string   `json:"assignee,omitempty"`
+	Attachments  []string `json:"attachments,omitempty"`
+	PlanAttempts int      `json:"plan_attempts,omitempty"`
+	SessionID    string   `json:"session_id,omitempty"`
+	CurrentStep  int      `json:"current_step,omitempty"`
+	Wave         int      `json:"wave,omitempty"`
 }
 
 func EffectiveState(t Task) TaskState {
@@ -138,6 +142,8 @@ func MarkDone(id int) error {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].Done = true
 			store.Tasks[i].State = StateDone
+			store.Tasks[i].SessionID = ""
+			store.Tasks[i].CurrentStep = 0
 			if err := saveStore(store); err != nil {
 				return err
 			}
@@ -197,6 +203,8 @@ func Archive(id int) error {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].State = StateArchived
 			store.Tasks[i].Done = true
+			store.Tasks[i].SessionID = ""
+			store.Tasks[i].CurrentStep = 0
 			log.Printf("[queue] task #%d archived", id)
 			return saveStore(store)
 		}
@@ -269,11 +277,37 @@ func ResetPlan(id int) error {
 			store.Tasks[i].PlanFile = ""
 			store.Tasks[i].FailReason = ""
 			store.Tasks[i].Done = false
+			store.Tasks[i].PlanAttempts = 0
+			store.Tasks[i].SessionID = ""
+			store.Tasks[i].CurrentStep = 0
 			log.Printf("[queue] task #%d plan reset", id)
 			return saveStore(store)
 		}
 	}
 	return fmt.Errorf("task #%d not found", id)
+}
+
+// IncrementPlanAttempts atomically increments the plan attempt counter and returns the new value.
+func IncrementPlanAttempts(id int) (int, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return 0, err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].PlanAttempts++
+			count := store.Tasks[i].PlanAttempts
+			if err := saveStore(store); err != nil {
+				return 0, err
+			}
+			log.Printf("[queue] task #%d plan_attempts=%d", id, count)
+			return count, nil
+		}
+	}
+	return 0, fmt.Errorf("task #%d not found", id)
 }
 
 func SetFailReason(id int, reason string) error {
@@ -288,6 +322,8 @@ func SetFailReason(id int, reason string) error {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].FailReason = reason
 			store.Tasks[i].State = StatePending
+			store.Tasks[i].SessionID = ""
+			store.Tasks[i].CurrentStep = 0
 			if err := saveStore(store); err != nil {
 				return err
 			}
@@ -387,9 +423,19 @@ func ListAutopilotPending(project string) ([]Task, error) {
 		}
 	}
 
-	// FIFO order: process tasks in creation order (by ID).
-	// Priority is informational only; it does not affect execution order.
+	// Wave order: wave ascending (0 treated as max int = legacy sequential last),
+	// then ID ascending within each wave.
 	sort.Slice(result, func(i, j int) bool {
+		wi, wj := result[i].Wave, result[j].Wave
+		if wi == 0 {
+			wi = 1<<31 - 1
+		}
+		if wj == 0 {
+			wj = 1<<31 - 1
+		}
+		if wi != wj {
+			return wi < wj
+		}
 		return result[i].ID < result[j].ID
 	})
 
@@ -436,7 +482,8 @@ func priorityRank(p string) int {
 }
 
 // RecoverRunning resets tasks stuck in "running" state after a service restart.
-// Tasks with a plan file go back to "planned", others go back to "pending".
+// Only resets tasks WITHOUT a SessionID (those can't be resumed).
+// Tasks with SessionID are left in running state for RecoverAndResume to handle.
 func RecoverRunning() ([]Task, error) {
 	storeMu.Lock()
 	defer storeMu.Unlock()
@@ -448,7 +495,7 @@ func RecoverRunning() ([]Task, error) {
 
 	var recovered []Task
 	for i := range store.Tasks {
-		if store.Tasks[i].State == StateRunning {
+		if store.Tasks[i].State == StateRunning && store.Tasks[i].SessionID == "" {
 			if store.Tasks[i].PlanFile != "" {
 				store.Tasks[i].State = StatePlanned
 			} else {
@@ -508,6 +555,23 @@ func UpdateDescription(id int, description string) error {
 	return fmt.Errorf("task #%d not found", id)
 }
 
+func UpdateWave(id int, wave int) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].Wave = wave
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
 func UpdateAssignee(id int, assignee string) error {
 	storeMu.Lock()
 	defer storeMu.Unlock()
@@ -540,6 +604,59 @@ func AttachToTask(id int, uploadID string) error {
 		}
 	}
 	return fmt.Errorf("task #%d not found", id)
+}
+
+func SetSessionID(id int, sid string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].SessionID = sid
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
+func SetCurrentStep(id int, step int) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			store.Tasks[i].CurrentStep = step
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
+// ListResumable returns tasks in running state that have a SessionID (can be resumed after restart).
+func ListResumable() ([]Task, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []Task
+	for _, t := range store.Tasks {
+		if t.State == StateRunning && t.SessionID != "" {
+			result = append(result, t)
+		}
+	}
+	return result, nil
 }
 
 func notifyWebhook(event string, task Task) {

@@ -38,8 +38,6 @@ var DefaultPlugins = []DefaultPlugin{
 	{"claude-code-setup", "claude-plugins-official", "Claude Code setup automation"},
 	{"code-simplifier", "claude-plugins-official", "Simplify code for clarity and maintainability"},
 	{"feature-dev", "claude-plugins-official", "Guided feature development with codebase understanding"},
-	// Third-party
-	{"claude-mem", "thedotmack/claude-mem", "Persistent memory across Claude sessions"},
 }
 
 // ReadInstalled parses ~/.claude/settings.json enabledPlugins and returns installed plugins.

@@ -1,154 +1,228 @@
 package plangen
 
 import (
-	"bytes"
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/plan"
+	"github.com/JuanVilla424/teamoon/internal/projectinit"
 	"github.com/JuanVilla424/teamoon/internal/queue"
+	"github.com/JuanVilla424/teamoon/internal/uploads"
 )
 
-// BuildSkeletonPrompt builds the skeleton step instructions from a SkeletonConfig and MCP servers.
-func BuildSkeletonPrompt(sk config.SkeletonConfig, mcpServers map[string]config.MCPServer) string {
-	var sb strings.Builder
-	sb.WriteString("\n\nSKELETON — Your plan MUST follow this structure. The Investigate step is ALWAYS present.\n")
-	sb.WriteString("Generate implementation steps (Step 3..N-x) based on the task, then append the enabled tail steps.\n\n")
+const (
+	maxAttachmentChars = 5000
+	maxTotalChars      = 20000
+)
 
-	sb.WriteString("Step 1: Investigate codebase [ALWAYS ON] [ReadOnly]\n")
-	sb.WriteString("ReadOnly: true\n")
-	sb.WriteString("- Read CLAUDE.md, MEMORY.md, CONTEXT.md, README.md, INSTALL.md, VERSIONING.md, CONTRIBUTING.md\n")
-	sb.WriteString("- Read all relevant source files\n")
-	sb.WriteString("- Understand architecture, patterns, conventions\n")
-	if sk.WebSearch {
-		sb.WriteString("- Search the web if needed for context\n")
+
+// buildAttachmentBlock resolves task attachments and returns their text content as a prompt block.
+func buildAttachmentBlock(ids []string) string {
+	if len(ids) == 0 {
+		return ""
 	}
-	sb.WriteString("- Summarize findings\n\n")
+	atts := uploads.ResolveIDs(ids)
+	if len(atts) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	totalChars := 0
+	for _, a := range atts {
+		if !uploads.IsTextMIME(a.MIMEType) {
+			sb.WriteString(fmt.Sprintf("### %s (binary, %d bytes)\n\n", a.OrigName, a.Size))
+			continue
+		}
+		data, err := os.ReadFile(uploads.AbsPath(a))
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		remaining := maxTotalChars - totalChars
+		if remaining <= 0 {
+			break
+		}
+		if len(content) > maxAttachmentChars {
+			content = content[:maxAttachmentChars] + "\n[...truncated]"
+		}
+		if len(content) > remaining {
+			content = content[:remaining] + "\n[...truncated]"
+		}
+		totalChars += len(content)
+		sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", a.OrigName, content))
+	}
+	return sb.String()
+}
 
-	// Dynamic MCP skeleton steps
-	for name, mcp := range mcpServers {
+// SkeletonJSON serializes the active skeleton config + MCP skeleton steps to JSON.
+// Emits an ordered phases array with hints so the LLM knows what each phase means.
+func SkeletonJSON(sk config.SkeletonConfig, mcpServers map[string]config.MCPServer, phaseHints map[string]string) string {
+	type phase struct {
+		ID      string `json:"id"`
+		Enabled bool   `json:"enabled"`
+		Hint    string `json:"hint,omitempty"`
+	}
+	type mcpPhase struct {
+		Label    string `json:"label"`
+		Prompt   string `json:"prompt"`
+		ReadOnly bool   `json:"read_only"`
+	}
+	type skeleton struct {
+		Phases   []phase    `json:"phases"`
+		MCPSteps []mcpPhase `json:"mcp_steps,omitempty"`
+	}
+
+	orderedPhases := []struct {
+		id      string
+		enabled bool
+	}{
+		{"doc_setup", sk.DocSetup},
+		{"web_search", sk.WebSearch},
+		{"build_verify", sk.BuildVerify},
+		{"test", sk.Test},
+		{"pre_commit", sk.PreCommit},
+		{"commit", sk.Commit},
+		{"push", sk.Push},
+	}
+
+	s := skeleton{}
+	for _, op := range orderedPhases {
+		s.Phases = append(s.Phases, phase{
+			ID:      op.id,
+			Enabled: op.enabled,
+			Hint:    phaseHints[op.id],
+		})
+	}
+	for _, mcp := range mcpServers {
 		if mcp.SkeletonStep != nil && mcp.Enabled {
-			sb.WriteString(fmt.Sprintf("Step: %s [MCP: %s]", mcp.SkeletonStep.Label, name))
-			if mcp.SkeletonStep.ReadOnly {
-				sb.WriteString(" [ReadOnly]\nReadOnly: true\n")
-			} else {
-				sb.WriteString("\n")
-			}
-			sb.WriteString("- " + mcp.SkeletonStep.Prompt + "\n\n")
+			s.MCPSteps = append(s.MCPSteps, mcpPhase{
+				Label:    mcp.SkeletonStep.Label,
+				Prompt:   mcp.SkeletonStep.Prompt,
+				ReadOnly: mcp.SkeletonStep.ReadOnly,
+			})
 		}
 	}
-
-	sb.WriteString("Step 3..N-x: Implementation steps [YOU GENERATE THESE]\n")
-	sb.WriteString("- Actual code changes, file edits specific to the task\n")
-	sb.WriteString("- Number of steps varies per task\n\n")
-
-	if sk.BuildVerify {
-		sb.WriteString("Tail step: Build and verify\n")
-		sb.WriteString("- Compile/build the project (make build, go build, npx vite build, etc.)\n")
-		sb.WriteString("- If no build system exists, set one up (Makefile, package.json scripts, etc.)\n")
-		sb.WriteString("- Verify no compilation errors or warnings\n")
-		sb.WriteString("- If applicable, verify the service starts correctly\n\n")
-	}
-
-	if sk.Test {
-		sb.WriteString("Tail step: Test\n")
-		sb.WriteString("- If no test infrastructure exists, create it (go test, pytest, vitest, etc.)\n")
-		sb.WriteString("- Run existing test suite for affected packages\n")
-		sb.WriteString("- Write new unit/integration tests covering the implementation changes\n")
-		sb.WriteString("- Run the full test suite and fix any failures\n")
-		sb.WriteString("- All tests must pass before proceeding\n\n")
-	}
-
-	if sk.PreCommit {
-		sb.WriteString("Tail step: Pre-commit\n")
-		sb.WriteString("- If no pre-commit hooks exist, set them up\n")
-		sb.WriteString("- Run all pre-commit checks on changed files\n")
-		sb.WriteString("- Fix any issues found (formatting, linting, validation)\n")
-		sb.WriteString("- Re-run until all checks pass\n\n")
-	}
-
-	if sk.Commit {
-		sb.WriteString("Tail step: Commit\n")
-		sb.WriteString("- Update CHANGELOG.md: add entries under [Unreleased] in the appropriate section (Added/Changed/Fixed/Removed)\n")
-		sb.WriteString("- Stage all changed files (specific files, not git add -A)\n")
-		sb.WriteString("- Commit with format: type(core): description in lowercase\n")
-		sb.WriteString("- Check VERSIONING.md for valid commit types and optional versioning keywords\n")
-		sb.WriteString("- Check CONTRIBUTING.md if contributing to an external repo\n")
-		sb.WriteString("- NO emojis/icons in commit message\n")
-		sb.WriteString("- Single commit grouping all changes\n")
-		sb.WriteString("- If pre-commit hooks fail on commit, fix issues and retry\n\n")
-	}
-
-	if sk.Push {
-		sb.WriteString("Tail step: Push\n")
-		sb.WriteString("- Push to current remote branch\n")
-		sb.WriteString("- Verify push succeeds\n\n")
-	}
-
-	return sb.String()
+	data, _ := json.MarshalIndent(s, "", "  ")
+	return string(data)
 }
 
 // BuildPlanPrompt builds the full prompt for plan generation.
 func BuildPlanPrompt(t queue.Task, skeletonBlock, projectsDir string) string {
+	attachmentBlock := buildAttachmentBlock(t.Attachments)
+	contextSection := ""
+	if attachmentBlock != "" {
+		contextSection = "\nCONTEXT FROM ATTACHMENTS:\n" + attachmentBlock + "\n"
+	}
+
 	return fmt.Sprintf(
-		"You may read files to understand the codebase, then create a plan.\n"+
-			"Project path: %s/%s\n\n"+
-			"TASK: %s\n\n"+
-			"INSTRUCTIONS:\n"+
-			"1. FIRST read CLAUDE.md in the project root for project-specific guidelines\n"+
-			"2. Read the relevant source files to understand the current code\n"+
-			"3. Then output your final plan as a TEXT MESSAGE (not a tool call)\n\n"+
+		"You are a plan generator for project %s/%s.\n\n"+
+			"## Execution sequence\n\n"+
+			"1. Call Skill tool with skill='bmad:core:workflows:party-mode' — wait for it to complete before proceeding.\n"+
+			"2. Follow the skeleton phases below — each enabled phase becomes a step. Respect ordering hints in each phase.\n"+
+			"3. Emit the plan as your final text message.\n\n"+
+			"## Development methodology\n\n"+
+			"When generating implementation steps, ALWAYS follow this approach:\n"+
+			"1. FRONTEND FIRST: Build the UI/frontend with mock data. Use MOCK_ prefix for all mock variables and dedicated mock files. Verify visually with Chrome DevTools (take screenshot, check DOM, verify no console errors).\n"+
+			"2. BACKEND IMPLEMENTATION: Implement real backend logic, API endpoints, data connections. Replace mock imports with real implementations.\n"+
+			"3. MOCK CLEANUP: Remove ALL mock data before proceeding to build/test phases. Grep for MOCK_, mockData, mock_, fake_, dummy_ — ZERO matches allowed in production code (test files excluded). Take final screenshot confirming UI works identically without mocks.\n\n"+
+			"This is not optional. Every task that involves UI/frontend work MUST follow this sequence.\n\n"+
+			"## Task\n\n%s\n\n"+
+			"%s"+
+			"## Skeleton phases\n\n"+
 			"%s\n\n"+
-			"Your FINAL message MUST be the plan in this markdown format:\n\n"+
-			"# Plan: %s\n\n"+
-			"## Analysis\n[what you found in the codebase]\n\n"+
-			"## Steps\n\n### Step 1: [title]\nAgent: [agent-id]\nReadOnly: true/false\n[instructions with specific files and changes]\nVerify: [verification]\n\n"+
-			"### Step 2: [title]\nAgent: [agent-id]\nReadOnly: true/false\n[instructions]\nVerify: [verification]\n\n"+
-			"(5-12 steps total, use as many agents as needed)\n\n"+
-			"## Constraints\n- [constraints]\n\n"+
-			"AGENT ASSIGNMENT (MANDATORY for every step):\n"+
-			"Each step MUST have an 'Agent:' line. Available BMAD agents:\n"+
-			"- analyst (Mary - requirements analysis, research, data gathering)\n"+
-			"- pm (John - product strategy, feature scoping, prioritization)\n"+
-			"- architect (Winston - system design, architecture, technical decisions)\n"+
-			"- ux-designer (Sally - UX/UI design, user flows, accessibility)\n"+
-			"- dev (Amelia - implementation, coding, file changes)\n"+
-			"- tea (Murat - testing, QA, test architecture, validation)\n"+
-			"- sm (Bob - task breakdown, sprint management, story prep)\n"+
-			"- tech-writer (Paige - documentation, README, API docs)\n"+
-			"- cloud (Warren - cloud infrastructure, deployment, CI/CD)\n"+
-			"- quick-flow-solo-dev (Barry - rapid prototyping, full-stack quick tasks)\n"+
-			"- brainstorming-coach (Carson - ideation, creative exploration)\n"+
-			"- creative-problem-solver (Dr. Quinn - root cause analysis, complex debugging)\n"+
-			"- design-thinking-coach (Maya - user-centered design process)\n"+
-			"- innovation-strategist (Victor - business model, strategic decisions)\n\n"+
-			"Distribute steps across ALL relevant agents. A typical plan should involve:\n"+
-			"1. Analysis/research agent first (analyst or pm)\n"+
-			"2. Architecture/design agents (architect, ux-designer)\n"+
-			"3. Implementation agents (dev, quick-flow-solo-dev)\n"+
-			"4. Testing agent (tea)\n"+
-			"5. Documentation/deployment agents (tech-writer, cloud)\n\n"+
-			"ReadOnly ANNOTATION: Add 'ReadOnly: true' to steps that only read/research (like Investigate and Library Lookup).\n"+
-			"Add 'ReadOnly: false' or omit for steps that modify files.\n\n"+
-			"CRITICAL: Your very last message MUST be the markdown plan text, NOT a tool call.\n\n"+
-			"PROHIBITIONS:\n"+
-			"- NEVER invoke /bmad:core:workflows:party-mode or any /bmad slash command\n"+
-			"- NEVER use EnterPlanMode — you ARE generating the plan already\n"+
-			"- NEVER create .md files (SUMMARY.md, ANALYSIS.md, etc.) — output the plan as a text message only\n"+
-			"- NEVER include steps that say 'invoke party mode' or 'load workflow' — the autopilot system handles orchestration\n"+
-			"- Be concise and direct. No preamble.",
-		projectsDir, t.Project, t.Description, skeletonBlock, t.Description,
+			"## Output format\n\n"+
+			"# Plan: [title]\n\n"+
+			"## Analysis\n[findings from investigation]\n\n"+
+			"## Steps\n"+
+			"### Step N: [title]\n"+
+			"Agent: [bmad agent id assigned by party-mode]\n"+
+			"ReadOnly: true|false\n"+
+			"[instructions]\n"+
+			"Verify: [criteria]\n\n"+
+			"## Constraints\n[list]\n\n"+
+			"5-12 steps total. Do not create files. Final message must be the plan text.",
+		projectsDir, t.Project, t.Description, contextSection, skeletonBlock,
 	)
 }
 
+// PlanToolMessage creates a human-readable log message from a tool_use event.
+func PlanToolMessage(name string, input map[string]any) string {
+	str := func(key string) string {
+		if v, ok := input[key]; ok {
+			if s, ok := v.(string); ok {
+				if len(s) > 80 {
+					return s[:80] + "..."
+				}
+				return s
+			}
+		}
+		return ""
+	}
+	switch name {
+	case "Read":
+		if p := str("file_path"); p != "" {
+			return "Reading: " + filepath.Base(p)
+		}
+	case "Glob":
+		if p := str("pattern"); p != "" {
+			return "Scanning: " + p
+		}
+	case "Grep":
+		if p := str("pattern"); p != "" {
+			return "Searching: " + p
+		}
+	case "Bash":
+		if c := str("command"); c != "" {
+			return "Running: " + c
+		}
+	case "WebSearch":
+		if q := str("query"); q != "" {
+			return "Researching: " + q
+		}
+	case "WebFetch":
+		if u := str("url"); u != "" {
+			return "Fetching: " + u
+		}
+	case "Skill":
+		if s := str("skill"); s != "" {
+			return "Loading BMAD: " + s
+		}
+	case "Task":
+		if d := str("description"); d != "" {
+			return "Delegating: " + d
+		}
+	}
+	if strings.HasPrefix(name, "mcp__") {
+		parts := strings.SplitN(name, "__", 3)
+		if len(parts) >= 3 {
+			return parts[1] + ": " + strings.ReplaceAll(parts[2], "-", " ")
+		}
+	}
+	return "Planning: " + name
+}
+
 // GeneratePlan runs claude to generate a plan synchronously and saves it.
-func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config) (plan.Plan, error) {
-	skeletonBlock := BuildSkeletonPrompt(sk, cfg.MCPServers)
+// logFn is called with descriptive messages as planning progresses (may be nil).
+func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, logFn func(string)) (plan.Plan, error) {
+	// Ensure .bmad symlink exists so BMAD workflows can resolve @.bmad/ paths
+	projectDir := filepath.Join(cfg.ProjectsDir, t.Project)
+	projectinit.EnsureBMADLink(projectDir)
+
+	// BMAD must be available — party-mode handles agent assignments
+	bmadDir := filepath.Join(projectDir, ".bmad")
+	if _, err := os.Stat(bmadDir); err != nil {
+		return plan.Plan{}, fmt.Errorf("BMAD not available at %s — run onboarding first", bmadDir)
+	}
+
+	skeletonBlock := SkeletonJSON(sk, cfg.MCPServers, cfg.PhaseHints)
 	prompt := BuildPlanPrompt(t, skeletonBlock, cfg.ProjectsDir)
 
 	env := filterEnv(os.Environ(), "CLAUDECODE")
@@ -161,56 +235,140 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config) (pl
 		"GIT_COMMITTER_EMAIL="+gitEmail,
 	)
 
+	// Resolve meta-model for plan generation phase
 	planCfg := cfg
-	planCfg.Spawn.MaxTurns = 50
-	args, cleanup := engine.BuildSpawnArgs(planCfg, prompt, nil)
+	planCfg.Spawn.MaxTurns = cfg.Spawn.PlanMaxTurns
+	planCfg.Spawn.Model = engine.ResolveModel(cfg.Spawn.Model, "plan")
+	// No MCPs for plan gen — skeleton prompt already references MCP steps from full config.
+	planCfg.MCPServers = nil
+	args, cleanup := engine.BuildSpawnArgs(planCfg, prompt, nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
-	// Override stream-json to json for plan gen
-	for i, a := range args {
-		if a == "--output-format" && i+1 < len(args) {
-			args[i+1] = "json"
-		}
-		if a == "--verbose" {
-			args = append(args[:i], args[i+1:]...)
-			break
-		}
+	// Disallow write/edit tools — plan gen only reads and invokes BMAD Skill.
+	args = append(args,
+		"--disallowedTools",
+		"Edit,Write,NotebookEdit,Bash,ExitPlanMode,EnterPlanMode,TodoWrite,Task,AskUserQuestion",
+	)
+	// Note: --verbose is required by stream-json output format — do NOT strip it.
+	// Apply plan-specific timeout (defaults to 15 min — plan gen needs more time than step execution)
+	timeout := time.Duration(cfg.Spawn.PlanTimeoutMin) * time.Minute
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
 	}
-	cmd := exec.Command("claude", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = filepath.Join(cfg.ProjectsDir, t.Project)
 	cmd.Env = env
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
 
-	out, err := cmd.Output()
+	// Stream plan generation using stream-json for real-time progress visibility
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return plan.Plan{}, fmt.Errorf("plan generation failed: %w — stderr: %s", err, stderrBuf.String())
+		return plan.Plan{}, fmt.Errorf("plan generation pipe error: %w", err)
 	}
 
-	var result struct {
-		Result  string `json:"result"`
-		Type    string `json:"type"`
-		Subtype string `json:"subtype"`
+	if err := cmd.Start(); err != nil {
+		return plan.Plan{}, fmt.Errorf("plan generation start error: %w", err)
 	}
-	var planText string
-	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
-		planText = strings.TrimSpace(string(out))
-		if planText == "" {
-			return plan.Plan{}, fmt.Errorf("plan generation returned empty output")
+
+	// Heartbeat: periodic progress during stream-json gaps
+	planStart := time.Now()
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				if logFn != nil {
+					elapsed := time.Since(planStart).Round(time.Second)
+					logFn(fmt.Sprintf("Still planning... (%s elapsed)", elapsed))
+				}
+			}
 		}
-	} else if result.Result == "" {
-		return plan.Plan{}, fmt.Errorf("plan result empty (subtype: %s)", result.Subtype)
-	} else {
-		planText = result.Result
+	}()
+
+	type planStreamContent struct {
+		Type  string         `json:"type"`
+		Text  string         `json:"text,omitempty"`
+		Name  string         `json:"name,omitempty"`
+		Input map[string]any `json:"input,omitempty"`
+	}
+	type planStreamEvt struct {
+		Type      string `json:"type"`
+		SessionID string `json:"session_id,omitempty"`
+		Message   *struct {
+			Content []planStreamContent `json:"content"`
+		} `json:"message,omitempty"`
+		Result  string `json:"result,omitempty"`
+		Subtype string `json:"subtype,omitempty"`
 	}
 
-	if err := plan.SavePlan(t.ID, planText); err != nil {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+
+	var planResult string
+	var planText strings.Builder
+	var sessionID string
+	planCaptured := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		var evt planStreamEvt
+		if json.Unmarshal([]byte(line), &evt) != nil {
+			continue
+		}
+		// Capture session_id from first event that has it
+		if evt.SessionID != "" && sessionID == "" {
+			sessionID = evt.SessionID
+		}
+		switch evt.Type {
+		case "assistant":
+			if evt.Message != nil {
+				for _, c := range evt.Message.Content {
+					if c.Type == "tool_use" && c.Name != "" && logFn != nil {
+						logFn(PlanToolMessage(c.Name, c.Input))
+					}
+					if c.Type == "text" && len(c.Text) > 0 {
+						planText.WriteString(c.Text)
+						txt := planText.String()
+						if strings.Contains(txt, "# Plan:") && strings.Contains(txt, "## Steps") && strings.Contains(txt, "## Constraints") {
+							planResult = txt
+							planCaptured = true
+						}
+					}
+				}
+			}
+			if planCaptured {
+				cmd.Process.Kill()
+				break
+			}
+		case "result":
+			if !planCaptured {
+				planResult = evt.Result
+			}
+		}
+	}
+	cmd.Wait()
+	close(heartbeatDone)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return plan.Plan{}, fmt.Errorf("plan generation timed out after %v", timeout)
+	}
+
+	if planResult == "" {
+		return plan.Plan{}, fmt.Errorf("plan generation returned empty result")
+	}
+
+	if err := plan.SavePlan(t.ID, planResult); err != nil {
 		return plan.Plan{}, fmt.Errorf("saving plan: %w", err)
 	}
 	if err := queue.SetPlanFile(t.ID, plan.PlanPath(t.ID)); err != nil {
 		return plan.Plan{}, fmt.Errorf("setting plan file: %w", err)
 	}
-
 	p, err := plan.ParsePlan(plan.PlanPath(t.ID))
 	if err != nil {
 		return plan.Plan{}, fmt.Errorf("parsing generated plan: %w", err)

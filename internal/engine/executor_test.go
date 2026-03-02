@@ -13,7 +13,7 @@ import (
 
 func TestBuildSpawnArgs_Default(t *testing.T) {
 	cfg := config.DefaultConfig()
-	args, cleanup := BuildSpawnArgs(cfg, "test prompt", nil)
+	args, cleanup := BuildSpawnArgs(cfg, "test prompt", nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -48,7 +48,7 @@ func TestBuildSpawnArgs_Default(t *testing.T) {
 func TestBuildSpawnArgs_WithModel(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Spawn.Model = "sonnet"
-	args, cleanup := BuildSpawnArgs(cfg, "test", nil)
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -60,7 +60,7 @@ func TestBuildSpawnArgs_WithModel(t *testing.T) {
 func TestBuildSpawnArgs_WithEffort(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Spawn.Effort = "high"
-	args, cleanup := BuildSpawnArgs(cfg, "test", nil)
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -72,7 +72,7 @@ func TestBuildSpawnArgs_WithEffort(t *testing.T) {
 func TestBuildSpawnArgs_WithMaxTurns(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Spawn.MaxTurns = 50
-	args, cleanup := BuildSpawnArgs(cfg, "test", nil)
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -83,7 +83,7 @@ func TestBuildSpawnArgs_WithMaxTurns(t *testing.T) {
 
 func TestBuildSpawnArgs_WithAddDirs(t *testing.T) {
 	cfg := config.DefaultConfig()
-	args, cleanup := BuildSpawnArgs(cfg, "test", []string{"/tmp/a", "/tmp/b"})
+	args, cleanup := BuildSpawnArgs(cfg, "test", []string{"/tmp/a", "/tmp/b"}, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -101,9 +101,9 @@ func TestBuildSpawnArgs_WithAddDirs(t *testing.T) {
 func TestBuildSpawnArgs_WithMCPServers(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.MCPServers = map[string]config.MCPServer{
-		"test": {Command: "node", Args: []string{"s.js"}, Enabled: true},
+		"context7": {Command: "npx", Args: []string{"-y", "@context7/mcp-server"}, Enabled: true},
 	}
-	args, cleanup := BuildSpawnArgs(cfg, "test", nil)
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -117,7 +117,7 @@ func TestBuildSpawnArgs_MCPDisabledServersSkipped(t *testing.T) {
 	cfg.MCPServers = map[string]config.MCPServer{
 		"disabled": {Command: "node", Enabled: false},
 	}
-	args, cleanup := BuildSpawnArgs(cfg, "test", nil)
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -128,7 +128,7 @@ func TestBuildSpawnArgs_MCPDisabledServersSkipped(t *testing.T) {
 
 func TestBuildStepPrompt_AgentIdentity(t *testing.T) {
 	task := queue.Task{ID: 1, Project: "test-proj", Description: "test task"}
-	p := plan.Plan{Steps: []plan.Step{{Number: 1, Title: "Do stuff", Body: "body"}}}
+	p := plan.Plan{Steps: []plan.Step{{Number: 1, Title: "Do stuff", Body: "body", Agent: "analyst"}}}
 	step := p.Steps[0]
 
 	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
@@ -142,11 +142,11 @@ func TestBuildStepPrompt_AgentIdentity(t *testing.T) {
 
 func TestBuildStepPrompt_WithAgent(t *testing.T) {
 	task := queue.Task{ID: 1, Project: "test-proj", Description: "test"}
-	step := plan.Step{Number: 1, Title: "Step", Body: "body", Agent: "dev"}
+	step := plan.Step{Number: 1, Title: "Step", Body: "body", Agent: "architect"}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
 	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
-	if !strings.Contains(prompt, "dev agent") {
+	if !strings.Contains(prompt, "architect agent") {
 		t.Error("prompt should mention agent name")
 	}
 }
@@ -158,7 +158,7 @@ func TestBuildStepPrompt_CLAUDEMDInjection(t *testing.T) {
 
 	// Temporarily adjust HOME so projectPath resolves to our temp dir
 	task := queue.Task{ID: 1, Project: filepath.Base(tmpDir), Description: "test"}
-	step := plan.Step{Number: 1, Title: "Step", Body: "body"}
+	step := plan.Step{Number: 1, Title: "Step", Body: "body", Agent: "analyst"}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
 	// The function reads from ~/Projects/<project>/CLAUDE.md
@@ -369,6 +369,61 @@ func TestBuildStepPrompt_NonReadOnlyRules(t *testing.T) {
 }
 
 // helpers
+
+func TestBuildSpawnArgs_ZeroMaxTurnsIsUnlimited(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Spawn.MaxTurns = 0
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if containsArg(args, "--max-turns") {
+		t.Error("MaxTurns=0 should omit --max-turns (unlimited)")
+	}
+}
+
+func TestBuildSpawnArgs_WithSessionResume(t *testing.T) {
+	cfg := config.DefaultConfig()
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "session-abc-123")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if !containsArgValue(args, "--resume", "session-abc-123") {
+		t.Error("--resume should be present with session ID")
+	}
+	if containsArg(args, "--no-session-persistence") {
+		t.Error("--no-session-persistence should NOT be present when resuming")
+	}
+	if !containsArg(args, "-p") {
+		t.Error("-p flag should still be present when resuming")
+	}
+}
+
+func TestBuildSpawnArgs_WithoutSessionResume(t *testing.T) {
+	cfg := config.DefaultConfig()
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if containsArg(args, "--resume") {
+		t.Error("--resume should NOT be present without session ID")
+	}
+	if !containsArg(args, "--no-session-persistence") {
+		t.Error("--no-session-persistence should be present without session ID")
+	}
+}
+
+func TestBuildSpawnArgs_NegativeMaxTurnsFallsBackTo15(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Spawn.MaxTurns = -1
+	args, cleanup := BuildSpawnArgs(cfg, "test", nil, "")
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if !containsArgValue(args, "--max-turns", "15") {
+		t.Error("negative MaxTurns should fall back to --max-turns 15")
+	}
+}
 
 func containsArg(args []string, flag string) bool {
 	for _, a := range args {

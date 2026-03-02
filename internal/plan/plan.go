@@ -159,5 +159,11 @@ func ParsePlan(path string) (Plan, error) {
 		return p, fmt.Errorf("no steps found in plan: %s", path)
 	}
 
+	for _, s := range p.Steps {
+		if s.Agent == "" {
+			return p, fmt.Errorf("step %d (%q) missing Agent — BMAD must assign agents to all steps", s.Number, s.Title)
+		}
+	}
+
 	return p, scanner.Err()
 }

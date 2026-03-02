@@ -51,6 +51,7 @@ func main() {
 			}
 
 			engineMgr := engine.NewManager()
+			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
 			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
 			logBuf.SetDebug(cfg.Debug)
@@ -143,6 +144,7 @@ func main() {
 			}
 
 			engineMgr := engine.NewManager()
+			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
 			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
 			logBuf.SetDebug(cfg.Debug)

@@ -31,9 +31,10 @@ type PlanGeneratedMsg struct {
 }
 
 type Runner struct {
-	taskID int
-	cancel context.CancelFunc
-	done   chan struct{}
+	taskID  int
+	project string
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 type ProjectLoop struct {
@@ -46,12 +47,35 @@ type Manager struct {
 	mu           sync.Mutex
 	runners      map[int]*Runner
 	projectLoops map[string]*ProjectLoop
+	taskSem      chan struct{} // limits total concurrent Claude CLI processes
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		runners:      make(map[int]*Runner),
 		projectLoops: make(map[string]*ProjectLoop),
+	}
+}
+
+// SetMaxConcurrentTasks configures the global task concurrency semaphore.
+func (m *Manager) SetMaxConcurrentTasks(n int) {
+	if n <= 0 {
+		n = 3
+	}
+	m.taskSem = make(chan struct{}, n)
+}
+
+// AcquireSlot blocks until a task execution slot is available.
+func (m *Manager) AcquireSlot() {
+	if m.taskSem != nil {
+		m.taskSem <- struct{}{}
+	}
+}
+
+// ReleaseSlot returns a task execution slot.
+func (m *Manager) ReleaseSlot() {
+	if m.taskSem != nil {
+		<-m.taskSem
 	}
 }
 
@@ -64,9 +88,10 @@ func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send fu
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &Runner{
-		taskID: task.ID,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		taskID:  task.ID,
+		project: task.Project,
+		cancel:  cancel,
+		done:    make(chan struct{}),
 	}
 	m.runners[task.ID] = r
 	m.mu.Unlock()
@@ -114,6 +139,18 @@ func (m *Manager) IsRunning(taskID int) bool {
 	defer m.mu.Unlock()
 	_, exists := m.runners[taskID]
 	return exists
+}
+
+// IsTaskRunningForProject returns true if any task is currently executing for the given project.
+func (m *Manager) IsTaskRunningForProject(project string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.runners {
+		if r.project == project {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) StopAll() {

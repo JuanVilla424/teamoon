@@ -73,7 +73,12 @@ function renderMarkdown(text) {
 
 var TOOL_ICONS = {
   "WebSearch":"🔍","Read":"📄","Write":"✏️","Edit":"✏️","Bash":"⚡",
-  "Glob":"🗂️","Grep":"🔎","WebFetch":"🌐","Task":"🤖"
+  "Glob":"📂","Grep":"🔎","WebFetch":"🌐","Task":"🤖"
+};
+var TOOL_LABELS = {
+  "WebSearch":"Researching","Read":"Reading code","Write":"Writing file",
+  "Edit":"Editing file","Bash":"Running command","Glob":"Scanning files",
+  "Grep":"Searching code","WebFetch":"Fetching page","Task":"Delegating"
 };
 function toolIcon(name){
   if(TOOL_ICONS[name]) return TOOL_ICONS[name];
@@ -81,6 +86,7 @@ function toolIcon(name){
   return "⚙️";
 }
 function toolLabel(name){
+  if(TOOL_LABELS[name]) return TOOL_LABELS[name];
   if(name.indexOf("mcp__")===0){
     var parts=name.split("__");
     if(parts.length>=3) return parts[1]+": "+parts[2].replace(/-/g," ");
@@ -106,12 +112,19 @@ function chatUpdateToolActivity(bubbleEl){
       row.className="tool-activity-row";
       container.appendChild(row);
     }
+    var label=call.desc?(toolIcon(call.name)+" "+call.desc):(toolIcon(call.name)+" "+toolLabel(call.name));
+    row.textContent="";
     if(call.done){
       row.className="tool-activity-row tool-done";
-      row.innerHTML='<span class="tool-act-icon">\u2713</span><span class="tool-act-label">'+toolIcon(call.name)+" "+toolLabel(call.name)+'</span>';
+      var ic=document.createElement("span");ic.className="tool-act-icon";ic.textContent="\u2713";
+      var lb=document.createElement("span");lb.className="tool-act-label";lb.textContent=label;
+      row.appendChild(ic);row.appendChild(lb);
     } else {
       row.className="tool-activity-row tool-running";
-      row.innerHTML='<span class="tool-act-spinner"><span class="spinner-sm"></span></span><span class="tool-act-label">'+toolIcon(call.name)+" "+toolLabel(call.name)+'\u2026</span>';
+      var sp=document.createElement("span");sp.className="tool-act-spinner";
+      var spi=document.createElement("span");spi.className="spinner-sm";sp.appendChild(spi);
+      var lb2=document.createElement("span");lb2.className="tool-act-label";lb2.textContent=label+"\u2026";
+      row.appendChild(sp);row.appendChild(lb2);
     }
   }
 }
@@ -136,6 +149,7 @@ var currentPRsRepo = "";
 var logAutoScroll = true;
 var queueFilterState = "";
 var queueFilterProject = "";
+var queueViewMode = "list";
 var logFilterLevel = "";
 var logFilterTask = "";
 var logFilterProject = "";
@@ -361,6 +375,7 @@ function connectSSE(){
   };
   es.onerror = function(){
     es.close();
+    if(currentSSE !== es) return; // intentionally closed (e.g. tab hidden)
     // Check if 401 (auth required) before reconnecting
     fetch("/api/data").then(function(r){
       if(r.status === 401){
@@ -610,7 +625,7 @@ function computeContentKey(v){
       for(var i=0;i<logs.length;i++){
         if(logs[i].task_id === selectedTaskID) selLogs++;
       }
-      return lp + "q:" + queueFilterState + ":" + queueFilterProject + ":" + selectedTaskID + ":" + tk + ":" + selLogs;
+      return lp + "q:" + queueFilterState + ":" + queueFilterProject + ":" + queueViewMode + ":" + selectedTaskID + ":" + tk + ":" + selLogs;
     case "projects":
       var pk = "";
       for(var i=0;i<projs.length;i++){
@@ -687,30 +702,32 @@ function render(){
     }
     var curState = selTask ? selTask.effective_state : "";
     var stateChanged = (prevTaskStates[selectedTaskID] || "") !== curState;
-    if(!stateChanged){
-      var allLogs = (D && D.log_entries) ? D.log_entries : [];
-      var taskLogs = [];
-      for(var i = 0; i < allLogs.length; i++){
-        if(allLogs[i].task_id === selectedTaskID) taskLogs.push(allLogs[i]);
-      }
-      var prevCount = prevTaskLogCounts[selectedTaskID] || 0;
-      if(taskLogs.length > prevCount){
-        var term = document.querySelector(".task-terminal");
-        if(term){
-          var emptyEl = term.querySelector(".task-terminal-empty");
-          if(emptyEl) emptyEl.remove();
-          for(var i = prevCount; i < taskLogs.length; i++){
-            term.appendChild(mkTerminalLine(taskLogs[i]));
-          }
-          prevTaskLogCounts[selectedTaskID] = taskLogs.length;
-          if(taskLogAutoScroll) term.scrollTop = term.scrollHeight;
-          updateTopbar();
-          isDataUpdate = false;
-          return;
+    // Always try incremental log append first, even on state changes.
+    // The terminal DOM is preserved — only new lines are appended.
+    var allLogs = (D && D.log_entries) ? D.log_entries : [];
+    var taskLogs = [];
+    for(var i = 0; i < allLogs.length; i++){
+      if(allLogs[i].task_id === selectedTaskID) taskLogs.push(allLogs[i]);
+    }
+    var prevCount = prevTaskLogCounts[selectedTaskID] || 0;
+    if(taskLogs.length > prevCount){
+      var term = document.querySelector(".task-terminal");
+      if(term){
+        var emptyEl = term.querySelector(".task-terminal-empty");
+        if(emptyEl) emptyEl.remove();
+        for(var i = prevCount; i < taskLogs.length; i++){
+          term.appendChild(mkTerminalLine(taskLogs[i]));
         }
+        prevTaskLogCounts[selectedTaskID] = taskLogs.length;
+        if(taskLogAutoScroll) term.scrollTop = term.scrollHeight;
       }
     }
-    // State changed — fall through to full re-render
+    if(!stateChanged){
+      updateTopbar();
+      isDataUpdate = false;
+      return;
+    }
+    // State changed — fall through to full re-render (buttons, status, plan)
   }
 
   // Incremental log append for logs view
@@ -857,15 +874,19 @@ function render(){
     }
   }
 
-  // Restore task terminal scroll
+  // Restore task terminal scroll — use rAF to ensure layout is complete
   var newTerm = content.querySelector(".task-terminal");
   if(newTerm){
     if(taskLogAutoScroll){
-      newTerm.scrollTop = newTerm.scrollHeight;
+      requestAnimationFrame(function(){
+        newTerm.scrollTop = newTerm.scrollHeight;
+      });
       var jb = newTerm.parentElement ? newTerm.parentElement.querySelector(".jump-btn") : null;
       if(jb) jb.classList.add("hidden");
     } else {
-      newTerm.scrollTop = taskTermScroll;
+      requestAnimationFrame(function(){
+        newTerm.scrollTop = taskTermScroll;
+      });
       var jb = newTerm.parentElement ? newTerm.parentElement.querySelector(".jump-btn") : null;
       if(jb) jb.classList.remove("hidden");
     }
@@ -1190,9 +1211,19 @@ function renderQueue(root){
   titleWrap.appendChild(span("view-title", t("queue.title")));
   if(tasks.length > 0) titleWrap.appendChild(span("view-count", String(tasks.length)));
   header.appendChild(titleWrap);
+  var headerBtns = div("view-header-btns");
+  var refreshBtn = el("button", "btn btn-sm", ["\u21bb"]);
+  refreshBtn.title = t("common.refresh") || "Refresh";
+  refreshBtn.onclick = function(){
+    api("GET", "/api/data", null, function(d, ok){
+      if(ok && d){ D = d; render(); }
+    });
+  };
+  headerBtns.appendChild(refreshBtn);
   var addBtn = el("button", "btn btn-primary btn-sm", [t("queue.add_task")]);
   addBtn.onclick = function(){ openAddTask(""); };
-  header.appendChild(addBtn);
+  headerBtns.appendChild(addBtn);
+  header.appendChild(headerBtns);
   root.appendChild(header);
 
   // Filters
@@ -1215,6 +1246,12 @@ function renderQueue(root){
   }
   projSelect.onchange = function(){ queueFilterProject = this.value; render(); };
   toolbar.appendChild(projSelect);
+
+  var waveBtn = el("button", "btn btn-sm" + (queueViewMode === "waves" ? " btn-primary" : ""), [t("queue.view_waves") || "Waves"]);
+  waveBtn.title = t("queue.view_waves_title") || "Group by wave";
+  waveBtn.onclick = function(){ queueViewMode = (queueViewMode === "waves") ? "list" : "waves"; render(); };
+  toolbar.appendChild(waveBtn);
+
   root.appendChild(toolbar);
 
   var filtered = tasks.filter(function(tsk){
@@ -1232,51 +1269,95 @@ function renderQueue(root){
     return;
   }
 
-  // Timeline
+  if(queueViewMode === "waves"){
+    renderQueueWaves(root, filtered);
+  } else {
+    renderQueueList(root, filtered);
+  }
+}
+
+function renderTimelineNode(timeline, tsk){
+  var cls = "tl-node state-" + tsk.effective_state;
+  if(tsk.id === selectedTaskID) cls += " selected";
+  if(tsk.is_running) cls += " has-running";
+  if(tsk.effective_state === "generating") cls += " has-generating";
+  var prev = prevTaskStates[tsk.id];
+  if(prev && prev !== "done" && tsk.effective_state === "done") cls += " task-just-done";
+  prevTaskStates[tsk.id] = tsk.effective_state;
+
+  var node = div(cls);
+  node.appendChild(div("tl-dot"));
+
+  var hdr = div("tl-header");
+  hdr.onclick = function(){ selectTask(tsk.id === selectedTaskID ? 0 : tsk.id); };
+
+  var info = div("tl-info");
+  info.appendChild(div("tl-desc", [tsk.description]));
+  var meta = tsk.project || "\u2014";
+  if(tsk.created_at) meta += " \u00b7 " + fmtRelDate(tsk.created_at);
+  info.appendChild(div("tl-meta", [meta]));
+  hdr.appendChild(info);
+
+  var badges = div("tl-badges");
+  badges.appendChild(span("task-state " + tsk.effective_state, stateLabel(tsk.effective_state)));
+  badges.appendChild(span("task-pri " + tsk.priority, (tsk.priority||"").toUpperCase()));
+  if(tsk.wave > 0) badges.appendChild(span("task-wave", "W" + tsk.wave));
+  if(tsk.is_running) badges.appendChild(div("running-dot"));
+  hdr.appendChild(badges);
+  node.appendChild(hdr);
+
+  var expand = div("tl-expand");
+  if(tsk.id === selectedTaskID){
+    renderTaskDetail(expand, tsk);
+  }
+  node.appendChild(expand);
+
+  timeline.appendChild(node);
+}
+
+function renderQueueList(root, filtered){
   var timeline = div("timeline");
-
   for(var i=0;i<filtered.length;i++){
-    (function(tsk){
-      var cls = "tl-node state-" + tsk.effective_state;
-      if(tsk.id === selectedTaskID) cls += " selected";
-      if(tsk.is_running) cls += " has-running";
-      if(tsk.effective_state === "generating") cls += " has-generating";
-      var prev = prevTaskStates[tsk.id];
-      if(prev && prev !== "done" && tsk.effective_state === "done") cls += " task-just-done";
-      prevTaskStates[tsk.id] = tsk.effective_state;
-
-      var node = div(cls);
-      node.appendChild(div("tl-dot"));
-
-      // Header row
-      var hdr = div("tl-header");
-      hdr.onclick = function(){ selectTask(tsk.id === selectedTaskID ? 0 : tsk.id); };
-
-      var info = div("tl-info");
-      info.appendChild(div("tl-desc", [tsk.description]));
-      var meta = tsk.project || "\u2014";
-      if(tsk.created_at) meta += " \u00b7 " + fmtRelDate(tsk.created_at);
-      info.appendChild(div("tl-meta", [meta]));
-      hdr.appendChild(info);
-
-      var badges = div("tl-badges");
-      badges.appendChild(span("task-state " + tsk.effective_state, stateLabel(tsk.effective_state)));
-      badges.appendChild(span("task-pri " + tsk.priority, (tsk.priority||"").toUpperCase()));
-      if(tsk.is_running) badges.appendChild(div("running-dot"));
-      hdr.appendChild(badges);
-      node.appendChild(hdr);
-
-      // Expandable detail
-      var expand = div("tl-expand");
-      if(tsk.id === selectedTaskID){
-        renderTaskDetail(expand, tsk);
-      }
-      node.appendChild(expand);
-
-      timeline.appendChild(node);
-    })(filtered[i]);
+    renderTimelineNode(timeline, filtered[i]);
   }
   root.appendChild(timeline);
+
+  var firstRunning = timeline.querySelector(".state-running, .state-generating");
+  if(firstRunning && !selectedTaskID) firstRunning.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function renderQueueWaves(root, filtered){
+  var waveMap = {};
+  var waveOrder = [];
+  for(var i=0;i<filtered.length;i++){
+    var w = filtered[i].wave || 0;
+    if(!waveMap[w]){ waveMap[w] = []; waveOrder.push(w); }
+    waveMap[w].push(filtered[i]);
+  }
+  waveOrder.sort(function(a,b){
+    if(a === 0) return 1;
+    if(b === 0) return -1;
+    return a - b;
+  });
+
+  for(var wi=0;wi<waveOrder.length;wi++){
+    var waveNum = waveOrder[wi];
+    var waveTasks = waveMap[waveNum];
+    var waveLabel = waveNum === 0
+      ? (t("queue.wave_none") || "No Wave")
+      : (t("queue.wave_header") || "Wave {wave}").replace("{wave}", waveNum);
+
+    var waveHeader = div("wave-group-header");
+    waveHeader.appendChild(span("wave-group-title", waveLabel));
+    waveHeader.appendChild(span("wave-group-count", String(waveTasks.length)));
+    root.appendChild(waveHeader);
+
+    var timeline = div("timeline");
+    for(var ti=0;ti<waveTasks.length;ti++){
+      renderTimelineNode(timeline, waveTasks[ti]);
+    }
+    root.appendChild(timeline);
+  }
 }
 
 function renderTaskDetail(parent, tsk){
@@ -1758,6 +1839,10 @@ function renderProjectDetail(root){
     var pullBtn = el("button","btn btn-sm",[t("projects.pull")]);
     pullBtn.onclick = function(){ gitPull(p.path, this); };
     acts.appendChild(pullBtn);
+  } else {
+    var initBtn = el("button","btn btn-sm btn-primary",[t("projects.git_init")]);
+    initBtn.onclick = function(){ gitInitProject(p.path, p.name, initBtn); };
+    acts.appendChild(initBtn);
   }
   if(p.github_repo){
     var prBtn = el("button","btn btn-sm",[t("projects.prs")]);
@@ -1849,7 +1934,7 @@ function renderProjectDetail(root){
   cfgSec.appendChild(span("pd-section-title",t("projects.config_title")));
   var cfgGrid = div("pd-grid");
   var sk = (D.config && D.config.project_skeletons && D.config.project_skeletons[p.name]) || (D.config && D.config.skeleton) || {};
-  var skEntries = ["web_search","context7_lookup","build_verify","test","pre_commit","commit","push"];
+  var skEntries = ["web_search","doc_setup","context7_lookup","build_verify","test","pre_commit","commit","push"];
   var skLine = "";
   for(var si=0;si<skEntries.length;si++){
     var key = skEntries[si];
@@ -2468,7 +2553,6 @@ function taskSuffix(proj){
   if(isFront){
     parts.push("al terminar: npx vite build (nginx toma dist automaticamente, NO usar npm run dev). usar chrome-devtools MCP para probar en el sitio correspondiente (no hay login, acceso libre)");
   }
-  parts.push("usar /bmad:core:workflows:party-mode");
   return parts.join(". ");
 }
 
@@ -2479,7 +2563,7 @@ function submitAddTask(){
   var assignee = document.getElementById("add-assignee").value;
   if(!desc){ document.getElementById("add-desc").focus(); return; }
   var suffix = taskSuffix(proj);
-  if(suffix && desc.indexOf("party-mode") === -1){
+  if(suffix){
     desc = desc + ". " + suffix;
   }
   var addBtn = document.querySelector("#modal-add .btn-primary");
@@ -2505,7 +2589,10 @@ function taskAttachFile(){
 function taskUploadAttachment(file){
   var fd = new FormData(); fd.append("file", file);
   fetch("/api/upload",{method:"POST",body:fd})
-  .then(function(r){ return r.json(); })
+  .then(function(r){
+    if(!r.ok) return r.json().then(function(e){ throw new Error(e.error||"upload failed"); });
+    return r.json();
+  })
   .then(function(att){
     taskModalAttachments.push(att);
     renderTaskAttachPreview();
@@ -2533,7 +2620,10 @@ function attachToExistingTask(taskId){
       (function(f){
         var fd = new FormData(); fd.append("file", f);
         fetch("/api/upload",{method:"POST",body:fd})
-        .then(function(r){ return r.json(); })
+        .then(function(r){
+          if(!r.ok) return r.json().then(function(e){ throw new Error(e.error||"upload failed"); });
+          return r.json();
+        })
         .then(function(att){
           return fetch("/api/tasks/attach",{
             method:"POST",
@@ -2997,16 +3087,16 @@ function renderChat(container){
   voiceBtn.onclick = chatToggleRecording;
   inputBar.appendChild(voiceBtn);
 
-  // Attachment preview strip
+  // Attachment preview strip (rendered above inputBar, not inside it)
+  var chatStrip = null;
   if(chatPendingAttachments.length > 0){
-    var strip = el("div","chat-attach-strip");
+    chatStrip = el("div","chat-attach-strip");
     chatPendingAttachments.forEach(function(att,idx){
       var chip = el("div","chat-attach-chip");
       chip.innerHTML = '<span>' + escHtml(att.orig_name) + '</span><button class="remove-att" data-idx="'+idx+'">\u00d7</button>';
       chip.querySelector(".remove-att").onclick = function(){ chatPendingAttachments.splice(idx,1); chatCounter++; render(); };
-      strip.appendChild(chip);
+      chatStrip.appendChild(chip);
     });
-    inputBar.appendChild(strip);
   }
 
   var textarea = el("textarea","chat-input");
@@ -3027,6 +3117,7 @@ function renderChat(container){
   sendBtn.disabled = chatLoading;
   sendBtn.onclick = sendChatMessage;
   inputBar.appendChild(sendBtn);
+  if(chatStrip) wrap.appendChild(chatStrip);
   wrap.appendChild(inputBar);
 
   container.appendChild(wrap);
@@ -3107,7 +3198,7 @@ function sendChatMessage(){
                 if(chatToolCalls.length>0 && !chatToolCalls[chatToolCalls.length-1].done){
                   chatToolCalls[chatToolCalls.length-1].done=true;
                 }
-                chatToolCalls.push({name:evt.tool_use,done:false});
+                chatToolCalls.push({name:evt.tool_use,desc:evt.tool_desc||"",done:false});
                 var msgDivT=document.getElementById("chat-messages");
                 if(msgDivT){
                   var bubblesT=msgDivT.querySelectorAll(".chat-bubble.assistant");
@@ -3295,7 +3386,10 @@ function chatUploadFile(file){
   fd.append("file", file);
   toast(t("chat.uploading", {name: file.name}), "info");
   fetch("/api/upload",{method:"POST",body:fd})
-  .then(function(r){ return r.json(); })
+  .then(function(r){
+    if(!r.ok) return r.json().then(function(e){ throw new Error(e.error||"upload failed"); });
+    return r.json();
+  })
   .then(function(att){
     chatPendingAttachments.push(att);
     chatCounter++; render();
@@ -3672,15 +3766,22 @@ api("GET","/api/data", null, function(d){
 });
 connectSSE();
 document.addEventListener("visibilitychange", function(){
-  if(!document.hidden){
-    prevDataStr = "";
-    prevContentKey = "";
+  if(document.hidden){
+    // Tab hidden: close SSE cleanly so it doesn't die unnoticed
     if(currentSSE){ try{ currentSSE.close(); }catch(e){} currentSSE = null; }
-    connectSSE();
-    api("GET","/api/data",null,function(d){
-      D = d;
-      isDataUpdate = true;
-      render();
+  } else {
+    // Tab visible: fetch fresh data, then reconnect SSE
+    api("GET","/api/data",null,function(d, ok){
+      if(ok && d){
+        D = d;
+        prevDataStr = "";
+        prevContentKey = "";
+        isDataUpdate = true;
+        render();
+      }
+      // Always reconnect SSE regardless of API result
+      if(currentSSE){ try{ currentSSE.close(); }catch(e){} currentSSE = null; }
+      connectSSE();
     });
   }
 });
@@ -4668,6 +4769,7 @@ function renderConfigAutopilot(root){
   var skToggles = [
     {key:"investigate", label:t("config.skeleton.investigate"), desc:t("config.skeleton.investigate_desc"), tag:t("config.skeleton.investigate_tag"), locked:true},
     {key:"web_search", label:t("config.skeleton.web_search"), desc:t("config.skeleton.web_search_desc"), tag:t("config.skeleton.web_search_tag")},
+    {key:"doc_setup", label:t("config.skeleton.doc_setup"), desc:t("config.skeleton.doc_setup_desc"), tag:t("config.skeleton.doc_setup_tag")},
     {key:"build_verify", label:t("config.skeleton.build_verify"), desc:t("config.skeleton.build_verify_desc"), tag:t("config.skeleton.build_verify_tag")},
     {key:"test", label:t("config.skeleton.test"), desc:t("config.skeleton.test_desc"), tag:t("config.skeleton.test_tag")},
     {key:"pre_commit", label:t("config.skeleton.pre_commit"), desc:t("config.skeleton.pre_commit_desc"), tag:t("config.skeleton.pre_commit_tag")},
@@ -4702,6 +4804,7 @@ function renderConfigAutopilot(root){
       cb.onchange = function(){
         var full = {
           web_search: sk.web_search !== false,
+          doc_setup: sk.doc_setup !== false,
           build_verify: sk.build_verify !== false,
           test: sk.test !== false,
           pre_commit: sk.pre_commit !== false,
@@ -4730,12 +4833,11 @@ function renderConfigAutopilot(root){
     skList.appendChild(row);
   }
 
-  // First two fixed steps (Investigate + Web Search)
-  renderSkToggle(skToggles[0]);
-  renderSkToggle(skToggles[1]);
+  // Split MCP steps: read-only (investigation) vs non-read-only (post-build)
+  var mcpReadOnly = mcpSteps.filter(function(ms){ return ms.step.read_only; });
+  var mcpPostBuild = mcpSteps.filter(function(ms){ return !ms.step.read_only; });
 
-  // Dynamic MCP skeleton steps (after investigate, before build)
-  mcpSteps.forEach(function(ms){
+  function renderMCPStep(ms){
     var row = div("mcp-toggle");
     var cb = el("input","");
     cb.type = "checkbox";
@@ -4748,10 +4850,24 @@ function renderConfigAutopilot(root){
     row.appendChild(span("mcp-server-cmd", ms.step.description));
     row.appendChild(span("skeleton-tag mcp", t("config.skeleton.mcp_tag", {name: ms.mcpName})));
     skList.appendChild(row);
-  });
+  }
 
-  // Remaining fixed steps (Build, Test, Pre-commit, Commit, Push)
-  for(var si=2; si<skToggles.length; si++){
+  // Investigate + Web Search
+  renderSkToggle(skToggles[0]);
+  renderSkToggle(skToggles[1]);
+
+  // Read-only MCP steps (investigation phase: Context7, etc.)
+  mcpReadOnly.forEach(renderMCPStep);
+
+  // Doc & Architecture + Build & Verify
+  renderSkToggle(skToggles[2]);
+  renderSkToggle(skToggles[3]);
+
+  // Non-read-only MCP steps (verification phase: Browser Verification, etc.)
+  mcpPostBuild.forEach(renderMCPStep);
+
+  // Test, Pre-commit, Commit, Push
+  for(var si=4; si<skToggles.length; si++){
     renderSkToggle(skToggles[si]);
   }
   skSec.appendChild(skList);
