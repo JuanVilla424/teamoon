@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/JuanVilla424/teamoon/internal/config"
+	"github.com/JuanVilla424/teamoon/internal/plugins"
 )
 
 // Status describes what has and hasn't been set up yet.
@@ -15,11 +16,12 @@ type Status struct {
 
 // StepStatuses tracks which onboarding steps have been completed.
 type StepStatuses struct {
-	Config bool `json:"config"`
-	Skills bool `json:"skills"`
-	BMAD   bool `json:"bmad"`
-	Hooks  bool `json:"hooks"`
-	MCP    bool `json:"mcp"`
+	Config  bool `json:"config"`
+	Skills  bool `json:"skills"`
+	BMAD    bool `json:"bmad"`
+	Hooks   bool `json:"hooks"`
+	MCP     bool `json:"mcp"`
+	Plugins bool `json:"plugins"`
 }
 
 // Check returns the current onboarding status by inspecting the filesystem.
@@ -47,7 +49,15 @@ func Check() Status {
 	existing := config.ReadGlobalMCPServers()
 	s.MCP = len(existing) > 0
 
-	needed := !s.Config || !s.Skills || !s.BMAD || !s.Hooks || !s.MCP
+	// Plugins — at least one default plugin installed?
+	for _, dp := range plugins.DefaultPlugins {
+		if plugins.IsInstalled(dp.Name) {
+			s.Plugins = true
+			break
+		}
+	}
+
+	needed := !s.Config || !s.Skills || !s.BMAD || !s.Hooks || !s.MCP || !s.Plugins
 	return Status{Needed: needed, Steps: s}
 }
 

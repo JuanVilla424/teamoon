@@ -10,7 +10,7 @@ import (
 )
 
 func setupConfig() error {
-	fmt.Println("\n[2/7] Setting up configuration...")
+	fmt.Println("\n[2/8] Setting up configuration...")
 
 	home, err := os.UserHomeDir()
 	if err != nil {

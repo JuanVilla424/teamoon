@@ -124,7 +124,8 @@ func TestMergeHooksIdempotent(t *testing.T) {
 	hooksDir := filepath.Join(tmpDir, "hooks")
 	os.MkdirAll(hooksDir, 0755)
 
-	// Run twice
+	// Run twice — globalPreToolUse returns nil, so no hooks are added globally.
+	// Bash hooks live per-project via InstallHooks(), not in global settings.
 	mergeHooksIntoSettings(settingsPath, hooksDir)
 	mergeHooksIntoSettings(settingsPath, hooksDir)
 
@@ -138,15 +139,8 @@ func TestMergeHooksIdempotent(t *testing.T) {
 	var hb hooksBlock
 	json.Unmarshal(raw["hooks"], &hb)
 
-	// Should have exactly 2 matchers (Bash and Write|Edit), not 4
-	if len(hb.PreToolUse) != 2 {
-		t.Fatalf("expected 2 matchers after idempotent merge, got %d", len(hb.PreToolUse))
-	}
-
-	// Bash should have exactly 4 hooks, not 8
-	for _, m := range hb.PreToolUse {
-		if m.Matcher == "Bash" && len(m.Hooks) != 4 {
-			t.Fatalf("expected 4 Bash hooks, got %d", len(m.Hooks))
-		}
+	// globalPreToolUse returns nil — no matchers added to global settings
+	if len(hb.PreToolUse) != 0 {
+		t.Fatalf("expected 0 matchers (hooks are per-project), got %d", len(hb.PreToolUse))
 	}
 }

@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version  = "1.1.7"
+	version  = "1.1.8"
 	buildNum = "0"
 )
 
@@ -51,6 +51,7 @@ func main() {
 			}
 
 			engineMgr := engine.NewManager()
+			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
 			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
 			logBuf.SetDebug(cfg.Debug)
@@ -143,6 +144,7 @@ func main() {
 			}
 
 			engineMgr := engine.NewManager()
+			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
 			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
 			logBuf.SetDebug(cfg.Debug)

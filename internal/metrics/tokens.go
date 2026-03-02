@@ -24,16 +24,16 @@ func contextLimitForModel(model string) int {
 	}
 }
 
-// modelTier returns "opus", "sonnet", or "haiku" from a model string.
+// modelTier returns "opus-4-6", "sonnet-4-6", or "haiku-4-5" from a model string.
 func modelTier(model string) string {
 	m := strings.ToLower(model)
 	if strings.Contains(m, "opus") {
-		return "opus"
+		return "opus-4-6"
 	}
 	if strings.Contains(m, "haiku") {
-		return "haiku"
+		return "haiku-4-5"
 	}
-	return "sonnet" // default
+	return "sonnet-4-6" // default
 }
 
 type Usage struct {
@@ -69,7 +69,7 @@ type TokenSummary struct {
 	Total        int                     `json:"total"`
 	LastModel    string                  `json:"last_model"`
 	SessionCount int                     `json:"session_count"`
-	ByModel      map[string]*ModelTokens `json:"-"` // keyed by tier: "opus", "sonnet", "haiku"
+	ByModel      map[string]*ModelTokens `json:"-"` // keyed by tier: "opus-4-6", "sonnet-4-6", "haiku-4-5"
 }
 
 func (s *TokenSummary) addUsage(u Usage, tier string) {
@@ -163,7 +163,7 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 				}
 				tier := fileTier
 				if tier == "" {
-					tier = "sonnet"
+					tier = "sonnet-4-6"
 				}
 
 				month.addUsage(u, tier)
