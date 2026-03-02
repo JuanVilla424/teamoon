@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	version  = "1.1.7"
+	version  = "1.1.8"
 	buildNum = "0"
 )
 
