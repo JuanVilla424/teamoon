@@ -170,6 +170,10 @@ var prevContentKey = "";
 var prevLogCount = 0;
 var prevTaskLogCounts = {};
 var prevTaskStates = {};
+var prevTaskSteps = {};
+var prevTaskHasPlan = {};
+var highWaterStep = {};
+var highWaterState = {};
 var chatMessages = [];
 var chatLoading = false;
 var chatInitSteps = [];
@@ -616,7 +620,7 @@ function computeContentKey(v){
   switch(v){
     case "dashboard":
       var tk = tasks.length + ":";
-      for(var i=0;i<tasks.length;i++) tk += tasks[i].effective_state + ",";
+      for(var i=0;i<tasks.length;i++) tk += tasks[i].effective_state + "," + (tasks[i].current_step||0) + "/";
       return lp + "d:" + JSON.stringify(D.today||{}) + JSON.stringify(D.cost||{}) +
         (D.session ? D.session.context_percent : 0) + ":" + tk + ":" + logs.length;
     case "queue":
@@ -691,6 +695,7 @@ function render(){
   // Skip full content rebuild if view-specific data unchanged
   var contentKey = computeContentKey(v);
   if(!viewChanged && contentKey === prevContentKey){
+    if(v === "queue") updateQueueStepBadges();
     isDataUpdate = false;
     return;
   }
@@ -706,6 +711,14 @@ function render(){
     }
     var curState = selTask ? selTask.effective_state : "";
     var stateChanged = (prevTaskStates[selectedTaskID] || "") !== curState;
+    var curStep = selTask ? (selTask.current_step||0) + "/" + (selTask.total_steps||0) : "";
+    var stepChanged = (prevTaskSteps[selectedTaskID] || "") !== curStep;
+    var curHasPlan = selTask ? !!selTask.has_plan : false;
+    var planChanged = (prevTaskHasPlan[selectedTaskID] || false) !== curHasPlan;
+    if(selTask){
+      prevTaskSteps[selectedTaskID] = curStep;
+      prevTaskHasPlan[selectedTaskID] = curHasPlan;
+    }
     // Always try incremental log append first, even on state changes.
     // The terminal DOM is preserved — only new lines are appended.
     var allLogs = (D && D.log_entries) ? D.log_entries : [];
@@ -726,12 +739,15 @@ function render(){
         if(taskLogAutoScroll) term.scrollTop = term.scrollHeight;
       }
     }
-    if(!stateChanged){
+    if(!stateChanged && !planChanged){
+      // Step-only change — update badges in-place, no full re-render
+      if(stepChanged) updateQueueStepBadges();
       updateTopbar();
       isDataUpdate = false;
       return;
     }
-    // State changed — fall through to full re-render (buttons, status, plan)
+    // State or plan changed — fall through to full re-render
+    if(planChanged && curHasPlan && !planCache[selectedTaskID]) loadPlan(selectedTaskID);
   }
 
   // Incremental log append for logs view
@@ -1291,15 +1307,17 @@ function renderQueue(root){
 }
 
 function renderTimelineNode(timeline, tsk){
-  var cls = "tl-node state-" + tsk.effective_state;
+  var st = safeState(tsk);
+  var cls = "tl-node state-" + st;
   if(tsk.id === selectedTaskID) cls += " selected";
   if(tsk.is_running) cls += " has-running";
-  if(tsk.effective_state === "generating") cls += " has-generating";
+  if(st === "generating") cls += " has-generating";
   var prev = prevTaskStates[tsk.id];
-  if(prev && prev !== "done" && tsk.effective_state === "done") cls += " task-just-done";
-  prevTaskStates[tsk.id] = tsk.effective_state;
+  if(prev && prev !== "done" && st === "done") cls += " task-just-done";
+  prevTaskStates[tsk.id] = st;
 
   var node = div(cls);
+  node.setAttribute("data-task-id", tsk.id);
   node.appendChild(div("tl-dot"));
 
   var hdr = div("tl-header");
@@ -1313,11 +1331,11 @@ function renderTimelineNode(timeline, tsk){
   hdr.appendChild(info);
 
   var badges = div("tl-badges");
-  var stateText = stateLabel(tsk.effective_state);
-  if(tsk.effective_state === "running" && tsk.total_steps > 0){
-    stateText += " @ " + (tsk.current_step || 1) + "/" + tsk.total_steps;
+  var stateText = stateLabel(st);
+  if(st === "running" && tsk.total_steps > 0){
+    stateText += " @ " + (safeStep(tsk) || 1) + "/" + tsk.total_steps;
   }
-  badges.appendChild(span("task-state " + tsk.effective_state, stateText));
+  badges.appendChild(span("task-state " + st, stateText));
   badges.appendChild(span("task-pri " + tsk.priority, (tsk.priority||"").toUpperCase()));
   if(tsk.wave > 0) badges.appendChild(span("task-wave", "W" + tsk.wave));
   if(tsk.is_running) badges.appendChild(div("running-dot"));
@@ -1389,7 +1407,7 @@ function renderTaskDetail(parent, tsk){
     api("GET","/api/data",null,function(d,ok){ refreshBtn.classList.remove("spinning"); if(ok&&d){ D=d; render(); }});
   });
   headerBtns.appendChild(refreshBtn);
-  var editable = (tsk.effective_state === "pending" || tsk.effective_state === "planned");
+  var editable = (dst === "pending" || dst === "planned");
   if(editable){
     var editBtn = iconBtn("pencil", t("common.edit"), function(){});
     editBtn.onclick = function(){
@@ -1439,11 +1457,12 @@ function renderTaskDetail(parent, tsk){
 
   var propState = div("detail-prop");
   propState.appendChild(span("detail-prop-label", t("task.state")));
-  var detailStateText = stateLabel(tsk.effective_state);
-  if(tsk.effective_state === "running" && tsk.total_steps > 0){
-    detailStateText += " @ " + (tsk.current_step || 1) + "/" + tsk.total_steps;
+  var dst = safeState(tsk);
+  var detailStateText = stateLabel(dst);
+  if(dst === "running" && tsk.total_steps > 0){
+    detailStateText += " @ " + (safeStep(tsk) || 1) + "/" + tsk.total_steps;
   }
-  var stateEl = span("task-state " + tsk.effective_state, detailStateText);
+  var stateEl = span("task-state " + dst, detailStateText);
   propState.appendChild(stateEl);
   props.appendChild(propState);
 
@@ -1476,7 +1495,7 @@ function renderTaskDetail(parent, tsk){
   parent.appendChild(headerCard);
 
   // ── Generating state ──
-  if(tsk.effective_state === "generating"){
+  if(dst === "generating"){
     var genSec = div("detail-card detail-generating");
     var genRow = div("detail-generating-inner");
     genRow.appendChild(div("spinner"));
@@ -1487,7 +1506,7 @@ function renderTaskDetail(parent, tsk){
 
   // ── Actions (all buttons always visible, disabled when not applicable) ──
   var actions = div("detail-actions");
-  var s = tsk.effective_state;
+  var s = dst;
   var apKey = "autopilot:" + tsk.id;
 
   // PLAN — enabled for pending only
@@ -2936,6 +2955,67 @@ function buildPhaseRing(pct, size){
 
   return svg;
 }
+/* State rank — higher number = more advanced state (never go backwards) */
+var stateRanks = {"pending":0,"generating":1,"planned":2,"running":3,"done":4};
+var rankToState = ["pending","generating","planned","running","done"];
+/* Return monotonic state for a task — never goes backwards */
+function safeState(tsk){
+  var s = tsk.effective_state || "pending";
+  var rank = stateRanks[s]; if(rank === undefined) return s;
+  var prev = highWaterState[tsk.id];
+  if(prev !== undefined && prev > rank){ return rankToState[prev] || s; }
+  highWaterState[tsk.id] = rank;
+  /* Reset when done so next task cycle starts fresh */
+  if(s === "done"){ delete highWaterState[tsk.id]; delete highWaterStep[tsk.id]; }
+  return s;
+}
+/* Return monotonic step for a task — never goes backwards while running */
+function safeStep(tsk){
+  var s = tsk.current_step || 0;
+  if(tsk.effective_state !== "running"){ delete highWaterStep[tsk.id]; return s; }
+  var prev = highWaterStep[tsk.id] || 0;
+  if(s < prev) s = prev;
+  highWaterStep[tsk.id] = s;
+  return s;
+}
+/* Lightweight step counter update — patches badge text in-place, no DOM rebuild */
+function updateQueueStepBadges(){
+  var tasks = (D && D.tasks) ? D.tasks : [];
+  var taskMap = {};
+  for(var i=0;i<tasks.length;i++) taskMap[tasks[i].id] = tasks[i];
+  var nodes = document.querySelectorAll(".tl-node[data-task-id]");
+  for(var j=0;j<nodes.length;j++){
+    var tid = parseInt(nodes[j].getAttribute("data-task-id"), 10);
+    var tsk = taskMap[tid];
+    if(!tsk) continue;
+    var badge = nodes[j].querySelector(".task-state");
+    if(!badge) continue;
+    var st = safeState(tsk);
+    var stText = stateLabel(st);
+    if(st === "running" && tsk.total_steps > 0){
+      stText += " @ " + (safeStep(tsk) || 1) + "/" + tsk.total_steps;
+    }
+    if(badge.textContent !== stText) badge.textContent = stText;
+    /* Update badge class too */
+    var wantCls = "task-state " + st;
+    if(badge.className !== wantCls) badge.className = wantCls;
+  }
+  // Also update selected task's detail panel badge
+  if(selectedTaskID){
+    var selTask = taskMap[selectedTaskID];
+    if(selTask){
+      var detailBadge = document.querySelector(".tl-expand .task-state");
+      if(detailBadge){
+        var dst = safeState(selTask);
+        var dt = stateLabel(dst);
+        if(dst === "running" && selTask.total_steps > 0){
+          dt += " @ " + (safeStep(selTask) || 1) + "/" + selTask.total_steps;
+        }
+        if(detailBadge.textContent !== dt) detailBadge.textContent = dt;
+      }
+    }
+  }
+}
 function stateLabel(s){
   switch(s){
     case "generating": return t("task.state.generating");
@@ -3745,7 +3825,6 @@ function submitProjectInit(){
   var type = document.getElementById("init-type").value;
   var version = document.getElementById("init-version").value.trim() || "1.0.0";
   var vis = document.getElementById("init-visibility").value;
-  var structure = document.getElementById("init-structure").value;
 
   var submitBtn = document.getElementById("init-submit");
   var cancelBtn = document.querySelector("#modal-init .modal-actions .btn:first-child");
@@ -3762,7 +3841,7 @@ function submitProjectInit(){
   fetch("/api/projects/init",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({name:name, type:type, version:version, private:vis==="private", separate:structure==="separate"})
+    body:JSON.stringify({name:name, type:type, version:version, private:vis==="private"})
   }).then(function(res){
     var reader = res.body.getReader();
     var decoder = new TextDecoder();
@@ -3944,8 +4023,52 @@ function loadSetupStatus(){
   }).catch(function(){ setupStatusFetching = false; });
 }
 
+function loginThemeSvg(cls, paths) {
+  var s = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  s.setAttribute("class", cls);
+  s.setAttribute("viewBox","0 0 24 24");
+  s.setAttribute("fill","none");
+  s.setAttribute("stroke","currentColor");
+  s.setAttribute("stroke-width","2");
+  s.setAttribute("stroke-linecap","round");
+  s.setAttribute("stroke-linejoin","round");
+  s.setAttribute("width","18");
+  s.setAttribute("height","18");
+  paths.forEach(function(d) {
+    var p = document.createElementNS("http://www.w3.org/2000/svg","path");
+    p.setAttribute("d", d);
+    s.appendChild(p);
+  });
+  return s;
+}
+
 function renderLogin(root){
   var wrap = div("login-wrap");
+
+  // Theme toggle button
+  var themeBtn = document.createElement("button");
+  themeBtn.className = "login-theme-toggle";
+  themeBtn.title = "Toggle theme";
+  themeBtn.appendChild(loginThemeSvg("theme-icon-sun", [
+    "M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10z",
+    "M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"
+  ]));
+  themeBtn.appendChild(loginThemeSvg("theme-icon-moon", [
+    "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+  ]));
+  themeBtn.addEventListener("click", function() {
+    var current = document.documentElement.getAttribute("data-theme");
+    var next = current === "light" ? "dark" : "light";
+    if (next === "dark") {
+      document.documentElement.removeAttribute("data-theme");
+    } else {
+      document.documentElement.setAttribute("data-theme", next);
+    }
+    localStorage.setItem("teamoon-theme", next);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = next === "light" ? "#f5f5f5" : "#050505";
+  });
+  wrap.appendChild(themeBtn);
 
   // Ambient glow behind card
   wrap.appendChild(div("login-glow"));
