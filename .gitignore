@@ -134,7 +134,8 @@ $RECYCLE.BIN/
 *.sw?
 
 # Claude Code
-CLAUDE.md
+CLAUDE.*
+AGENTS.*
 MEMORY.md
 CONTEXT.md
 .claude/

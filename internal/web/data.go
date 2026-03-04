@@ -115,6 +115,10 @@ func (s *Store) Refresh() {
 		if isRunning && (effState == "pending" || effState == "planned") {
 			effState = "running"
 		}
+		// Task was running (has step progress) but briefly went planned during gap — keep as running
+		if !isRunning && effState == "planned" && t.CurrentStep > 0 && s.engineMgr.IsProjectRunning(t.Project) {
+			effState = "running"
+		}
 		webTasks[i] = WebTask{
 			Task:           t,
 			EffectiveState: effState,
