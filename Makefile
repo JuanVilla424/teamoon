@@ -1,4 +1,4 @@
-VERSION := 1.1.9
+VERSION := 1.1.10
 BINARY := teamoon
 BUILD_DIR := .
 
@@ -28,6 +28,8 @@ sync-bmad:
 		cp -r $(BMAD_PKG)/.bmad/_cfg/agent-manifest.csv $$DST/_cfg/ 2>/dev/null || true; \
 		cp -r $(BMAD_PKG)/.bmad/core/workflows/party-mode/workflow.md $$DST/core/workflows/party-mode/ 2>/dev/null || true; \
 		cp -r $(BMAD_PKG)/.bmad/core/workflows/party-mode/steps/* $$DST/core/workflows/party-mode/steps/ 2>/dev/null || true; \
+		mkdir -p $$DST/local; \
+		cp $(BMAD_PKG)/.ai/*.txt $$DST/local/ 2>/dev/null || true; \
 		echo "{\"latest\":\"$$BMAD_VER\",\"supported\":[\"$$BMAD_VER\"]}" > $(BMAD_ASSETS)/versions.json; \
 		echo "Synced BMAD $$BMAD_VER"; \
 	fi

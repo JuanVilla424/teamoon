@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -165,6 +168,7 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 		}
 		if len(tasks) == 0 {
 			emit(logs.LevelSuccess, fmt.Sprintf("No more autopilot tasks for %s", project))
+			stabilizeProject(project, cfg.ProjectsDir, emit)
 			return
 		}
 
@@ -455,4 +459,80 @@ func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Co
 	case <-taskDone:
 		// Task finished (done or back to pending), continue loop
 	}
+}
+
+// stabilizeProject creates test/prod branches and protects main after all autopilot tasks complete.
+func stabilizeProject(project, projectsDir string, emit func(logs.LogLevel, string)) {
+	dir := filepath.Join(projectsDir, project)
+
+	// Check if project has a git remote
+	out, err := runGit(dir, "remote", "get-url", "origin")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return // not a git repo with remote, skip
+	}
+
+	// Detect owner/repo from remote URL for gh api
+	remote := strings.TrimSpace(out)
+	slug := extractRepoSlug(remote)
+
+	// Fetch to ensure we have latest main
+	runGit(dir, "fetch", "origin")
+
+	// Create test branch from main if it doesn't exist
+	for _, branch := range []string{"test", "prod"} {
+		if _, err := runGit(dir, "rev-parse", "--verify", "refs/remotes/origin/"+branch); err != nil {
+			emit(logs.LevelInfo, fmt.Sprintf("Creating branch %s from main for %s", branch, project))
+			if _, err := runGit(dir, "branch", branch, "origin/main"); err != nil {
+				emit(logs.LevelWarn, fmt.Sprintf("Failed to create branch %s: %v", branch, err))
+				continue
+			}
+			if _, err := runGit(dir, "push", "origin", branch); err != nil {
+				emit(logs.LevelWarn, fmt.Sprintf("Failed to push branch %s: %v", branch, err))
+			}
+		}
+	}
+
+	// Protect main branch (requires GitHub Pro/Team — warn on failure)
+	if slug != "" {
+		emit(logs.LevelInfo, fmt.Sprintf("Setting branch protection on main for %s", project))
+		cmd := exec.Command("gh", "api", fmt.Sprintf("repos/%s/branches/main/protection", slug),
+			"-X", "PUT",
+			"-H", "Accept: application/vnd.github+json",
+			"-f", "required_pull_request_reviews[dismiss_stale_reviews]=true",
+			"-f", "required_pull_request_reviews[required_approving_review_count]=1",
+			"-f", "enforce_admins=null",
+			"-f", "restrictions=null",
+			"-f", "required_status_checks=null",
+		)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			emit(logs.LevelWarn, fmt.Sprintf("Branch protection failed (may require Pro plan): %s", strings.TrimSpace(string(out))))
+		}
+	}
+
+	emit(logs.LevelSuccess, fmt.Sprintf("Project %s stabilized — branches test/prod created", project))
+}
+
+func runGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func extractRepoSlug(remote string) string {
+	// Handle SSH: git@github.com:owner/repo.git
+	if strings.HasPrefix(remote, "git@github.com:") {
+		slug := strings.TrimPrefix(remote, "git@github.com:")
+		slug = strings.TrimSuffix(slug, ".git")
+		return slug
+	}
+	// Handle HTTPS: https://github.com/owner/repo.git
+	if strings.Contains(remote, "github.com/") {
+		idx := strings.Index(remote, "github.com/")
+		slug := remote[idx+len("github.com/"):]
+		slug = strings.TrimSuffix(slug, ".git")
+		return slug
+	}
+	return ""
 }
