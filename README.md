@@ -113,15 +113,25 @@ pre-commit install --hook-type pre-push
 
 ## 🌐 Web Dashboard
 
+### 🔐 Login
+
+Session-based authentication with password protection. Supports dark and light themes.
+
+| Dark                                      | Light                                            |
+| ----------------------------------------- | ------------------------------------------------ |
+| ![Login Dark](docs/screenshots/login.png) | ![Login Light](docs/screenshots/login-light.png) |
+
 ### 📊 Overview
 
 Real-time dashboard showing tokens, sessions, cost, context usage, queue summary, and recent activity — all updated via Server-Sent Events.
 
-![Dashboard](docs/screenshots/dashboard.png)
+| Dark                                              | Light                                                    |
+| ------------------------------------------------- | -------------------------------------------------------- |
+| ![Dashboard Dark](docs/screenshots/dashboard.png) | ![Dashboard Light](docs/screenshots/dashboard-light.png) |
 
 ### 📋 Queue
 
-Priority-sorted task list with inline controls to run, stop, replan, or archive tasks. Filter by state, project, or priority.
+Priority-sorted task list with inline controls to run, stop, replan, or archive tasks. Filter by state, project, or priority. Wave badges for batch execution grouping.
 
 ![Queue](docs/screenshots/queue.png)
 
@@ -133,9 +143,11 @@ Kanban-style board with tasks organized by state. Drag and drop to move tasks be
 
 ### 📁 Projects
 
-Auto-discovered projects from your workspace showing git branch, modified file count, and last commit. Start autopilot per-project or create tasks directly.
+Auto-discovered projects from your workspace showing git branch, modified file count, and last commit. Click any project for a detailed view with tasks, skeleton config, and recent activity.
 
 ![Projects](docs/screenshots/projects.png)
+
+![Project Detail](docs/screenshots/project-detail.png)
 
 ### 📝 Logs
 
@@ -147,9 +159,15 @@ Filterable log stream with level, task, project, and agent filters. Auto-scrolls
 
 Direct chat interface for interacting with Claude. Send messages, view responses with per-turn cost tracking.
 
-![Chat](docs/screenshots/chat-tetris.png)
-
 ![Chat](docs/screenshots/chat.png)
+
+![Chat Response](docs/screenshots/chat-response.png)
+
+### ⚙️ Jobs
+
+Scheduled cron jobs for automated tasks. Configure schedule, project, and description per job.
+
+![Jobs](docs/screenshots/jobs.png)
 
 ### ⚙️ Configuration
 
