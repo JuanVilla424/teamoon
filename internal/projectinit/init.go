@@ -236,7 +236,7 @@ func stepTrimWorkflows(req InitRequest, projectsDir string) error {
 		return nil // no workflows dir, skip
 	}
 
-	keep := map[string]bool{"ci.yml": true}
+	keep := map[string]bool{"ci.yml": true, "version-controller.yml": true}
 	switch req.Type {
 	case "python":
 		keep["python.yml"] = true
