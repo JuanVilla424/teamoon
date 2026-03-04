@@ -2042,7 +2042,7 @@ function renderProjectDetail(root){
   cfgSec.appendChild(span("pd-section-title",t("projects.config_title")));
   var cfgGrid = div("pd-grid");
   var sk = (D.config && D.config.project_skeletons && D.config.project_skeletons[p.name]) || (D.config && D.config.skeleton) || {};
-  var skEntries = ["web_search","doc_setup","context7_lookup","build_verify","test","pre_commit","commit","push"];
+  var skEntries = ["web_search","doc_setup","context7_lookup","build_verify","test","security_review","pre_commit","commit","push"];
   var skLine = "";
   for(var si=0;si<skEntries.length;si++){
     var key = skEntries[si];
@@ -5004,6 +5004,7 @@ function renderConfigAutopilot(root){
     {key:"doc_setup", label:t("config.skeleton.doc_setup"), desc:t("config.skeleton.doc_setup_desc"), tag:t("config.skeleton.doc_setup_tag")},
     {key:"build_verify", label:t("config.skeleton.build_verify"), desc:t("config.skeleton.build_verify_desc"), tag:t("config.skeleton.build_verify_tag")},
     {key:"test", label:t("config.skeleton.test"), desc:t("config.skeleton.test_desc"), tag:t("config.skeleton.test_tag")},
+    {key:"security_review", label:"Claude Code Security", desc:t("config.skeleton.security_review_desc"), tag:"SEC"},
     {key:"pre_commit", label:t("config.skeleton.pre_commit"), desc:t("config.skeleton.pre_commit_desc"), tag:t("config.skeleton.pre_commit_tag")},
     {key:"commit", label:t("config.skeleton.commit"), desc:t("config.skeleton.commit_desc"), tag:t("config.skeleton.commit_tag")},
     {key:"push", label:t("config.skeleton.push"), desc:t("config.skeleton.push_desc"), tag:t("config.skeleton.push_tag")}
@@ -5039,6 +5040,7 @@ function renderConfigAutopilot(root){
           doc_setup: sk.doc_setup !== false,
           build_verify: sk.build_verify !== false,
           test: sk.test !== false,
+          security_review: sk.security_review !== false,
           pre_commit: sk.pre_commit !== false,
           commit: sk.commit !== false,
           push: !!sk.push
