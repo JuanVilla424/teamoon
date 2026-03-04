@@ -35,42 +35,60 @@ func RunInit(req InitRequest, projectsDir string, progress ProgressFunc) error {
 }
 
 func runSingleInit(req InitRequest, projectsDir string, progress ProgressFunc) error {
-	steps := []struct {
-		name string
-		fn   func() error
-	}{
-		{"Creating repository", func() error { return stepCreateRepo(req, projectsDir) }},
-		{"Fetching template files", func() error { return stepFetchTemplate(req, projectsDir) }},
-		{"Setting up workflows", func() error { return stepSetupWorkflows(req, projectsDir) }},
-		{"Creating dev branch", func() error { return stepCreateDevBranch(req, projectsDir) }},
-		{"Cleaning template files", func() error { return stepCleanTemplate(req, projectsDir) }},
-		{"Trimming workflows", func() error { return stepTrimWorkflows(req, projectsDir) }},
-		{"Updating manifest", func() error { return stepUpdateManifest(req, projectsDir) }},
-		{"Creating changelog", func() error { return stepCreateChangelog(req, projectsDir) }},
-		{"Creating version config", func() error { return stepCreateBumpversion(req, projectsDir) }},
-		{"Updating README", func() error { return stepUpdateReadme(req, projectsDir) }},
-		{"Setting up environment", func() error { return stepSetupEnv(req, projectsDir) }},
-		{"Installing Claude Code hooks", func() error { return InstallHooks(projectDir(req, projectsDir), req.Name, req.Type) }},
-		{"Committing and pushing", func() error { return stepCommitPush(req, projectsDir) }},
+	stepNum := 0
+	emit := func(name string, fn func() error) error {
+		stepNum++
+		progress(StepResult{Step: stepNum, Name: name, Status: "running"})
+		if err := fn(); err != nil {
+			progress(StepResult{Step: stepNum, Name: name, Status: "error", Message: err.Error()})
+			return err
+		}
+		progress(StepResult{Step: stepNum, Name: name, Status: "done"})
+		return nil
 	}
 
-	for i, step := range steps {
-		progress(StepResult{Step: i + 1, Name: step.name, Status: "running"})
-		if err := step.fn(); err != nil {
-			progress(StepResult{Step: i + 1, Name: step.name, Status: "error", Message: err.Error()})
-			return fmt.Errorf("step %d (%s): %w", i+1, step.name, err)
-		}
-		progress(StepResult{Step: i + 1, Name: step.name, Status: "done"})
+	if err := emit("Creating repo from template ("+req.Name+")", func() error { return stepCreateRepo(req, projectsDir) }); err != nil {
+		return err
 	}
+	if err := emit("Setting up dev branch", func() error { return stepCreateDevBranch(req, projectsDir) }); err != nil {
+		return err
+	}
+	if err := emit("Configuring project ("+req.Type+")", func() error {
+		if e := stepTrimWorkflows(req, projectsDir); e != nil {
+			return e
+		}
+		if e := stepUpdateManifest(req, projectsDir); e != nil {
+			return e
+		}
+		if e := stepCreateChangelog(req, projectsDir); e != nil {
+			return e
+		}
+		if e := stepCreateBumpversion(req, projectsDir); e != nil {
+			return e
+		}
+		if e := stepUpdateDocs(req, projectsDir); e != nil {
+			return e
+		}
+		if e := stepSetupEnv(req, projectsDir); e != nil {
+			return e
+		}
+		return InstallHooks(projectDir(req, projectsDir), req.Name, req.Type)
+	}); err != nil {
+		return err
+	}
+	if err := emit("Pushing repo", func() error { return stepCommitPush(req, projectsDir) }); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc) error {
-	// Backend repo uses the original type
+	// Backend repo: {name}-backend with selected type
 	backReq := req
-	backReq.Separate = false
+	backReq.Name = req.Name + "-backend"
 
-	// Frontend repo is always node
+	// Frontend repo: {name}-frontend, always node
 	frontReq := InitRequest{
 		Name:    req.Name + "-frontend",
 		Type:    "node",
@@ -90,22 +108,11 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		return nil
 	}
 
-	// Backend steps (1-5)
-	if err := emit("Creating backend repo ("+backReq.Name+")", func() error { return stepCreateRepo(backReq, projectsDir) }); err != nil {
+	// Backend steps
+	if err := emit("Creating backend repo from template ("+backReq.Name+")", func() error { return stepCreateRepo(backReq, projectsDir) }); err != nil {
 		return err
 	}
-	if err := emit("Fetching backend template", func() error { return stepFetchTemplate(backReq, projectsDir) }); err != nil {
-		return err
-	}
-	if err := emit("Setting up backend workflows", func() error {
-		if e := stepSetupWorkflows(backReq, projectsDir); e != nil {
-			return e
-		}
-		if e := stepCreateDevBranch(backReq, projectsDir); e != nil {
-			return e
-		}
-		return stepCleanTemplate(backReq, projectsDir)
-	}); err != nil {
+	if err := emit("Setting up backend dev branch", func() error { return stepCreateDevBranch(backReq, projectsDir) }); err != nil {
 		return err
 	}
 	if err := emit("Configuring backend ("+backReq.Type+")", func() error {
@@ -121,7 +128,7 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		if e := stepCreateBumpversion(backReq, projectsDir); e != nil {
 			return e
 		}
-		if e := stepUpdateReadme(backReq, projectsDir); e != nil {
+		if e := stepUpdateDocs(backReq, projectsDir); e != nil {
 			return e
 		}
 		if e := stepSetupEnv(backReq, projectsDir); e != nil {
@@ -135,22 +142,11 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		return err
 	}
 
-	// Frontend steps (6-10)
-	if err := emit("Creating frontend repo ("+frontReq.Name+")", func() error { return stepCreateRepo(frontReq, projectsDir) }); err != nil {
+	// Frontend steps
+	if err := emit("Creating frontend repo from template ("+frontReq.Name+")", func() error { return stepCreateRepo(frontReq, projectsDir) }); err != nil {
 		return err
 	}
-	if err := emit("Fetching frontend template", func() error { return stepFetchTemplate(frontReq, projectsDir) }); err != nil {
-		return err
-	}
-	if err := emit("Setting up frontend workflows", func() error {
-		if e := stepSetupWorkflows(frontReq, projectsDir); e != nil {
-			return e
-		}
-		if e := stepCreateDevBranch(frontReq, projectsDir); e != nil {
-			return e
-		}
-		return stepCleanTemplate(frontReq, projectsDir)
-	}); err != nil {
+	if err := emit("Setting up frontend dev branch", func() error { return stepCreateDevBranch(frontReq, projectsDir) }); err != nil {
 		return err
 	}
 	if err := emit("Configuring frontend (node)", func() error {
@@ -166,7 +162,7 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		if e := stepCreateBumpversion(frontReq, projectsDir); e != nil {
 			return e
 		}
-		if e := stepUpdateReadme(frontReq, projectsDir); e != nil {
+		if e := stepUpdateDocs(frontReq, projectsDir); e != nil {
 			return e
 		}
 		if e := stepSetupEnv(frontReq, projectsDir); e != nil {
@@ -206,7 +202,9 @@ func stepCreateRepo(req InitRequest, projectsDir string) error {
 	if req.Private {
 		vis = "--private"
 	}
-	_, err := runCmd(projectsDir, "gh", "repo", "create", req.Name, vis, "--clone")
+
+	// Create repo FROM template — this copies all files, workflows, configs automatically
+	_, err := runCmd(projectsDir, "gh", "repo", "create", req.Name, vis, "--template", templateRepo, "--clone")
 	if err != nil {
 		// Repo might already exist on GitHub — try cloning it
 		_, cloneErr := runCmd(projectsDir, "gh", "repo", "clone", req.Name)
@@ -220,40 +218,7 @@ func stepCreateRepo(req InitRequest, projectsDir string) error {
 			}
 		}
 	}
-	return nil
-}
 
-func stepFetchTemplate(req InitRequest, projectsDir string) error {
-	dir := projectDir(req, projectsDir)
-	// Download template archive and extract
-	_, err := runCmd(dir, "gh", "repo", "clone", templateRepo, ".tmpl-src", "--", "--depth=1")
-	if err != nil {
-		return fmt.Errorf("clone template: %w", err)
-	}
-	return nil
-}
-
-func stepSetupWorkflows(req InitRequest, projectsDir string) error {
-	dir := projectDir(req, projectsDir)
-	tmplDir := filepath.Join(dir, ".tmpl-src")
-
-	// Copy .github/workflows from template
-	srcWf := filepath.Join(tmplDir, ".github", "workflows")
-	dstWf := filepath.Join(dir, ".github", "workflows")
-	if _, err := os.Stat(srcWf); err == nil {
-		os.MkdirAll(dstWf, 0755)
-		entries, _ := os.ReadDir(srcWf)
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(srcWf, e.Name()))
-			if err != nil {
-				continue
-			}
-			os.WriteFile(filepath.Join(dstWf, e.Name()), data, 0644)
-		}
-	}
 	return nil
 }
 
@@ -261,15 +226,6 @@ func stepCreateDevBranch(req InitRequest, projectsDir string) error {
 	dir := projectDir(req, projectsDir)
 	_, err := runCmd(dir, "git", "checkout", "-b", "dev")
 	return err
-}
-
-func stepCleanTemplate(req InitRequest, projectsDir string) error {
-	dir := projectDir(req, projectsDir)
-	// Remove CNAME and template source
-	os.Remove(filepath.Join(dir, "CNAME"))
-	os.Remove(filepath.Join(dir, ".tmpl-src", ".git", "config"))
-	os.RemoveAll(filepath.Join(dir, ".tmpl-src"))
-	return nil
 }
 
 func stepTrimWorkflows(req InitRequest, projectsDir string) error {
@@ -460,19 +416,223 @@ func stepCreateBumpversion(req InitRequest, projectsDir string) error {
 	return os.WriteFile(filepath.Join(dir, ".bumpversion.cfg"), []byte(content), 0644)
 }
 
-func stepUpdateReadme(req InitRequest, projectsDir string) error {
+// resolveGitHubSlug extracts "owner/repo" from the git remote origin URL.
+// Returns empty string if no remote is configured or parsing fails.
+func resolveGitHubSlug(dir string) string {
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	remote := strings.TrimSpace(string(out))
+	remote = strings.TrimSuffix(remote, ".git")
+	if strings.Contains(remote, "github.com/") {
+		parts := strings.SplitN(remote, "github.com/", 2)
+		if len(parts) == 2 {
+			return parts[1]
+		}
+	}
+	if strings.Contains(remote, "github.com:") {
+		parts := strings.SplitN(remote, "github.com:", 2)
+		if len(parts) == 2 {
+			return parts[1]
+		}
+	}
+	return ""
+}
+
+func stepUpdateDocs(req InitRequest, projectsDir string) error {
 	dir := projectDir(req, projectsDir)
-	typeBadge := ""
+	slug := resolveGitHubSlug(dir)
+
+	var langBadge, quickStart, scripts string
 	switch req.Type {
 	case "python":
-		typeBadge = "![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)"
+		langBadge = "[![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org/)"
+		quickStart = "python -m venv venv && source venv/bin/activate\npip install -r requirements.txt"
+		scripts = "| Command | Description |\n|---------|-------------|\n| `pytest tests/ -v` | Run test suite |\n| `pylint **/*.py` | Lint source files |\n| `black .` | Format code |"
 	case "node":
-		typeBadge = "![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)"
+		langBadge = "[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)"
+		quickStart = "npm install\nnpm run dev"
+		scripts = "| Command | Description |\n|---------|-------------|\n| `npm run dev` | Start dev server |\n| `npm run build` | Production build |\n| `npm run test` | Run test suite |\n| `npx eslint src/` | Lint source files |"
 	case "go":
-		typeBadge = "![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8.svg)"
+		langBadge = "[![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8.svg)](https://go.dev/)"
+		quickStart = "go mod download\nmake build"
+		scripts = "| Command | Description |\n|---------|-------------|\n| `make build` | Compile binary |\n| `make test` | Run test suite |\n| `golangci-lint run` | Lint source files |"
+	default:
+		langBadge = "![Status](https://img.shields.io/badge/Status-Active-green.svg)"
+		quickStart = "# See project documentation"
+		scripts = "| Command | Description |\n|---------|-------------|\n| TBD | TBD |"
 	}
-	content := fmt.Sprintf("# %s\n\n%s\n![Status](https://img.shields.io/badge/Status-Active-green.svg)\n\n## Getting Started\n\nTBD\n", req.Name, typeBadge)
-	return os.WriteFile(filepath.Join(dir, "README.md"), []byte(content), 0644)
+
+	// Build GitHub-linked badges when slug is available
+	versionBadge := ""
+	buildBadge := ""
+	licenseBadge := "[![License](https://img.shields.io/badge/License-GPLv3-purple.svg)](LICENSE)"
+	repoURL := ""
+	if slug != "" {
+		versionBadge = fmt.Sprintf("\n[![Version](https://img.shields.io/github/v/tag/%s?label=Version&color=blue)](VERSIONING.md)", slug)
+		buildBadge = fmt.Sprintf("\n[![Build](https://img.shields.io/github/actions/workflow/status/%s/ci.yml?branch=dev&label=Build)](https://github.com/%s/actions)", slug, slug)
+		repoURL = fmt.Sprintf("https://github.com/%s.git", slug)
+	}
+
+	cloneBlock := ""
+	if repoURL != "" {
+		cloneBlock = fmt.Sprintf("git clone %s\ncd %s\n", repoURL, req.Name)
+	} else {
+		cloneBlock = fmt.Sprintf("cd %s\n", req.Name)
+	}
+
+	content := fmt.Sprintf(`# %s
+
+%s%s%s
+[![Status](https://img.shields.io/badge/Status-Active-green.svg)]()
+%s
+
+A brief description of what this project does.
+
+## ✨ Features
+
+- Feature 1
+- Feature 2
+- Feature 3
+
+## 🚀 Quick Start
+
+`+"```bash\n"+`%s%s
+`+"```\n\n"+`## 📋 Scripts
+
+%s
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## 📄 License
+
+GNU GPL v3.0 — see [LICENSE](LICENSE)
+`, req.Name, langBadge, versionBadge, buildBadge, licenseBadge, cloneBlock, quickStart, scripts)
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(content), 0644); err != nil {
+		return err
+	}
+
+	// Generate ARCHITECT.md
+	var lang, pkgMgr, typeFiles string
+	switch req.Type {
+	case "python":
+		lang = "Python 3.12+"
+		pkgMgr = "Poetry"
+		typeFiles = "├── pyproject.toml          # Poetry config + dependencies\n├── requirements.dev.txt    # Dev dependencies\n├── .pylintrc               # Linting config"
+	case "node":
+		lang = "Node.js 20+"
+		pkgMgr = "npm"
+		typeFiles = "├── package.json            # Dependencies and scripts\n├── tsconfig.json           # TypeScript config (if applicable)"
+	case "go":
+		lang = "Go 1.23+"
+		pkgMgr = "Go Modules"
+		typeFiles = "├── go.mod                  # Module definition\n├── go.sum                  # Dependency checksums"
+	default:
+		lang = req.Type
+		pkgMgr = "N/A"
+		typeFiles = "├── (project files)"
+	}
+
+	architect := fmt.Sprintf(`# Architecture — %s
+
+## Overview
+
+%s is a %s project created from the github-cicd-template.
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Language | %s |
+| Package Manager | %s |
+| CI/CD | GitHub Actions |
+| Pre-commit | pre-commit framework |
+| Version Control | Git + GitHub |
+
+## Project Structure
+
+`+"```"+`
+%s/
+├── .github/workflows/      # CI/CD pipelines
+├── scripts/                 # Shared CI/CD scripts (submodule)
+%s
+├── .bumpversion.cfg         # Version bump config
+├── .pre-commit-config.yaml  # Pre-commit hooks
+├── CHANGELOG.md
+├── ARCHITECT.md
+├── CONTEXT.md
+├── CLAUDE.md
+├── MEMORY.md
+└── README.md
+`+"```"+`
+
+## Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Template | github-cicd-template | Standard CI/CD, pre-commit hooks, workflows |
+| Branch strategy | dev → main | Trunk-based development with dev branch |
+| License | GPLv3 | Standard open-source license |
+`, req.Name, req.Name, req.Type, lang, pkgMgr, req.Name, typeFiles)
+
+	if err := os.WriteFile(filepath.Join(dir, "ARCHITECT.md"), []byte(architect), 0644); err != nil {
+		return err
+	}
+
+	// Generate CONTEXT.md
+	var entryPoint, envReqs, howToRun string
+	switch req.Type {
+	case "python":
+		entryPoint = "main.py (to be created)"
+		envReqs = "- Python 3.12+\n- Poetry\n- pre-commit"
+		howToRun = "python -m venv venv && source venv/bin/activate\npip install -r requirements.dev.txt\npython main.py"
+	case "node":
+		entryPoint = "src/index.ts or src/main.ts (to be created)"
+		envReqs = "- Node.js 20+\n- npm 10+\n- pre-commit"
+		howToRun = "npm install\nnpm run dev"
+	case "go":
+		entryPoint = "cmd/main.go or main.go (to be created)"
+		envReqs = "- Go 1.23+\n- pre-commit"
+		howToRun = "go mod download\nmake build\n./bin/%s"
+	default:
+		entryPoint = "(to be defined)"
+		envReqs = "- (to be defined)"
+		howToRun = "# See project documentation"
+	}
+	if req.Type == "go" {
+		howToRun = fmt.Sprintf(howToRun, req.Name)
+	}
+
+	context := fmt.Sprintf(`# Context — %s
+
+## What This Project Does
+
+%s is a new %s project. Purpose to be defined during development.
+
+## Current State
+
+- Status: Initial scaffold
+- Branch: dev
+- CI/CD: Configured via github-cicd-template
+
+## Key Entry Points
+
+- %s
+
+## Environment Requirements
+
+%s
+
+## How to Run
+
+`+"```bash\n"+`%s
+`+"```\n", req.Name, req.Name, req.Type, entryPoint, envReqs, howToRun)
+
+	return os.WriteFile(filepath.Join(dir, "CONTEXT.md"), []byte(context), 0644)
 }
 
 func stepSetupEnv(req InitRequest, projectsDir string) error {

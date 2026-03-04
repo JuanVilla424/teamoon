@@ -122,35 +122,67 @@ func BuildPlanPrompt(t queue.Task, skeletonBlock, projectsDir string) string {
 		contextSection = "\nCONTEXT FROM ATTACHMENTS:\n" + attachmentBlock + "\n"
 	}
 
-	return fmt.Sprintf(
-		"You are a plan generator for project %s/%s.\n\n"+
-			"## Execution sequence\n\n"+
-			"1. Call Skill tool with skill='bmad:core:workflows:party-mode' — wait for it to complete before proceeding.\n"+
-			"2. Follow the skeleton phases below — each enabled phase becomes a step. Respect ordering hints in each phase.\n"+
-			"3. Emit the plan as your final text message.\n\n"+
-			"## Development methodology\n\n"+
-			"When generating implementation steps, ALWAYS follow this approach:\n"+
-			"1. FRONTEND FIRST: Build the UI/frontend with mock data. Use MOCK_ prefix for all mock variables and dedicated mock files. Verify visually with Chrome DevTools (take screenshot, check DOM, verify no console errors).\n"+
-			"2. BACKEND IMPLEMENTATION: Implement real backend logic, API endpoints, data connections. Replace mock imports with real implementations.\n"+
-			"3. MOCK CLEANUP: Remove ALL mock data before proceeding to build/test phases. Grep for MOCK_, mockData, mock_, fake_, dummy_ — ZERO matches allowed in production code (test files excluded). Take final screenshot confirming UI works identically without mocks.\n\n"+
-			"This is not optional. Every task that involves UI/frontend work MUST follow this sequence.\n\n"+
-			"## Task\n\n%s\n\n"+
-			"%s"+
-			"## Skeleton phases\n\n"+
-			"%s\n\n"+
-			"## Output format\n\n"+
-			"# Plan: [title]\n\n"+
-			"## Analysis\n[findings from investigation]\n\n"+
-			"## Steps\n"+
-			"### Step N: [title]\n"+
-			"Agent: [bmad agent id assigned by party-mode]\n"+
-			"ReadOnly: true|false\n"+
-			"[instructions]\n"+
-			"Verify: [criteria]\n\n"+
-			"## Constraints\n[list]\n\n"+
-			"5-12 steps total. Do not create files. Final message must be the plan text.",
-		projectsDir, t.Project, t.Description, contextSection, skeletonBlock,
-	)
+	const tpl = `You are a plan generator for project %s/%s.
+
+## Execution sequence
+
+1. Call Skill tool with skill='bmad:core:workflows:party-mode' — wait for it to complete before proceeding.
+2. Follow the skeleton phases below — each enabled phase becomes a step. Respect ordering hints in each phase.
+3. Emit the plan as your final text message.
+
+## Development methodology
+
+When generating implementation steps, ALWAYS follow this approach:
+
+1. FRONTEND FIRST: Build the UI/frontend with mock data. Use MOCK_ prefix for all mock variables and dedicated mock files. Verify visually with Chrome DevTools (take screenshot, check DOM, verify no console errors).
+2. BACKEND IMPLEMENTATION: Implement real backend logic, API endpoints, data connections. Replace mock imports with real implementations.
+3. MOCK CLEANUP: Remove ALL mock data before proceeding to build/test phases. Grep for MOCK_, mockData, mock_, fake_, dummy_ — ZERO matches allowed in production code (test files excluded). Take final screenshot confirming UI works identically without mocks.
+
+This is not optional. Every task that involves UI/frontend work MUST follow this sequence.
+
+## Task
+
+%s
+
+%s## Skeleton phases
+
+%s
+
+## ReadOnly rules
+
+- Action phases (build_verify, test, pre_commit, commit, push) MUST be ReadOnly: false — they execute commands.
+- Only investigation phases (doc_setup, web_search) may be ReadOnly: true.
+- The push step MUST run git push origin <branch> via Bash. It is NOT guidance.
+
+## Output format
+
+CRITICAL: No leading tabs or spaces on any line. Use proper markdown with blank lines between sections. Use bullet lists for step instructions.
+
+# Plan: [concise title]
+
+## Analysis
+
+[2-3 sentences summarizing investigation findings]
+
+## Steps
+
+### Step N: [title]
+
+Agent: [bmad agent id assigned by party-mode]
+ReadOnly: true|false
+
+- [instruction as bullet point]
+- [instruction as bullet point]
+
+Verify: [success criteria]
+
+## Constraints
+
+- [constraint as bullet point]
+
+5-12 steps total. Do not create files. Final message must be the plan text.`
+
+	return fmt.Sprintf(tpl, projectsDir, t.Project, t.Description, contextSection, skeletonBlock)
 }
 
 // PlanToolMessage creates a human-readable log message from a tool_use event.

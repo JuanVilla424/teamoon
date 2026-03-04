@@ -580,7 +580,7 @@ BACKUP: Original project files are at %s — restore them first (copy all files 
 4. Reset CHANGELOG.md to initial template (just header and empty sections)
 5. Trim .github/workflows/: keep only ci.yml, %s, version-controller.yml, release-controller.yml, stale.yml, greetings.yml — delete all others
 6. Replace ALL references to "github-cicd-template" or "GitHub CI/CD Template" in every file (README.md, SECURITY.md, CODE_OF_CONDUCT.md, CONTRIBUTING.md, INSTALL.md, VERSIONING.md, CHANGELOG.md, LICENSE, etc.) with the actual project name. Check every .md file and config file for stale template references
-7. Generate a professional README.md following the github-cicd-template pattern: H1 with emoji + project name, shields.io badges row (language, version, build status, status, license), project description paragraph, Table of Contents with anchor links, Features section with bullet points, Getting Started with Prerequisites + Installation + Environment Setup + Pre-Commit Hooks subsections, Usage section, Contributing section referencing CONTRIBUTING.md, License and Contact sections matching the style of the other .md files already in the repo
+7. Generate a professional README.md: FIRST read ALL existing .md files in the project (CONTRIBUTING.md, INSTALL.md, VERSIONING.md, SECURITY.md, LICENSE) to detect their documentation style — then match that style exactly. REQUIRED elements: H1 with project name, shields.io linked badges row (language, version, build status, status, license), project description paragraph, sections with emoji icons in EVERY header (e.g. ## ✨ Features, ## 🚀 Quick Start, ## 📋 Scripts). Include: Features with bullet points, Getting Started with Prerequisites + Installation + Environment Setup + Pre-Commit Hooks subsections, Usage section, Contributing section referencing CONTRIBUTING.md, License and Contact sections. The README MUST look polished and professional — never a skeleton or placeholder
 8. Ensure .gitignore includes: CLAUDE.md, MEMORY.md, CONTEXT.md, .env, .env.local, *.pem, certs/, secrets/, keys/, venv/, node_modules/
 9. Configure pre-commit: pip install pre-commit && pre-commit install && pre-commit install --hook-type pre-push
 10. If python: create venv (python3 -m venv venv), install requirements if requirements.txt exists
@@ -1168,10 +1168,11 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	promptBuf.WriteString("Jobs do NOT require a project — they can be system-level (empty project).\n")
 	promptBuf.WriteString("CRITICAL: When creating a job, ONLY emit the [JOB_CREATE] directive and a short confirmation. Do NOT use any tools, do NOT execute anything, do NOT research anything. Just emit the directive and respond. The job system handles execution.\n\n")
 	promptBuf.WriteString("### Initializing New Projects\n")
-	promptBuf.WriteString("Format: [PROJECT_INIT]{\"name\":\"project-name\",\"type\":\"node\",\"private\":false,\"separate\":false}[/PROJECT_INIT]\n")
+	promptBuf.WriteString("Format: [PROJECT_INIT]{\"name\":\"project-name\",\"type\":\"node\",\"private\":true,\"separate\":false}[/PROJECT_INIT]\n")
 	promptBuf.WriteString("- type: \"python\", \"node\", or \"go\"\n")
-	promptBuf.WriteString("- private: true/false (default: false)\n")
-	promptBuf.WriteString("- separate: if true creates backend + frontend repos (default: false)\n")
+	promptBuf.WriteString("- private: true/false (default: true)\n")
+	promptBuf.WriteString("- separate: true creates 2 repos ({name}-backend + {name}-frontend). false creates 1 repo ({name}).\n")
+	promptBuf.WriteString("  Decide based on project complexity: webapp with separate API = separate:true. Simple game/tool/script = separate:false.\n")
 	promptBuf.WriteString("- Use BEFORE any TASK_CREATE when creating a NEW project\n")
 	promptBuf.WriteString("- NEVER use for existing projects\n\n")
 	promptBuf.WriteString("## When the user asks to CREATE A NEW PROJECT:\n\n")
@@ -1211,7 +1212,8 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	promptBuf.WriteString("- Your CHOSEN name and why it's the best option\n")
 	promptBuf.WriteString("This report should be DETAILED and data-backed. A 4-line summary is a FAILURE.\n\n")
 	promptBuf.WriteString("### Step 3: Create the project (NO CONFIRMATION NEEDED)\n")
-	promptBuf.WriteString("Immediately emit [PROJECT_INIT] using your chosen validated name and the best technology type.\n")
+	promptBuf.WriteString("Decide if the project needs separate repos: webapp with API backend = separate:true, simple game/tool/CLI = separate:false.\n")
+	promptBuf.WriteString("Immediately emit [PROJECT_INIT] using your chosen validated name, best technology type, and separate decision.\n")
 	promptBuf.WriteString("Do NOT ask 'should I create this?' — just emit the directive.\n\n")
 	promptBuf.WriteString("### Step 4: Create ALL tasks for MVP\n\n")
 	promptBuf.WriteString("CRITICAL: Each task description becomes the EXACT PROMPT that Claude Code executes in autopilot.\n")
@@ -1238,7 +1240,8 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	promptBuf.WriteString("- acceptance: VERIFICATION STEPS. Numbered. Concrete commands, URLs, expected outputs. The agent runs these to confirm the task is complete.\n")
 	promptBuf.WriteString("- Create 15-30 tasks in logical phases (foundation → core features → integrations → polish → deployment).\n")
 	promptBuf.WriteString("- Each task = one focused unit of work for a Claude Code session.\n")
-	promptBuf.WriteString("- Your research report is auto-attached to every task as a document — but the fields must be self-contained.\n\n")
+	promptBuf.WriteString("- Your research report is auto-attached to every task as a document — but the fields must be self-contained.\n")
+	promptBuf.WriteString("- CRITICAL: Task project field MUST match the EXACT repo directory. If separate=true, use {name}-frontend for frontend tasks and {name}-backend for backend tasks. If separate=false, use {name}.\n\n")
 
 	// Inject skeleton steps from config — same pipeline the autopilot uses
 	sk := config.SkeletonFor(s.cfg, req.Project)
@@ -1592,8 +1595,12 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			})
 
-			// Always set the project name so tasks can be created regardless of init outcome
-			req.Project = initReq.Name
+			// Set project to the correct repo directory name
+			if initReq.Separate {
+				req.Project = initReq.Name + "-frontend"
+			} else {
+				req.Project = initReq.Name
+			}
 			if initErr == nil {
 				initDone, _ := json.Marshal(map[string]any{"project_init": initReq.Name, "status": "success"})
 				fmt.Fprintf(w, "data: %s\n\n", initDone)
