@@ -19,6 +19,15 @@ import (
 func RunJob(ctx context.Context, job Job, cfg config.Config) string {
 	SetStatus(job.ID, StatusRunning)
 
+	// Native harvester — no Claude spawn needed
+	if job.Instruction == harvesterMarker {
+		result := RunHarvester(cfg)
+		SetStatus(job.ID, StatusDone)
+		SetLastRun(job.ID, result)
+		log.Printf("[jobs] job #%d %q finished: %s", job.ID, job.Name, result)
+		return result
+	}
+
 	projectPath := filepath.Join(cfg.ProjectsDir, job.Project)
 	if job.Project == "_system" {
 		home, _ := os.UserHomeDir()

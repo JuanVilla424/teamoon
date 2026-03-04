@@ -141,7 +141,8 @@ func (s *Server) Start(ctx context.Context) {
 	s.store.Refresh()
 	s.RecoverAndResume()
 
-	// Start jobs scheduler
+	// Seed default jobs (harvester, etc.) and start scheduler
+	jobs.SeedDefaults()
 	jobCfg := s.cfg
 	jobs.StartScheduler(ctx, func(j jobs.Job) {
 		jobs.RunJob(ctx, j, jobCfg)

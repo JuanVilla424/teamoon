@@ -222,3 +222,15 @@ func ToggleEnabled(id int) (bool, error) {
 	}
 	return false, fmt.Errorf("job #%d not found", id)
 }
+
+// SeedDefaults creates built-in jobs if they don't already exist.
+func SeedDefaults() {
+	all, _ := ListAll()
+	for _, j := range all {
+		if j.Name == "harvester" {
+			return
+		}
+	}
+	Add("harvester", "0 3 * * *", "_system", harvesterMarker)
+	log.Println("[jobs] seeded default harvester job")
+}
