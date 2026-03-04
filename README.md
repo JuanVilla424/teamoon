@@ -35,7 +35,8 @@ Development autopilot powered by Claude Code. Monitor token usage, manage task q
 - **🗂️ Kanban board** — Visual drag-and-drop board for organizing tasks across states
 - **🤖 Autopilot engine** — Automated task execution via Claude CLI with multi-step planning, build verification, test execution, and auto-commit
 - **📁 Project discovery** — Auto-scan your workspace for projects with git branch info, modified files, and last commit details
-- **⚡ Skeleton steps** — Configurable execution phases per project (investigate, context7, implement, build, test, pre-commit, commit, push)
+- **⚡ Skeleton steps** — Configurable execution phases per project (investigate, context7, implement, build, test, security review, pre-commit, commit, push)
+- **🌐 Chrome DevTools** — Automated browser verification via MCP — take screenshots, inspect DOM, and check console errors during autopilot
 - **🔌 MCP server management** — Install, configure, and toggle MCP servers from the web UI with a searchable catalog
 - **💬 Chat interface** — Interact with Claude directly from the dashboard
 - **🧙 Setup wizard** — Ubuntu installer-style onboarding that checks, installs, and configures everything step by step
@@ -88,7 +89,7 @@ Both web and CLI (`teamoon init`) configure:
 3. **Skills** — 21 Claude Code agent skills (superpowers + anthropic + vercel)
 4. **BMAD** — project management framework commands
 5. **Hooks** — global security hooks for Claude Code
-6. **MCP Servers** — Context7, Memory, Sequential Thinking
+6. **MCP Servers** — Context7, Memory, Sequential Thinking, Chrome DevTools
 
 ### 🔧 Make Targets
 
@@ -233,13 +234,17 @@ teamoon task list
 The autopilot engine executes tasks autonomously through configurable **skeleton steps**:
 
 1. **🔍 Investigate** — Analyze the codebase and understand the task
-2. **📚 Context7 Lookup** — Fetch up-to-date library documentation via MCP
-3. **💻 Implement** — Write the code changes
-4. **🔨 Build Verify** — Compile and verify the build succeeds
-5. **🧪 Test** — Run the test suite
-6. **🔒 Pre-commit** — Execute pre-commit hooks
-7. **📦 Commit** — Create a git commit with the changes
-8. **🚀 Push** — Push to remote (disabled by default)
+2. **🌐 Web Search** — Research relevant information online
+3. **📚 Context7 Lookup** — Fetch up-to-date library documentation via MCP
+4. **💻 Implement** — Write the code changes
+5. **🔨 Build Verify** — Compile and verify the build succeeds
+6. **🧪 Test** — Run the test suite
+7. **🛡️ Security Review** — Scan for vulnerabilities using Claude Code Security (`/security-review`)
+8. **✅ Pre-commit** — Execute pre-commit hooks
+9. **📦 Commit** — Create a git commit with the changes
+10. **🚀 Push** — Push to remote (disabled by default)
+
+**🌐 Browser Verification** — When Chrome DevTools MCP is enabled, autopilot agents can take screenshots, inspect the DOM, and check for console errors to verify UI changes visually.
 
 Each step can be enabled/disabled per-project via the skeleton configuration. Failed tasks can be resumed with a single click.
 
@@ -279,14 +284,16 @@ Stored at `~/.config/teamoon/config.json`. Editable from the web UI under **Conf
 
 Configurable per-project via `project_skeletons` map.
 
-| Field          | Type | Default | Description                    |
-| -------------- | ---- | ------- | ------------------------------ |
-| `web_search`   | bool | `true`  | Enable web search step         |
-| `build_verify` | bool | `true`  | Enable build verification step |
-| `test`         | bool | `true`  | Enable test execution step     |
-| `pre_commit`   | bool | `true`  | Enable pre-commit hooks step   |
-| `commit`       | bool | `true`  | Enable auto-commit step        |
-| `push`         | bool | `false` | Enable auto-push step          |
+| Field             | Type | Default | Description                                           |
+| ----------------- | ---- | ------- | ----------------------------------------------------- |
+| `doc_setup`       | bool | `true`  | Enable investigation/doc setup step                   |
+| `web_search`      | bool | `true`  | Enable web search step                                |
+| `build_verify`    | bool | `true`  | Enable build verification step                        |
+| `test`            | bool | `true`  | Enable test execution step                            |
+| `security_review` | bool | `true`  | Enable Claude Code Security scan (`/security-review`) |
+| `pre_commit`      | bool | `true`  | Enable pre-commit hooks step                          |
+| `commit`          | bool | `true`  | Enable auto-commit step                               |
+| `push`            | bool | `false` | Enable auto-push step                                 |
 
 ---
 

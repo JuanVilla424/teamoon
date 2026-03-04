@@ -88,6 +88,7 @@ func SkeletonJSON(sk config.SkeletonConfig, mcpServers map[string]config.MCPServ
 		{"web_search", sk.WebSearch},
 		{"build_verify", sk.BuildVerify},
 		{"test", sk.Test},
+		{"security_review", sk.SecurityReview},
 		{"pre_commit", sk.PreCommit},
 		{"commit", sk.Commit},
 		{"push", sk.Push},

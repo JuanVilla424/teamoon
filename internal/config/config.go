@@ -60,10 +60,11 @@ type SpawnConfig struct {
 }
 
 type SkeletonConfig struct {
-	WebSearch   bool `json:"web_search"`
-	DocSetup    bool `json:"doc_setup"`
-	BuildVerify bool `json:"build_verify"`
+	WebSearch      bool `json:"web_search"`
+	DocSetup       bool `json:"doc_setup"`
+	BuildVerify    bool `json:"build_verify"`
 	Test           bool `json:"test"`
+	SecurityReview bool `json:"security_review"`
 	PreCommit      bool `json:"pre_commit"`
 	Commit         bool `json:"commit"`
 	Push           bool `json:"push"`
@@ -71,10 +72,11 @@ type SkeletonConfig struct {
 
 func DefaultSkeleton() SkeletonConfig {
 	return SkeletonConfig{
-		WebSearch:   true,
-		DocSetup:    true,
-		BuildVerify: true,
+		WebSearch:      true,
+		DocSetup:       true,
+		BuildVerify:    true,
 		Test:           true,
+		SecurityReview: true,
 		PreCommit:      true,
 		Commit:         true,
 		Push:           false,
@@ -122,6 +124,7 @@ func DefaultPhaseHints() map[string]string {
 		"web_search":   "Search the web for current best practices and documentation.",
 		"build_verify": "Compile/build the project. Create build tooling if missing. Verify clean build.",
 		"test":         "Run existing tests. Create new tests for changes. Set up test infra if missing.",
+		"security_review": "Claude Code Security: Run /security-review to scan the codebase for vulnerabilities. This is Anthropic's built-in security scanner that uses deep semantic analysis. Review findings and fix any issues with severity critical or high. Categories scanned: injection attacks (SQL, command, XSS, XXE), authentication & authorization flaws, hardcoded secrets/API keys/passwords, cryptographic issues, input validation, insecure configuration, and dependency risks. If /security-review is not available, perform a manual security review analyzing the code changes for the same categories. For each finding: report severity, file, line, description, and apply the fix.",
 		"pre_commit":   "Run pre-commit run --all-files. If pre-commit is not installed, install it first: pip install pre-commit && pre-commit install && pre-commit install --hook-type pre-push. Fix ALL issues reported by pre-commit before proceeding.",
 		"commit":       "BEFORE committing, run MARKDOWN QUALITY GATE: list all .md files (find . -name '*.md' -not -path './venv/*' -not -path './node_modules/*' -not -path './.git/*' -not -path './.bmad/*'). For EACH .md file, verify: (a) every ## and ### header has an emoji icon prefix, (b) README.md has LINKED badges [![text](img)](link) — NOT plain ![text](img), (c) README.md has Table of Contents, Getting Started with sub-sections (Prerequisites, Installation, Environment Setup, Pre-Commit Hooks), Contributing, Contact, and License with full paragraph, (d) no placeholder text ('TBD', 'TODO', 'Lorem ipsum', 'A brief description', 'Insert here'). If ANY .md file fails these checks, FIX IT before committing. Then: single git commit with type(core): description. No emojis in commit message, no Co-Authored-By.",
 		"push":         "ReadOnly: false. Steps: (1) Check remote URL with git remote -v. (2) Test SSH with ssh -T git@github.com. (3) If SSH works and remote is HTTPS, switch: git remote set-url origin git@github.com:<owner>/<repo>.git. (4) Execute git push origin <current-branch>. (5) PIPELINE VERIFICATION: run gh run list --branch <current-branch> --limit 1 --json databaseId,status,conclusion to get the latest workflow run. If a run exists, run gh run watch <run-id> to wait for completion. If the run fails, run gh run view <run-id> --log-failed to read error logs. Diagnose the failure, fix the code, rebuild, test, commit, and push again. Maximum 2 fix attempts — if still failing after 2 retries, report the error and stop. This is NOT guidance — run every command.",

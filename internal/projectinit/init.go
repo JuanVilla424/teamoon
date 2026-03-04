@@ -14,7 +14,7 @@ type InitRequest struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
 	Version  string `json:"version"`
-	Private  bool   `json:"private"`
+	Public   bool   `json:"public"`
 	Separate bool   `json:"separate"`
 }
 
@@ -93,7 +93,7 @@ func runSeparateInit(req InitRequest, projectsDir string, progress ProgressFunc)
 		Name:    req.Name + "-frontend",
 		Type:    "node",
 		Version: req.Version,
-		Private: req.Private,
+		Public: req.Public,
 	}
 
 	stepNum := 0
@@ -198,9 +198,9 @@ func stepCreateRepo(req InitRequest, projectsDir string) error {
 		return nil
 	}
 
-	vis := "--public"
-	if req.Private {
-		vis = "--private"
+	vis := "--private"
+	if req.Public {
+		vis = "--public"
 	}
 
 	// Create repo FROM template — this copies all files, workflows, configs automatically
@@ -236,7 +236,7 @@ func stepTrimWorkflows(req InitRequest, projectsDir string) error {
 		return nil // no workflows dir, skip
 	}
 
-	keep := map[string]bool{"ci.yml": true}
+	keep := map[string]bool{"ci.yml": true, "version-controller.yml": true}
 	switch req.Type {
 	case "python":
 		keep["python.yml"] = true
