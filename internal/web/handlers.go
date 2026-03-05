@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1293,7 +1292,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Spawn claude with stream-json
+	// Spawn backend with stream-json
 	home2, _ := os.UserHomeDir()
 	projectPath := home2
 	if req.Project != "" {
@@ -1316,64 +1315,50 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.SudoEnabled {
 		env = append(env, "TEAMOON_SUDO_ENABLED=true")
 	}
+
 	chatCfg := s.cfg
-	chatCfg.Spawn.Model = engine.ResolveModel(s.cfg.Spawn.Model, "chat")
-	chatCfg.Spawn.MaxTurns = 15 // reduced: prevents tangents while allowing research
-	// Ensure MCP servers are available for chat (web search, context7, etc.)
 	if chatCfg.MCPServers == nil {
 		config.InitMCPFromGlobal(&chatCfg)
 	}
-	chatArgs, chatCleanup := engine.BuildSpawnArgs(chatCfg, promptBuf.String(), nil, "")
-	if chatCleanup != nil {
-		defer chatCleanup()
+	mcpConfig, _, mcpCleanup := backend.BuildMCPArgs(chatCfg)
+	if mcpCleanup != nil {
+		defer mcpCleanup()
 	}
-	// Chat-specific: stream partial messages in real-time.
-	// For normal chat (not system mode), disable hooks via empty setting-sources.
-	// System mode keeps hooks because they enforce sudo blocking.
-	chatArgs = append(chatArgs, "--include-partial-messages")
-	// Chat plans tasks — it must NOT execute code directly.
-	// System mode (/system) keeps full access for admin operations.
+
+	b := backend.Resolve(config.BackendFor(s.cfg, req.Project))
+
+	emptyStr := ""
+	spawnReq := backend.SpawnRequest{
+		Prompt:                 promptBuf.String(),
+		ProjectDir:             projectPath,
+		WorkDir:                projectPath,
+		Model:                  b.ResolveModel(s.cfg.Spawn.Model, "chat"),
+		MaxTurns:               15,
+		Env:                    env,
+		MCPConfig:              mcpConfig,
+		Phase:                  "chat",
+		IncludePartialMessages: true,
+	}
+
 	if !isSystemMode {
-		chatArgs = append(chatArgs, "--disallowedTools",
-			"Write,Edit,NotebookEdit,Bash,Agent,Task,TodoWrite,EnterPlanMode,ExitPlanMode,AskUserQuestion,Skill")
-		// Disable hooks in non-system chat to prevent turn waste
-		// (hooks fire and model responds "ack"/"Done", eating max-turns budget)
-		chatArgs = append(chatArgs, "--setting-sources", "")
+		spawnReq.DisallowedTools = []string{
+			"Write", "Edit", "NotebookEdit", "Bash", "Agent", "Task",
+			"TodoWrite", "EnterPlanMode", "ExitPlanMode", "AskUserQuestion", "Skill",
+		}
+		spawnReq.SettingSources = &emptyStr
 	}
-	// Ensure .bmad symlink for party-mode
+
 	projectinit.EnsureBMADLink(projectPath)
 
-	cmd := exec.Command("claude", chatArgs...)
-	cmd.Env = env
-	cmd.Dir = projectPath
+	chatCtx, chatCancel := context.WithCancel(r.Context())
+	defer chatCancel()
 
-	devNull, _ := os.Open(os.DevNull)
-	if devNull != nil {
-		cmd.Stdin = devNull
-		defer devNull.Close()
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		// Send SSE-formatted error so the frontend stream pump can handle it
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		if f, ok := w.(http.Flusher); ok {
-			errData, _ := json.Marshal(map[string]any{"error": "Failed to start claude: " + err.Error()})
-			fmt.Fprintf(w, "data: %s\n\n", errData)
-			doneData, _ := json.Marshal(map[string]any{"done": true})
-			fmt.Fprintf(w, "data: %s\n\n", doneData)
-			f.Flush()
+	events := make(chan backend.Event, 64)
+	go func() {
+		if _, err := b.Execute(chatCtx, spawnReq, events); err != nil {
+			log.Printf("[chat] backend exited with error: %v", err)
 		}
-		return
-	}
+	}()
 
 	// Stream SSE response
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1382,78 +1367,50 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "streaming not supported")
+		chatCancel()
 		return
 	}
 
 	var fullResponse strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	type streamEvt struct {
-		Type    string `json:"type"`
-		Message *struct {
-			Content []struct {
-				Type  string         `json:"type"`
-				Text  string         `json:"text,omitempty"`
-				Name  string         `json:"name,omitempty"`
-				Input map[string]any `json:"input,omitempty"`
-			} `json:"content"`
-		} `json:"message,omitempty"`
-		Result       string  `json:"result,omitempty"`
-		NumTurns     int     `json:"num_turns,omitempty"`
-		TotalCostUsd float64 `json:"total_cost_usd,omitempty"`
-	}
-
 	var displayResult string
-	var inDirective bool // suppress streaming while inside [TASK_CREATE]...[/TASK_CREATE] etc.
-	jobsSeen := make(map[string]bool) // dedup inline JOB_CREATE parsing
+	var inDirective bool
+	jobsSeen := make(map[string]bool)
 	inlineJobRe := regexp.MustCompile(`(?s)\[JOB_CREATE\](.*?)\[/JOB_CREATE\]`)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if s.cfg.Debug {
-			log.Printf("[debug][chat] raw: %s", line)
-		}
-		var evt streamEvt
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			continue
-		}
-		switch evt.Type {
+
+	for ev := range events {
+		switch ev.Type {
 		case "assistant":
-			if evt.Message != nil {
-				for _, c := range evt.Message.Content {
-					if c.Type == "text" && c.Text != "" {
-						fullResponse.WriteString(c.Text)
-						log.Printf("[chat] response: %s", c.Text)
-						// Suppress directive blocks from user-visible stream
-						displayText := c.Text
-						if idx := strings.Index(displayText, "[TASK_CREATE]"); idx >= 0 {
-							inDirective = true
-							displayText = displayText[:idx]
-						} else if idx := strings.Index(displayText, "[PROJECT_INIT]"); idx >= 0 {
-							inDirective = true
-							displayText = displayText[:idx]
-						} else if idx := strings.Index(displayText, "[JOB_CREATE]"); idx >= 0 {
-							inDirective = true
-							displayText = displayText[:idx]
-						}
-						if strings.Contains(c.Text, "[/TASK_CREATE]") || strings.Contains(c.Text, "[/PROJECT_INIT]") || strings.Contains(c.Text, "[/JOB_CREATE]") {
-							inDirective = false
-							displayText = ""
-						}
-						if !inDirective && displayText != "" {
-							tokenData, _ := json.Marshal(map[string]string{"token": displayText})
-							fmt.Fprintf(w, "data: %s\n\n", tokenData)
-							flusher.Flush()
-						}
-					}
-					if c.Type == "tool_use" && c.Name != "" {
-						desc := engine.FormatToolCall(c.Name, c.Input)
-						log.Printf("[chat] tool_use: %s", desc)
-						toolData, _ := json.Marshal(map[string]string{"tool_use": c.Name, "tool_desc": desc})
-						fmt.Fprintf(w, "data: %s\n\n", toolData)
-						flusher.Flush()
-					}
+			if ev.Text != "" {
+				fullResponse.WriteString(ev.Text)
+				log.Printf("[chat] response: %s", ev.Text)
+				displayText := ev.Text
+				if idx := strings.Index(displayText, "[TASK_CREATE]"); idx >= 0 {
+					inDirective = true
+					displayText = displayText[:idx]
+				} else if idx := strings.Index(displayText, "[PROJECT_INIT]"); idx >= 0 {
+					inDirective = true
+					displayText = displayText[:idx]
+				} else if idx := strings.Index(displayText, "[JOB_CREATE]"); idx >= 0 {
+					inDirective = true
+					displayText = displayText[:idx]
 				}
+				if strings.Contains(ev.Text, "[/TASK_CREATE]") || strings.Contains(ev.Text, "[/PROJECT_INIT]") || strings.Contains(ev.Text, "[/JOB_CREATE]") {
+					inDirective = false
+					displayText = ""
+				}
+				if !inDirective && displayText != "" {
+					tokenData, _ := json.Marshal(map[string]string{"token": displayText})
+					fmt.Fprintf(w, "data: %s\n\n", tokenData)
+					flusher.Flush()
+				}
+			}
+			if ev.ToolName != "" {
+				desc := backend.FormatToolCall(ev.ToolName, ev.ToolInput)
+				log.Printf("[chat] tool_use: %s", desc)
+				toolData, _ := json.Marshal(map[string]string{"tool_use": ev.ToolName, "tool_desc": desc})
+				fmt.Fprintf(w, "data: %s\n\n", toolData)
+				flusher.Flush()
+			}
 			// Inline JOB_CREATE: parse as soon as closing tag arrives
 			if !isSystemMode && strings.Contains(fullResponse.String(), "[/JOB_CREATE]") {
 				type jd struct {
@@ -1490,15 +1447,13 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 					flusher.Flush()
 					s.refreshAndBroadcast()
 				}
-				// Job created — send done, kill process, stop reading
 				if len(jobsSeen) > 0 {
 					doneData, _ := json.Marshal(map[string]any{"done": true})
 					fmt.Fprintf(w, "data: %s\n\n", doneData)
 					flusher.Flush()
-					cmd.Process.Kill()
+					chatCancel()
 					displayResult = " "
 				}
-			}
 			}
 		case "user":
 			log.Printf("[chat] tool_done")
@@ -1506,32 +1461,20 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", toolDoneData)
 			flusher.Flush()
 		case "result":
-			displayResult = evt.Result
+			displayResult = ev.Result
 			doneData, _ := json.Marshal(map[string]any{
 				"done":      true,
-				"result":    evt.Result,
-				"num_turns": evt.NumTurns,
-				"cost_usd":  evt.TotalCostUsd,
+				"result":    ev.Result,
+				"num_turns": ev.NumTurns,
+				"cost_usd":  ev.TotalCostUsd,
 			})
 			fmt.Fprintf(w, "data: %s\n\n", doneData)
 			flusher.Flush()
 		}
-		// Once we have the result, stop reading — parse directives immediately
 		if displayResult != "" {
 			break
 		}
 	}
-
-	// Wait for process exit in background — don't block directive parsing
-	go func() {
-		if waitErr := cmd.Wait(); waitErr != nil {
-			errMsg := stderrBuf.String()
-			log.Printf("[chat] claude exited with error: %v", waitErr)
-			if errMsg != "" {
-				log.Printf("[chat] claude stderr: %s", errMsg)
-			}
-		}
-	}()
 
 	// Parse directives from response — check both streaming text and final result
 	responseText := fullResponse.String()

@@ -29,6 +29,9 @@ type SpawnRequest struct {
 
 	Phase          string // "exec", "plan", "chat", "job"
 	PermissionMode string // "plan" for --permission-mode plan; empty = omit
+
+	IncludePartialMessages bool    // --include-partial-messages for real-time streaming
+	SettingSources         *string // --setting-sources value; nil = omit, "" = disable hooks
 }
 
 // Event is a normalized representation of one logical event from a backend.
@@ -39,19 +42,23 @@ type Event struct {
 	Text      string
 	ToolName  string
 	ToolInput map[string]any
-	IsError   bool
-	Result    string
-	Denials   []string
-	ToolsUsed []string
+	IsError      bool
+	Result       string
+	NumTurns     int
+	TotalCostUsd float64
+	Denials      []string
+	ToolsUsed    []string
 }
 
 // SpawnResult is the outcome of a completed Execute call.
 type SpawnResult struct {
-	ExitCode  int
-	Output    string
-	Denials   []string
-	ToolsUsed []string
-	SessionID string
+	ExitCode     int
+	Output       string
+	Denials      []string
+	ToolsUsed    []string
+	SessionID    string
+	NumTurns     int
+	TotalCostUsd float64
 }
 
 // Backend is the core interface every coding CLI adapter must implement.

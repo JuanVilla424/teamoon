@@ -197,6 +197,48 @@ func TestClaudeBackend_BuildArgs_WithPermissionMode(t *testing.T) {
 	t.Error("--permission-mode plan not found")
 }
 
+func TestClaudeBackend_BuildArgs_IncludePartialMessages(t *testing.T) {
+	b := &ClaudeBackend{}
+	args, _ := b.BuildArgs(SpawnRequest{Prompt: "test", IncludePartialMessages: true})
+	if !containsArg(args, "--include-partial-messages") {
+		t.Error("--include-partial-messages should be present")
+	}
+}
+
+func TestClaudeBackend_BuildArgs_IncludePartialMessages_Off(t *testing.T) {
+	b := &ClaudeBackend{}
+	args, _ := b.BuildArgs(SpawnRequest{Prompt: "test"})
+	if containsArg(args, "--include-partial-messages") {
+		t.Error("--include-partial-messages should NOT be present when false")
+	}
+}
+
+func TestClaudeBackend_BuildArgs_SettingSources_Nil(t *testing.T) {
+	b := &ClaudeBackend{}
+	args, _ := b.BuildArgs(SpawnRequest{Prompt: "test"})
+	if containsArg(args, "--setting-sources") {
+		t.Error("--setting-sources should NOT be present when nil")
+	}
+}
+
+func TestClaudeBackend_BuildArgs_SettingSources_Empty(t *testing.T) {
+	b := &ClaudeBackend{}
+	empty := ""
+	args, _ := b.BuildArgs(SpawnRequest{Prompt: "test", SettingSources: &empty})
+	if !containsArgValue(args, "--setting-sources", "") {
+		t.Error("--setting-sources should be present with empty string value")
+	}
+}
+
+func TestClaudeBackend_BuildArgs_SettingSources_Value(t *testing.T) {
+	b := &ClaudeBackend{}
+	val := "none"
+	args, _ := b.BuildArgs(SpawnRequest{Prompt: "test", SettingSources: &val})
+	if !containsArgValue(args, "--setting-sources", "none") {
+		t.Error("--setting-sources should have value 'none'")
+	}
+}
+
 func TestFilterEnv_RemovesTarget(t *testing.T) {
 	env := []string{"PATH=/usr/bin", "CLAUDECODE=abc", "HOME=/home/user"}
 	filtered := FilterEnv(env, "CLAUDECODE")

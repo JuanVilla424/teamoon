@@ -101,6 +101,12 @@ func (b *ClaudeBackend) BuildArgs(req SpawnRequest) ([]string, func()) {
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
 	}
+	if req.IncludePartialMessages {
+		args = append(args, "--include-partial-messages")
+	}
+	if req.SettingSources != nil {
+		args = append(args, "--setting-sources", *req.SettingSources)
+	}
 
 	var cleanup func()
 	if req.MCPConfig != "" {
@@ -266,6 +272,8 @@ func (b *ClaudeBackend) convertEvent(raw *StreamEvent) Event {
 		}
 	case "result":
 		ev.Result = raw.Result
+		ev.NumTurns = raw.NumTurns
+		ev.TotalCostUsd = raw.TotalCostUsd
 		for _, d := range raw.PermissionDenials {
 			ev.Denials = append(ev.Denials, d.ToolName)
 		}
@@ -293,6 +301,8 @@ type StreamEvent struct {
 	Result            string             `json:"result,omitempty"`
 	Error             *StreamError       `json:"error,omitempty"`
 	IsError           bool               `json:"is_error,omitempty"`
+	NumTurns          int                `json:"num_turns,omitempty"`
+	TotalCostUsd      float64            `json:"total_cost_usd,omitempty"`
 	PermissionDenials []PermissionDenial `json:"permission_denials,omitempty"`
 	ToolUseResult     *ToolUseResult     `json:"tool_use_result,omitempty"`
 }
