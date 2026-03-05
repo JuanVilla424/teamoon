@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/plan"
 	"github.com/JuanVilla424/teamoon/internal/queue"
@@ -314,7 +315,7 @@ func TestHasWriteTools_WithNotebookEdit(t *testing.T) {
 
 func TestFilterEnv_RemovesTarget(t *testing.T) {
 	env := []string{"PATH=/usr/bin", "CLAUDECODE=abc", "HOME=/home/user"}
-	filtered := filterEnv(env, "CLAUDECODE")
+	filtered := backend.FilterEnv(env, "CLAUDECODE")
 	if len(filtered) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(filtered))
 	}
@@ -327,14 +328,14 @@ func TestFilterEnv_RemovesTarget(t *testing.T) {
 
 func TestFilterEnv_KeepsOthers(t *testing.T) {
 	env := []string{"PATH=/usr/bin", "HOME=/home/user"}
-	filtered := filterEnv(env, "CLAUDECODE")
+	filtered := backend.FilterEnv(env, "CLAUDECODE")
 	if len(filtered) != 2 {
 		t.Errorf("expected 2 entries, got %d", len(filtered))
 	}
 }
 
 func TestFilterEnv_Empty(t *testing.T) {
-	filtered := filterEnv(nil, "FOO")
+	filtered := backend.FilterEnv(nil, "FOO")
 	if len(filtered) != 0 {
 		t.Error("empty input should produce empty output")
 	}

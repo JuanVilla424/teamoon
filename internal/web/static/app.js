@@ -390,9 +390,12 @@ function connectSSE(){
         location.hash = "#login";
         D = null;
         render();
-      } else {
-        setTimeout(connectSSE, 3000);
+        return;
       }
+      return r.json();
+    }).then(function(d){
+      if(d){ D = d; isDataUpdate = true; render(); }
+      setTimeout(connectSSE, 3000);
     }).catch(function(){ setTimeout(connectSSE, 3000); });
   };
 }

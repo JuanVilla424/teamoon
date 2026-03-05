@@ -2,12 +2,13 @@ package engine
 
 import (
 	"context"
-	"os/exec"
+	"fmt"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
@@ -47,15 +48,25 @@ type Manager struct {
 	mu           sync.Mutex
 	runners      map[int]*Runner
 	projectLoops map[string]*ProjectLoop
-	taskSem      chan struct{} // limits total concurrent Claude CLI processes
+	taskSem      chan struct{} // limits total concurrent CLI processes
+	backend      backend.Backend
 }
 
-func NewManager() *Manager {
+// NewManager creates a Manager with the given backend.
+// If b is nil, the default backend (Claude) is used.
+func NewManager(b backend.Backend) *Manager {
+	if b == nil {
+		b = backend.Default()
+	}
 	return &Manager{
 		runners:      make(map[int]*Runner),
 		projectLoops: make(map[string]*ProjectLoop),
+		backend:      b,
 	}
 }
+
+// Backend returns the manager's active backend.
+func (m *Manager) Backend() backend.Backend { return m.backend }
 
 // SetMaxConcurrentTasks configures the global task concurrency semaphore.
 func (m *Manager) SetMaxConcurrentTasks(n int) {
@@ -96,20 +107,22 @@ func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send fu
 	m.runners[task.ID] = r
 	m.mu.Unlock()
 
-	if _, err := exec.LookPath("claude"); err != nil {
+	if err := m.backend.Available(); err != nil {
+		msg := fmt.Sprintf("%s CLI not found in PATH", m.backend.Name())
 		send(LogMsg{Entry: logs.LogEntry{
 			Time:    time.Now(),
 			TaskID:  task.ID,
 			Project: task.Project,
-			Message: "claude CLI not found in PATH",
+			Message: msg,
 			Level:   logs.LevelError,
 		}})
-		queue.SetFailReason(task.ID, "claude CLI not found")
-		send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: "claude CLI not found"})
+		queue.SetFailReason(task.ID, msg)
+		send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: msg})
 		close(r.done)
 		return
 	}
 
+	b := m.backend
 	go func() {
 		defer func() {
 			m.mu.Lock()
@@ -117,7 +130,7 @@ func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send fu
 			m.mu.Unlock()
 			close(r.done)
 		}()
-		runTask(ctx, task, p, cfg, send)
+		runTask(ctx, task, p, cfg, send, b)
 	}()
 }
 

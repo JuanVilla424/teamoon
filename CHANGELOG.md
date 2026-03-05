@@ -1,3 +1,20 @@
+## [1.1.10] - 2026-03-03
+
+### Features
+
+- **core**: add harvester default job for security scanning and dependabot auto-merge (`patch candidate`)
+- **core**: sync local bmad agents into embedded assets
+- **core**: add claude code security review skeleton phase
+- **core**: add post-autopilot branch stabilization and keep version-controller workflow
+
+### Bug Fixes
+
+- **core**: default new repos to private unless explicitly requested public
+
+### Documentation
+
+- **core**: add chrome devtools and security review to readme
+
 ## [1.1.9] - 2026-03-03
 
 ### Bug Fixes

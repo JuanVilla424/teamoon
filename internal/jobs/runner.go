@@ -1,25 +1,22 @@
 package jobs
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/config"
-	"github.com/JuanVilla424/teamoon/internal/engine"
 )
 
-// RunJob spawns a Claude session for the given job and captures the result.
+// RunJob spawns a backend session for the given job and captures the result.
 func RunJob(ctx context.Context, job Job, cfg config.Config) string {
 	SetStatus(job.ID, StatusRunning)
 
-	// Native harvester — no Claude spawn needed
+	// Native harvester — no CLI spawn needed
 	if job.Instruction == harvesterMarker {
 		result := RunHarvester(cfg)
 		SetStatus(job.ID, StatusDone)
@@ -37,11 +34,6 @@ func RunJob(ctx context.Context, job Job, cfg config.Config) string {
 		projectPath = home
 	}
 
-	args, cleanup := engine.BuildSpawnArgs(cfg, job.Instruction, nil, "")
-	if cleanup != nil {
-		defer cleanup()
-	}
-
 	spawnCtx := ctx
 	var cancel context.CancelFunc
 	if cfg.Spawn.StepTimeoutMin > 0 {
@@ -51,70 +43,45 @@ func RunJob(ctx context.Context, job Job, cfg config.Config) string {
 	}
 	defer cancel()
 
-	env := os.Environ()
-	cmd := exec.CommandContext(spawnCtx, "claude", args...)
-	cmd.Env = env
-	cmd.Dir = projectPath
+	b := backend.Resolve(config.BackendFor(cfg, job.Project))
+	env := backend.FilterEnv(os.Environ(), "CLAUDECODE")
 
-	devNull, _ := os.Open(os.DevNull)
-	if devNull != nil {
-		cmd.Stdin = devNull
-		defer devNull.Close()
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		result := "failed to create pipe: " + err.Error()
-		SetStatus(job.ID, StatusError)
-		SetLastRun(job.ID, result)
-		return result
-	}
-	cmd.Stderr = nil
-
-	if err := cmd.Start(); err != nil {
-		result := "failed to start claude: " + err.Error()
-		SetStatus(job.ID, StatusError)
-		SetLastRun(job.ID, result)
-		return result
+	req := backend.SpawnRequest{
+		Prompt:     job.Instruction,
+		ProjectDir: projectPath,
+		WorkDir:    projectPath,
+		Model:      b.ResolveModel(cfg.Spawn.Model, "job"),
+		Effort:     cfg.Spawn.Effort,
+		MaxTurns:   cfg.Spawn.MaxTurns,
+		Env:        env,
+		Phase:      "job",
+		DisallowedTools: []string{
+			"AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
+		},
 	}
 
 	log.Printf("[jobs] job #%d %q running in %s", job.ID, job.Name, projectPath)
 
+	events := make(chan backend.Event, 64)
 	var lastText string
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		var event struct {
-			Type    string `json:"type"`
-			Result  string `json:"result,omitempty"`
-			Message *struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text,omitempty"`
-				} `json:"content"`
-			} `json:"message,omitempty"`
-		}
-		if json.Unmarshal([]byte(line), &event) != nil {
-			continue
-		}
-		switch event.Type {
+	var execErr error
+
+	go func() {
+		_, execErr = b.Execute(spawnCtx, req, events)
+	}()
+
+	for ev := range events {
+		switch ev.Type {
 		case "assistant":
-			if event.Message != nil {
-				for _, c := range event.Message.Content {
-					if c.Type == "text" && c.Text != "" {
-						lastText = c.Text
-					}
-				}
+			if ev.Text != "" {
+				lastText = ev.Text
 			}
 		case "result":
-			if event.Result != "" {
-				lastText = event.Result
+			if ev.Result != "" {
+				lastText = ev.Result
 			}
 		}
 	}
-
-	err = cmd.Wait()
 
 	// Truncate result for storage
 	result := lastText
@@ -122,8 +89,8 @@ func RunJob(ctx context.Context, job Job, cfg config.Config) string {
 		result = result[:500] + "..."
 	}
 
-	if err != nil {
-		if strings.Contains(err.Error(), "signal: killed") || spawnCtx.Err() != nil {
+	if execErr != nil {
+		if strings.Contains(execErr.Error(), "signal: killed") || spawnCtx.Err() != nil {
 			result = "timeout: " + result
 		}
 		SetStatus(job.ID, StatusError)

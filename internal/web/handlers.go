@@ -20,6 +20,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/chat"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
@@ -220,6 +221,22 @@ func (s *Server) handleTaskReplan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+
+	// Look up the task for generatePlanAsync
+	tasks, _ := queue.ListActive()
+	var found queue.Task
+	for _, t := range tasks {
+		if t.ID == req.ID {
+			found = t
+			break
+		}
+	}
+	if found.ID == 0 {
+		writeErr(w, 404, "task not found")
+		return
+	}
+
+	// Discard existing plan
 	if s.store.engineMgr.IsRunning(req.ID) {
 		s.store.engineMgr.Stop(req.ID)
 	}
@@ -229,8 +246,21 @@ func (s *Server) handleTaskReplan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+
+	// Re-fetch the task after reset so generatePlanAsync gets fresh state (not stale done/planned copy)
+	tasks, _ = queue.ListActive()
+	for _, t := range tasks {
+		if t.ID == req.ID {
+			found = t
+			break
+		}
+	}
+
+	// Immediately start new plan generation
+	s.setGenerating(found.ID, nil)
 	s.refreshAndBroadcast()
-	writeJSON(w, map[string]bool{"ok": true})
+	go s.generatePlanAsync(found, false)
+	writeJSON(w, map[string]string{"status": "generating"})
 }
 
 func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
@@ -612,7 +642,7 @@ func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 	})
 	s.refreshAndBroadcast()
 
-	env := filterEnvWeb(os.Environ(), "CLAUDECODE")
+	env := backend.FilterEnv(os.Environ(), "CLAUDECODE")
 	gitName := engine.GenerateName()
 	gitEmail := engine.GenerateEmail(gitName)
 	env = append(env,
@@ -621,61 +651,33 @@ func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 		"GIT_COMMITTER_NAME="+gitName,
 		"GIT_COMMITTER_EMAIL="+gitEmail,
 	)
-	// Resolve meta-model for plan generation phase
-	planCfg := s.cfg
-	planCfg.Spawn.MaxTurns = s.cfg.Spawn.PlanMaxTurns
-	planCfg.Spawn.Model = engine.ResolveModel(s.cfg.Spawn.Model, "plan")
-	// No MCPs for plan gen — skeleton prompt already references MCP steps from full config.
-	// npx MCP startup adds minutes of overhead on this server.
-	planCfg.MCPServers = nil
-	args, spawnCleanup := engine.BuildSpawnArgs(planCfg, prompt, nil, "")
-	if spawnCleanup != nil {
-		defer spawnCleanup()
+	b := backend.Resolve(config.BackendFor(s.cfg, t.Project))
+	projectDir := filepath.Join(s.cfg.ProjectsDir, t.Project)
+
+	req := backend.SpawnRequest{
+		Prompt:     prompt,
+		ProjectDir: projectDir,
+		WorkDir:    projectDir,
+		Model:      b.ResolveModel(s.cfg.Spawn.Model, "plan"),
+		MaxTurns:   s.cfg.Spawn.PlanMaxTurns,
+		Env:        env,
+		Phase:      "plan",
+		PermissionMode: "plan",
+		DisallowedTools: []string{
+			"ExitPlanMode", "EnterPlanMode", "TodoWrite",
+			"Skill", "Task", "NotebookEdit", "AskUserQuestion",
+		},
+		// No MCPConfig — plan gen intentionally omits MCPs
 	}
-	// Plan generation runs in plan mode — read-only, no edits.
-	// Disallow tools that cause Claude to "execute" instead of just planning.
-	args = append(args, "--permission-mode", "plan",
-		"--disallowedTools",
-		"ExitPlanMode,EnterPlanMode,TodoWrite,Skill,Task,NotebookEdit,AskUserQuestion",
-	)
-	// Note: --verbose is required by stream-json output format — do NOT strip it.
-	// Apply plan-specific timeout (defaults to 15 min — plan gen needs more time than step execution)
+
 	planTimeout := time.Duration(s.cfg.Spawn.PlanTimeoutMin) * time.Minute
 	if planTimeout <= 0 {
 		planTimeout = 15 * time.Minute
 	}
 	planCtx, planCancel := context.WithTimeout(context.Background(), planTimeout)
 	defer planCancel()
-	// Store cancel func so Stop/Replan/Done/Archive can kill the Claude process
+	// Store cancel func so Stop/Replan/Done/Archive can kill the process
 	s.setGenerating(t.ID, planCancel)
-
-	cmd := exec.CommandContext(planCtx, "claude", args...)
-	cmd.Env = env
-
-	// Stream plan generation — full console output to task logs
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.store.logBuf.Add(logs.LogEntry{
-			Time: time.Now(), TaskID: t.ID, Project: t.Project,
-			Message: "Plan generation pipe error: " + err.Error(), Level: logs.LevelError,
-		})
-		s.clearGenerating(t.ID)
-		s.refreshAndBroadcast()
-		return
-	}
-	cmd.Stderr = io.Discard
-
-	if err := cmd.Start(); err != nil {
-		s.store.logBuf.Add(logs.LogEntry{
-			Time: time.Now(), TaskID: t.ID, Project: t.Project,
-			Message: "Plan generation start error: " + err.Error(), Level: logs.LevelError,
-		})
-		s.clearGenerating(t.ID)
-		s.refreshAndBroadcast()
-		return
-	}
-
-	planStart := time.Now()
 
 	addLog := func(msg string, level logs.LogLevel) {
 		s.store.logBuf.Add(logs.LogEntry{
@@ -685,56 +687,40 @@ func (s *Server) generatePlanAsync(t queue.Task, autoRun bool) {
 		s.scheduleRefresh()
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	events := make(chan backend.Event, 64)
+	go func() {
+		b.Execute(planCtx, req, events)
+	}()
 
+	planStart := time.Now()
 	var planResult string
 	var planText strings.Builder
-	var sessionID string
 	planCaptured := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		var evt engine.StreamEvent
-		if json.Unmarshal([]byte(line), &evt) != nil {
-			continue
-		}
 
-		// Capture session_id from first event that has it
-		if evt.SessionID != "" && sessionID == "" {
-			sessionID = evt.SessionID
-		}
-
+	for ev := range events {
 		// Format and send to web UI as console output
-		if formatted := engine.FormatStreamEvent(evt); formatted != "" {
+		if formatted := backend.FormatEvent(ev); formatted != "" {
 			level := logs.LevelInfo
-			if evt.Type == "error" {
+			if ev.Type == "error" || ev.IsError {
 				level = logs.LevelError
 			}
 			addLog(formatted, level)
 		}
 
 		// Capture plan text from assistant text events
-		if evt.Type == "assistant" && evt.Message != nil {
-			for _, c := range evt.Message.Content {
-				if c.Type == "text" && len(c.Text) > 0 {
-					planText.WriteString(c.Text)
-					txt := planText.String()
-					if strings.Contains(txt, "# Plan:") && strings.Contains(txt, "## Steps") && strings.Contains(txt, "## Constraints") {
-						planResult = txt
-						planCaptured = true
-					}
-				}
-			}
-			if planCaptured {
-				cmd.Process.Kill()
-				break
+		if ev.Type == "assistant" && ev.Text != "" {
+			planText.WriteString(ev.Text)
+			txt := planText.String()
+			if strings.Contains(txt, "# Plan:") && strings.Contains(txt, "## Steps") && strings.Contains(txt, "## Constraints") {
+				planResult = txt
+				planCaptured = true
+				planCancel() // early kill — Execute terminates via context
 			}
 		}
-		if evt.Type == "result" && !planCaptured {
-			planResult = evt.Result
+		if ev.Type == "result" && !planCaptured && ev.Result != "" {
+			planResult = ev.Result
 		}
 	}
-	cmd.Wait()
 
 	elapsed := time.Since(planStart).Round(time.Second)
 	addLog(fmt.Sprintf("Plan generation finished (%s)", elapsed), logs.LevelInfo)
@@ -1001,17 +987,6 @@ func (s *Server) handleProjectSkeleton(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, 405, "method not allowed")
 	}
-}
-
-func filterEnvWeb(env []string, key string) []string {
-	prefix := key + "="
-	result := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, prefix) {
-			result = append(result, e)
-		}
-	}
-	return result
 }
 
 // --- Chat handlers ---
@@ -1328,7 +1303,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	env := filterEnvWeb(os.Environ(), "CLAUDECODE")
+	env := backend.FilterEnv(os.Environ(), "CLAUDECODE")
 	chatGitName := engine.GenerateName()
 	chatGitEmail := engine.GenerateEmail(chatGitName)
 	env = append(env,

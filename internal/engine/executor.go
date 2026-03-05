@@ -1,20 +1,16 @@
 package engine
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/logs"
 	"github.com/JuanVilla424/teamoon/internal/plan"
@@ -24,284 +20,81 @@ import (
 
 const maxRetries = 3
 
-// StreamEvent represents a single line from Claude CLI's stream-json output.
-type StreamEvent struct {
-	Type              string             `json:"type"`
-	Subtype           string             `json:"subtype,omitempty"`
-	SessionID         string             `json:"session_id,omitempty"`
-	Message           *StreamMessage     `json:"message,omitempty"`
-	Result            string             `json:"result,omitempty"`
-	Error             *StreamError       `json:"error,omitempty"`
-	IsError           bool               `json:"is_error,omitempty"`
-	PermissionDenials []PermissionDenial `json:"permission_denials,omitempty"`
-	ToolUseResult     *ToolUseResult     `json:"tool_use_result,omitempty"`
-}
+// Type aliases for backward compatibility — handlers.go and plangen.go still reference these.
+// Deprecated: import from backend package directly.
+type StreamEvent = backend.StreamEvent
+type StreamMessage = backend.StreamMessage
+type StreamContent = backend.StreamContent
+type StreamError = backend.StreamError
+type PermissionDenial = backend.PermissionDenial
+type ToolUseResult = backend.ToolUseResult
 
-// StreamMessage is the message payload of an assistant or user event.
-type StreamMessage struct {
-	Content []StreamContent `json:"content"`
-}
+// --- Backward-compatibility shims (used by plangen, jobs, web handlers) ---
 
-// StreamContent is a single content block within a stream message.
-type StreamContent struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	IsError   bool           `json:"is_error,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-}
-
-// StreamError is an error payload from the Claude CLI.
-type StreamError struct {
-	Message string `json:"message"`
-}
-
-// PermissionDenial records a tool that was denied by permission mode.
-type PermissionDenial struct {
-	ToolName string `json:"tool_name"`
-}
-
-// ToolUseResult contains stdout/stderr from a tool execution.
-type ToolUseResult struct {
-	Stdout string `json:"stdout,omitempty"`
-	Stderr string `json:"stderr,omitempty"`
-}
-
-// FormatStreamEvent converts a raw stream-json event into human-readable console lines.
-// Returns empty string if the event produces no visible output.
-func FormatStreamEvent(event StreamEvent) string {
-	var lines []string
-
-	switch event.Type {
-	case "assistant":
-		if event.Message != nil {
-			for _, c := range event.Message.Content {
-				switch c.Type {
-				case "tool_use":
-					desc := FormatToolCall(c.Name, c.Input)
-					lines = append(lines, "⏺ "+desc)
-				case "text":
-					if c.Text != "" {
-						lines = append(lines, c.Text)
-					}
-				}
-			}
-		}
-	case "user":
-		if event.Message != nil {
-			for _, c := range event.Message.Content {
-				if c.Type == "tool_result" {
-					content := c.Content
-					if content == "" && event.ToolUseResult != nil {
-						content = event.ToolUseResult.Stdout
-					}
-					if content != "" {
-						if len(content) > 500 {
-							content = content[:500] + "\n... (truncated)"
-						}
-						prefix := "  ↳ "
-						if c.IsError {
-							prefix = "  ✗ "
-						}
-						lines = append(lines, prefix+content)
-					}
-				}
-			}
-		}
-	case "result":
-		// result is captured separately for plan parsing; don't duplicate
-	case "error":
-		if event.Error != nil {
-			lines = append(lines, "✗ Error: "+event.Error.Message)
-		}
-	case "system":
-		if event.Subtype != "" {
-			lines = append(lines, "⚙ "+event.Subtype)
-		}
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func FormatToolCall(name string, input map[string]any) string {
-	str := func(key string) string {
-		if v, ok := input[key]; ok {
-			if s, ok := v.(string); ok {
-				if len(s) > 120 {
-					return s[:120] + "..."
-				}
-				return s
-			}
-		}
-		return ""
-	}
-	switch name {
-	case "Read":
-		if p := str("file_path"); p != "" {
-			return "Read " + p
-		}
-	case "Write":
-		if p := str("file_path"); p != "" {
-			return "Write " + p
-		}
-	case "Edit":
-		if p := str("file_path"); p != "" {
-			return "Edit " + p
-		}
-	case "Glob":
-		if p := str("pattern"); p != "" {
-			return "Glob " + p
-		}
-	case "Grep":
-		if p := str("pattern"); p != "" {
-			path := str("path")
-			if path != "" {
-				return "Grep " + p + " in " + path
-			}
-			return "Grep " + p
-		}
-	case "Bash":
-		if c := str("command"); c != "" {
-			return "Bash: " + c
-		}
-	case "WebSearch":
-		if q := str("query"); q != "" {
-			return "WebSearch: " + q
-		}
-	case "WebFetch":
-		if u := str("url"); u != "" {
-			return "WebFetch: " + u
-		}
-	case "Task":
-		if d := str("description"); d != "" {
-			return "Task: " + d
-		}
-	case "TodoWrite":
-		return "TodoWrite"
-	case "Skill":
-		if s := str("skill"); s != "" {
-			return "Skill: " + s
-		}
-	}
-	if strings.HasPrefix(name, "mcp__") {
-		parts := strings.SplitN(name, "__", 3)
-		if len(parts) >= 3 {
-			return parts[1] + ": " + strings.ReplaceAll(parts[2], "-", " ")
-		}
-	}
-	return name
-}
-
-type spawnResult struct {
-	ExitCode  int
-	Output    string
-	Denials   []string
-	ToolsUsed []string
-	SessionID string
-}
-
-// BuildSpawnArgs assembles CLI arguments for spawning claude, respecting config.
-// Returns the args slice and an optional cleanup function (for temp MCP config file).
-// ResolveModel maps teamoon meta-models to full Claude CLI model IDs.
-// "opusplan" is resolved based on the phase: "claude-opus-4-6" for planning, "claude-sonnet-4-6" for execution.
-// Pass phase="plan" or phase="exec". Other model values are passed through unchanged.
+// ResolveModel delegates to the default backend's model resolver.
+// Deprecated: callers should use backend.Resolve(name).ResolveModel() directly.
 func ResolveModel(model, phase string) string {
-	if model == "opusplan" {
-		if phase == "plan" || phase == "chat" {
-			return "claude-opus-4-6"
-		}
-		return "claude-sonnet-4-6"
-	}
-	switch model {
-	case "opus":
-		return "claude-opus-4-6"
-	case "sonnet":
-		return "claude-sonnet-4-6"
-	case "haiku":
-		return "claude-haiku-4-5-20251001"
-	}
-	return model
+	return backend.Default().ResolveModel(model, phase)
 }
 
+// BuildSpawnArgs assembles CLI arguments for the default (Claude) backend.
+// Returns the args slice and an optional cleanup function.
+// Deprecated: callers should migrate to backend.Execute() directly.
 func BuildSpawnArgs(cfg config.Config, prompt string, addDirs []string, sessionID string) ([]string, func()) {
-	var args []string
-	if sessionID != "" {
-		args = []string{
-			"--resume", sessionID,
-			"-p", prompt,
-			"--output-format", "stream-json",
-			"--verbose",
-		}
-	} else {
-		args = []string{
-			"-p", prompt,
-			"--output-format", "stream-json",
-			"--verbose",
-			"--no-session-persistence",
-		}
+	b := backend.Default()
+	cb, ok := b.(*backend.ClaudeBackend)
+	if !ok {
+		return nil, func() {}
 	}
-	// MaxTurns: >0 = explicit cap, 0 = unlimited (omit flag), <0 = safe default 15
-	maxTurns := cfg.Spawn.MaxTurns
-	if maxTurns > 0 {
-		args = append(args, "--max-turns", strconv.Itoa(maxTurns))
-	} else if maxTurns < 0 {
-		args = append(args, "--max-turns", "15")
-	}
-	if os.Getuid() != 0 {
-		args = append(args, "--dangerously-skip-permissions")
-	} else {
-		// Root cannot use --dangerously-skip-permissions; pre-allow tools instead
-		allowed := []string{
+
+	mcpConfig, mcpTools, mcpCleanup := backend.BuildMCPArgs(cfg)
+
+	// Build allowed tools for root mode
+	var allowed []string
+	if os.Getuid() == 0 {
+		allowed = []string{
 			"Bash", "Read", "Write", "Edit", "Glob", "Grep",
 			"WebSearch", "WebFetch", "TodoWrite", "Task",
 			"NotebookEdit", "NotebookRead",
 		}
-		// Include only essential MCP tools (context7, github)
-		if cfg.MCPServers != nil {
-			for name, s := range cfg.MCPServers {
-				if s.Enabled && (name == "context7" || name == "github") {
-					allowed = append(allowed, "mcp__"+name)
-				}
-			}
-		}
-		args = append(args, "--allowedTools")
-		args = append(args, allowed...)
-	}
-	if cfg.Spawn.Model != "" {
-		args = append(args, "--model", cfg.Spawn.Model)
-	}
-	if cfg.Spawn.Effort != "" {
-		args = append(args, "--effort", cfg.Spawn.Effort)
-	}
-	for _, dir := range addDirs {
-		args = append(args, "--add-dir", dir)
+		allowed = append(allowed, mcpTools...)
 	}
 
-	// Only pass essential MCP servers to spawned agents.
-	// Plugins like claude-mem, memory, sequential-thinking generate events
-	// that waste agent turns with "No action needed" responses.
-	var cleanup func()
-	if cfg.MCPServers != nil {
-		essential := make(map[string]config.MCPServer)
-		for name, s := range cfg.MCPServers {
-			if s.Enabled && (name == "context7" || name == "github") {
-				essential[name] = s
-			}
+	req := backend.SpawnRequest{
+		Prompt:       prompt,
+		SessionID:    sessionID,
+		Model:        cfg.Spawn.Model,
+		Effort:       cfg.Spawn.Effort,
+		MaxTurns:     cfg.Spawn.MaxTurns,
+		MCPConfig:    mcpConfig,
+		AddDirs:      addDirs,
+		AllowedTools: allowed,
+	}
+
+	args, argCleanup := cb.BuildArgs(req)
+
+	cleanup := func() {
+		if argCleanup != nil {
+			argCleanup()
 		}
-		if len(essential) > 0 {
-			tmpPath, err := config.BuildMCPConfigJSON(essential)
-			if err == nil {
-				args = append(args, "--mcp-config", tmpPath)
-				cleanup = func() { os.Remove(tmpPath) }
-			}
+		if mcpCleanup != nil {
+			mcpCleanup()
 		}
 	}
+
 	return args, cleanup
 }
 
-func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg)) {
+// FormatStreamEvent delegates to backend.FormatStreamEvent for backward compatibility.
+// Deprecated: import from backend package directly.
+var FormatStreamEvent = backend.FormatStreamEvent
+
+// FormatToolCall delegates to backend.FormatToolCall.
+func FormatToolCall(name string, input map[string]any) string {
+	return backend.FormatToolCall(name, input)
+}
+
+func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg), b backend.Backend) {
 	emit := func(level logs.LogLevel, msg string, agent string) {
 		send(LogMsg{Entry: logs.LogEntry{
 			Time:    time.Now(),
@@ -360,7 +153,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 
 		success := false
 		var recoveryCtx string
-		var lastRes spawnResult
+		var lastRes backend.SpawnResult
 		for retry := 0; retry < maxRetries; retry++ {
 			if ctx.Err() != nil {
 				emit(logs.LevelWarn, "Autopilot stopped by user", agent)
@@ -377,7 +170,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 			}
 
 			prompt := buildStepPrompt(task, p, step, retry, recoveryCtx, strings.Join(stepSummaries, "\n"), cfg)
-			res, err := spawnClaude(ctx, task.Project, prompt, send, task.ID, addDirs, agent, cfg, sessionID)
+			res, err := spawnBackend(ctx, b, task.Project, prompt, send, task.ID, addDirs, agent, cfg, sessionID)
 			lastRes = res
 
 			if ctx.Err() != nil {
@@ -432,12 +225,11 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 				emit(logs.LevelWarn, fmt.Sprintf("Step %d/%d failed (exit %d, %d denials), analyzing...",
 					step.Number, total, res.ExitCode, len(res.Denials)), agent)
 				recoveryPrompt := buildRecoveryPrompt(task, step, res.Output, res.ExitCode, cfg)
-				recRes, _ := spawnClaude(ctx, task.Project, recoveryPrompt, send, task.ID, addDirs, agent, cfg, sessionID)
+				recRes, _ := spawnBackend(ctx, b, task.Project, recoveryPrompt, send, task.ID, addDirs, agent, cfg, sessionID)
 				// Feed recovery analysis as context to next retry
 				recoveryCtx = failInfo.String()
 				if recRes.Output != "" {
-					// Extract the result text from recovery for context
-					recoveryCtx += "\nRecovery analysis:\n" + extractResult(recRes.Output)
+					recoveryCtx += "\nRecovery analysis:\n" + backend.ExtractResult(recRes.Output)
 				}
 			}
 		}
@@ -448,7 +240,7 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 
 		// Accumulate step context for subsequent steps
 		if success {
-			summary := extractResult(lastRes.Output)
+			summary := backend.ExtractResult(lastRes.Output)
 			if summary != "" {
 				if len(summary) > 300 {
 					summary = summary[:300]
@@ -472,6 +264,123 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 		emit(logs.LevelError, fmt.Sprintf("State update failed: %v", err), "")
 	}
 	send(TaskStateMsg{TaskID: task.ID, State: queue.StateDone})
+}
+
+// spawnBackend executes a single step via the Backend interface.
+func spawnBackend(ctx context.Context, b backend.Backend, project, prompt string, send func(tea.Msg), taskID int, addDirs []string, agent string, cfg config.Config, sessionID string) (backend.SpawnResult, error) {
+	projectPath := filepath.Join(cfg.ProjectsDir, project)
+
+	if _, err := os.Stat(projectPath); err != nil {
+		home, _ := os.UserHomeDir()
+		projectPath = home
+	}
+
+	// Apply step timeout if configured
+	spawnCtx := ctx
+	var cancelTimeout context.CancelFunc
+	if cfg.Spawn.StepTimeoutMin > 0 {
+		spawnCtx, cancelTimeout = context.WithTimeout(ctx, time.Duration(cfg.Spawn.StepTimeoutMin)*time.Minute)
+	}
+	if cancelTimeout != nil {
+		defer cancelTimeout()
+	}
+
+	// Build environment
+	env := backend.FilterEnv(os.Environ(), "CLAUDECODE")
+	if cfg.SudoEnabled {
+		env = append(env, "TEAMOON_SUDO_ENABLED=true")
+	}
+
+	// Satirical git identity for autopilot commits
+	gitName := GenerateName()
+	gitEmail := GenerateEmail(gitName)
+	env = append(env,
+		"GIT_AUTHOR_NAME="+gitName,
+		"GIT_AUTHOR_EMAIL="+gitEmail,
+		"GIT_COMMITTER_NAME="+gitName,
+		"GIT_COMMITTER_EMAIL="+gitEmail,
+	)
+
+	// Build MCP config
+	mcpConfig, mcpTools, mcpCleanup := backend.BuildMCPArgs(cfg)
+	if mcpCleanup != nil {
+		defer mcpCleanup()
+	}
+
+	// Build allowed tools for root mode
+	var allowed []string
+	if os.Getuid() == 0 && b.Caps().ToolFiltering {
+		allowed = []string{
+			"Bash", "Read", "Write", "Edit", "Glob", "Grep",
+			"WebSearch", "WebFetch", "TodoWrite", "Task",
+			"NotebookEdit", "NotebookRead",
+		}
+		allowed = append(allowed, mcpTools...)
+	}
+
+	req := backend.SpawnRequest{
+		Prompt:     prompt,
+		ProjectDir: projectPath,
+		WorkDir:    projectPath,
+		AddDirs:    addDirs,
+		SessionID:  sessionID,
+		Model:      b.ResolveModel(cfg.Spawn.Model, "exec"),
+		Effort:     cfg.Spawn.Effort,
+		MaxTurns:   cfg.Spawn.MaxTurns,
+		Env:        env,
+		Phase:      "exec",
+		DisallowedTools: []string{
+			"AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "TodoWrite",
+		},
+	}
+
+	if b.Caps().MCPConfig {
+		req.MCPConfig = mcpConfig
+	}
+	if b.Caps().ToolFiltering && len(allowed) > 0 {
+		req.AllowedTools = allowed
+	}
+
+	// Execute via backend
+	events := make(chan backend.Event, 64)
+	var result backend.SpawnResult
+	var execErr error
+
+	go func() {
+		result, execErr = b.Execute(spawnCtx, req, events)
+	}()
+
+	for ev := range events {
+		if formatted := backend.FormatEvent(ev); formatted != "" {
+			level := logs.LevelInfo
+			if ev.Type == "error" || ev.IsError {
+				level = logs.LevelError
+			}
+			send(LogMsg{Entry: logs.LogEntry{
+				Time:    time.Now(),
+				TaskID:  taskID,
+				Project: project,
+				Message: formatted,
+				Level:   level,
+				Agent:   agent,
+			}})
+		}
+	}
+
+	// Detect step timeout
+	if spawnCtx.Err() != nil && ctx.Err() == nil {
+		send(LogMsg{Entry: logs.LogEntry{
+			Time:    time.Now(),
+			TaskID:  taskID,
+			Project: project,
+			Message: fmt.Sprintf("Step timed out after %d min", cfg.Spawn.StepTimeoutMin),
+			Level:   logs.LevelError,
+			Agent:   agent,
+		}})
+		return backend.SpawnResult{ExitCode: 124, Output: result.Output}, fmt.Errorf("step timeout after %d min", cfg.Spawn.StepTimeoutMin)
+	}
+
+	return result, execErr
 }
 
 func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string, cfg config.Config) string {
@@ -545,7 +454,7 @@ func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, re
 	sb.WriteString("\n9. ALWAYS work on the dev branch. If not on dev, run: git checkout dev")
 	sb.WriteString("\n10. NEVER say 'Is there anything else', 'Let me know', 'Ready when you are', or similar. Just finish and stop.")
 	sb.WriteString("\n11. NEVER use heredoc (<<EOF, <<'EOF', cat <<) in any command. Use direct strings with quotes for git commit -m and similar.")
-	sb.WriteString("\n12. Commits: single line, NO Co-Authored-By, NO 'Made by Claude', NO 'Generated with Claude'. Format: type(core): description")
+	sb.WriteString("\n12. Commits: single line, NO Co-Authored-By, NO 'Made by Claude', NO 'Generated with Claude'. Format: type(core): description [versioning keyword]. Versioning keyword is MANDATORY: feat→[minor candidate], fix→[patch candidate], refactor/docs/style/test/chore→[patch candidate], breaking changes→[major candidate].")
 	sb.WriteString("\n13. NEVER create pull requests with Claude/AI mentions in title or body. No 'Generated with Claude Code', no robot emojis, no AI attribution.")
 	sb.WriteString("\n14. NEVER install packages directly (npm install pkg, pip install pkg). ALWAYS add to the manifest file first (package.json, requirements.txt, go.mod, etc.) then run the install command without package names.")
 	sb.WriteString("\n15. When your work is DONE, output your final summary and STOP IMMEDIATELY. Do NOT respond to hook events, system messages, or session stop notifications. Do NOT say 'ok', 'acknowledged', 'nothing to do'. Just STOP.")
@@ -611,178 +520,6 @@ func buildSystemStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry i
 	return sb.String()
 }
 
-func spawnClaude(ctx context.Context, project, prompt string, send func(tea.Msg), taskID int, addDirs []string, agent string, cfg config.Config, sessionID string) (spawnResult, error) {
-	projectPath := filepath.Join(cfg.ProjectsDir, project)
-
-	if _, err := os.Stat(projectPath); err != nil {
-		home, _ := os.UserHomeDir()
-		projectPath = home
-	}
-
-	// Apply step timeout if configured
-	spawnCtx := ctx
-	var cancelTimeout context.CancelFunc
-	if cfg.Spawn.StepTimeoutMin > 0 {
-		spawnCtx, cancelTimeout = context.WithTimeout(ctx, time.Duration(cfg.Spawn.StepTimeoutMin)*time.Minute)
-	}
-	if cancelTimeout != nil {
-		defer cancelTimeout()
-	}
-
-	env := filterEnv(os.Environ(), "CLAUDECODE")
-	if cfg.SudoEnabled {
-		env = append(env, "TEAMOON_SUDO_ENABLED=true")
-	}
-
-	// Satirical git identity for autopilot commits
-	gitName := GenerateName()
-	gitEmail := GenerateEmail(gitName)
-	env = append(env,
-		"GIT_AUTHOR_NAME="+gitName,
-		"GIT_AUTHOR_EMAIL="+gitEmail,
-		"GIT_COMMITTER_NAME="+gitName,
-		"GIT_COMMITTER_EMAIL="+gitEmail,
-	)
-
-	// Resolve meta-model for step execution phase
-	execCfg := cfg
-	execCfg.Spawn.Model = ResolveModel(cfg.Spawn.Model, "exec")
-	args, cleanup := BuildSpawnArgs(execCfg, prompt, addDirs, sessionID)
-	if cleanup != nil {
-		defer cleanup()
-	}
-	// Block interactive tools — autopilot steps must be self-contained
-	args = append(args, "--disallowedTools",
-		"AskUserQuestion,EnterPlanMode,ExitPlanMode,TodoWrite")
-
-	cmd := exec.CommandContext(spawnCtx, "claude", args...)
-	cmd.Env = env
-	cmd.Dir = projectPath
-
-	devNull, _ := os.Open(os.DevNull)
-	if devNull != nil {
-		cmd.Stdin = devNull
-		defer devNull.Close()
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return spawnResult{ExitCode: -1}, err
-	}
-
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		return spawnResult{ExitCode: -1}, err
-	}
-
-	var fullOutput strings.Builder
-	var denials []string
-	var toolsUsed []string
-	var capturedSessionID string
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		fullOutput.WriteString(line + "\n")
-
-		var event StreamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
-
-		// Capture session_id from first event that has it
-		if event.SessionID != "" && capturedSessionID == "" {
-			capturedSessionID = event.SessionID
-		}
-
-		// Format and send to web UI as console output
-		if formatted := FormatStreamEvent(event); formatted != "" {
-			level := logs.LevelInfo
-			if event.Type == "error" {
-				level = logs.LevelError
-			}
-			send(LogMsg{Entry: logs.LogEntry{
-				Time:    time.Now(),
-				TaskID:  taskID,
-				Project: project,
-				Message: formatted,
-				Level:   level,
-				Agent:   agent,
-			}})
-		}
-
-		switch event.Type {
-		case "assistant":
-			if event.Message != nil {
-				for _, c := range event.Message.Content {
-					if c.Type == "tool_use" && c.Name != "" {
-						toolsUsed = append(toolsUsed, c.Name)
-					}
-				}
-			}
-		case "result":
-			for _, d := range event.PermissionDenials {
-				denials = append(denials, d.ToolName)
-			}
-		}
-	}
-
-	err = cmd.Wait()
-	exitCode := 0
-	if err != nil {
-		// Detect step timeout (spawnCtx expired but parent ctx still alive)
-		if spawnCtx.Err() != nil && ctx.Err() == nil {
-			send(LogMsg{Entry: logs.LogEntry{
-				Time:    time.Now(),
-				TaskID:  taskID,
-				Project: project,
-				Message: fmt.Sprintf("Step timed out after %d min", cfg.Spawn.StepTimeoutMin),
-				Level:   logs.LevelError,
-				Agent:   agent,
-			}})
-			return spawnResult{ExitCode: 124, Output: fullOutput.String()}, fmt.Errorf("step timeout after %d min", cfg.Spawn.StepTimeoutMin)
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return spawnResult{ExitCode: -1, Output: fullOutput.String()}, err
-		}
-	}
-
-	if stderrBuf.Len() > 0 {
-		fullOutput.WriteString("\n[stderr] " + stderrBuf.String())
-	}
-
-	return spawnResult{
-		ExitCode:  exitCode,
-		Output:    fullOutput.String(),
-		Denials:   denials,
-		ToolsUsed: toolsUsed,
-		SessionID: capturedSessionID,
-	}, nil
-}
-
-func extractResult(rawOutput string) string {
-	for _, line := range strings.Split(rawOutput, "\n") {
-		var event StreamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
-		}
-		if event.Type == "result" && event.Result != "" {
-			r := event.Result
-			if len(r) > 300 {
-				r = r[:300] + "..."
-			}
-			return r
-		}
-	}
-	return ""
-}
-
 var writeToolSet = map[string]bool{
 	"Write": true, "Edit": true, "Bash": true, "NotebookEdit": true,
 }
@@ -794,15 +531,4 @@ func hasWriteTools(tools []string) bool {
 		}
 	}
 	return false
-}
-
-func filterEnv(env []string, key string) []string {
-	prefix := key + "="
-	result := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, prefix) {
-			result = append(result, e)
-		}
-	}
-	return result
 }

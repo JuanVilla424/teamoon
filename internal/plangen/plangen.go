@@ -1,16 +1,15 @@
 package plangen
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/engine"
 	"github.com/JuanVilla424/teamoon/internal/plan"
@@ -242,7 +241,7 @@ func PlanToolMessage(name string, input map[string]any) string {
 	return "Planning: " + name
 }
 
-// GeneratePlan runs claude to generate a plan synchronously and saves it.
+// GeneratePlan runs the backend to generate a plan synchronously and saves it.
 // logFn is called with descriptive messages as planning progresses (may be nil).
 func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, logFn func(string)) (plan.Plan, error) {
 	// Ensure .bmad symlink exists so BMAD workflows can resolve @.bmad/ paths
@@ -258,7 +257,7 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, log
 	skeletonBlock := SkeletonJSON(sk, cfg.MCPServers, cfg.PhaseHints)
 	prompt := BuildPlanPrompt(t, skeletonBlock, cfg.ProjectsDir)
 
-	env := filterEnv(os.Environ(), "CLAUDECODE")
+	env := backend.FilterEnv(os.Environ(), "CLAUDECODE")
 	gitName := engine.GenerateName()
 	gitEmail := engine.GenerateEmail(gitName)
 	env = append(env,
@@ -268,23 +267,24 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, log
 		"GIT_COMMITTER_EMAIL="+gitEmail,
 	)
 
-	// Resolve meta-model for plan generation phase
-	planCfg := cfg
-	planCfg.Spawn.MaxTurns = cfg.Spawn.PlanMaxTurns
-	planCfg.Spawn.Model = engine.ResolveModel(cfg.Spawn.Model, "plan")
-	// No MCPs for plan gen — skeleton prompt already references MCP steps from full config.
-	planCfg.MCPServers = nil
-	args, cleanup := engine.BuildSpawnArgs(planCfg, prompt, nil, "")
-	if cleanup != nil {
-		defer cleanup()
+	b := backend.Resolve(config.BackendFor(cfg, t.Project))
+
+	req := backend.SpawnRequest{
+		Prompt:     prompt,
+		ProjectDir: projectDir,
+		WorkDir:    projectDir,
+		Model:      b.ResolveModel(cfg.Spawn.Model, "plan"),
+		MaxTurns:   cfg.Spawn.PlanMaxTurns,
+		Env:        env,
+		Phase:      "plan",
+		DisallowedTools: []string{
+			"Edit", "Write", "NotebookEdit", "Bash",
+			"ExitPlanMode", "EnterPlanMode", "TodoWrite",
+			"Task", "AskUserQuestion",
+		},
+		// No MCPConfig — plan gen intentionally omits MCPs
 	}
-	// Disallow write/edit tools — plan gen only reads and invokes BMAD Skill.
-	args = append(args,
-		"--disallowedTools",
-		"Edit,Write,NotebookEdit,Bash,ExitPlanMode,EnterPlanMode,TodoWrite,Task,AskUserQuestion",
-	)
-	// Note: --verbose is required by stream-json output format — do NOT strip it.
-	// Apply plan-specific timeout (defaults to 15 min — plan gen needs more time than step execution)
+
 	timeout := time.Duration(cfg.Spawn.PlanTimeoutMin) * time.Minute
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
@@ -292,21 +292,12 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, log
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = filepath.Join(cfg.ProjectsDir, t.Project)
-	cmd.Env = env
+	events := make(chan backend.Event, 64)
+	go func() {
+		b.Execute(ctx, req, events)
+	}()
 
-	// Stream plan generation using stream-json for real-time progress visibility
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return plan.Plan{}, fmt.Errorf("plan generation pipe error: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return plan.Plan{}, fmt.Errorf("plan generation start error: %w", err)
-	}
-
-	// Heartbeat: periodic progress during stream-json gaps
+	// Heartbeat: periodic progress during stream gaps
 	planStart := time.Now()
 	heartbeatDone := make(chan struct{})
 	go func() {
@@ -325,67 +316,31 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, log
 		}
 	}()
 
-	type planStreamContent struct {
-		Type  string         `json:"type"`
-		Text  string         `json:"text,omitempty"`
-		Name  string         `json:"name,omitempty"`
-		Input map[string]any `json:"input,omitempty"`
-	}
-	type planStreamEvt struct {
-		Type      string `json:"type"`
-		SessionID string `json:"session_id,omitempty"`
-		Message   *struct {
-			Content []planStreamContent `json:"content"`
-		} `json:"message,omitempty"`
-		Result  string `json:"result,omitempty"`
-		Subtype string `json:"subtype,omitempty"`
-	}
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
 	var planResult string
 	var planText strings.Builder
-	var sessionID string
 	planCaptured := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		var evt planStreamEvt
-		if json.Unmarshal([]byte(line), &evt) != nil {
-			continue
-		}
-		// Capture session_id from first event that has it
-		if evt.SessionID != "" && sessionID == "" {
-			sessionID = evt.SessionID
-		}
-		switch evt.Type {
+
+	for ev := range events {
+		switch ev.Type {
 		case "assistant":
-			if evt.Message != nil {
-				for _, c := range evt.Message.Content {
-					if c.Type == "tool_use" && c.Name != "" && logFn != nil {
-						logFn(PlanToolMessage(c.Name, c.Input))
-					}
-					if c.Type == "text" && len(c.Text) > 0 {
-						planText.WriteString(c.Text)
-						txt := planText.String()
-						if strings.Contains(txt, "# Plan:") && strings.Contains(txt, "## Steps") && strings.Contains(txt, "## Constraints") {
-							planResult = txt
-							planCaptured = true
-						}
-					}
+			if ev.ToolName != "" && logFn != nil {
+				logFn(PlanToolMessage(ev.ToolName, ev.ToolInput))
+			}
+			if ev.Text != "" {
+				planText.WriteString(ev.Text)
+				txt := planText.String()
+				if strings.Contains(txt, "# Plan:") && strings.Contains(txt, "## Steps") && strings.Contains(txt, "## Constraints") {
+					planResult = txt
+					planCaptured = true
+					cancel() // early kill — Execute will terminate the process via context
 				}
 			}
-			if planCaptured {
-				cmd.Process.Kill()
-				break
-			}
 		case "result":
-			if !planCaptured {
-				planResult = evt.Result
+			if !planCaptured && ev.Result != "" {
+				planResult = ev.Result
 			}
 		}
 	}
-	cmd.Wait()
 	close(heartbeatDone)
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -407,15 +362,4 @@ func GeneratePlan(t queue.Task, sk config.SkeletonConfig, cfg config.Config, log
 		return plan.Plan{}, fmt.Errorf("parsing generated plan: %w", err)
 	}
 	return p, nil
-}
-
-func filterEnv(env []string, key string) []string {
-	prefix := key + "="
-	result := make([]string, 0, len(env))
-	for _, e := range env {
-		if !strings.HasPrefix(e, prefix) {
-			result = append(result, e)
-		}
-	}
-	return result
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/JuanVilla424/teamoon/internal/backend"
 	"github.com/JuanVilla424/teamoon/internal/config"
 	"github.com/JuanVilla424/teamoon/internal/dashboard"
 	"github.com/JuanVilla424/teamoon/internal/engine"
@@ -50,7 +51,7 @@ func main() {
 				cfg.Debug = true
 			}
 
-			engineMgr := engine.NewManager()
+			engineMgr := engine.NewManager(backend.Resolve(config.BackendFor(cfg, "")))
 			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
 			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
@@ -143,7 +144,7 @@ func main() {
 				cfg.Debug = true
 			}
 
-			engineMgr := engine.NewManager()
+			engineMgr := engine.NewManager(backend.Resolve(config.BackendFor(cfg, "")))
 			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
 			logBuf := logs.NewRingBuffer(cfg.LogRetentionDays)
