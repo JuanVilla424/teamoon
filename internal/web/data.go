@@ -80,6 +80,16 @@ type Store struct {
 	engineMgr *engine.Manager
 	cfg       config.Config
 	startTime time.Time
+
+	// TTL cache for expensive scans
+	tokensCachedAt   time.Time
+	tokensToday      metrics.TokenSummary
+	tokensWeek       metrics.TokenSummary
+	tokensMonth      metrics.TokenSummary
+	sessionCachedAt  time.Time
+	sessionResult    metrics.SessionContext
+	projectsCachedAt time.Time
+	projectsResult   []projects.Project
 }
 
 func NewStore(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *Store {
@@ -92,25 +102,49 @@ func NewStore(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) *
 }
 
 func (s *Store) Refresh() {
-	today, week, month, _ := metrics.ScanTokens(s.cfg.ClaudeDir)
-	session := metrics.ScanActiveSession(s.cfg.ClaudeDir, s.cfg.ContextLimit)
+	now := time.Now()
+
+	// ScanTokens: 2-minute TTL (walks 7K+ JSONL files)
+	if now.Sub(s.tokensCachedAt) >= 2*time.Minute {
+		t, w, m, _ := metrics.ScanTokens(s.cfg.ClaudeDir)
+		s.tokensToday, s.tokensWeek, s.tokensMonth = t, w, m
+		s.tokensCachedAt = now
+	}
+
+	// ScanActiveSession: 2-minute TTL (walks same JSONL files)
+	if now.Sub(s.sessionCachedAt) >= 2*time.Minute {
+		s.sessionResult = metrics.ScanActiveSession(s.cfg.ClaudeDir, s.cfg.ContextLimit)
+		s.sessionCachedAt = now
+	}
+
+	// projects.Scan: 1-minute TTL (spawns git subprocesses per project)
+	if now.Sub(s.projectsCachedAt) >= 1*time.Minute {
+		s.projectsResult = projects.Scan(s.cfg.ProjectsDir)
+		s.projectsCachedAt = now
+	}
+
+	today, week, month := s.tokensToday, s.tokensWeek, s.tokensMonth
+	session := s.sessionResult
 	cost := metrics.CalculateCost(today, week, month)
 	usage := metrics.GetUsage()
-	projs := projects.Scan(s.cfg.ProjectsDir)
+	projs := s.projectsResult
 	activeTasks, _ := queue.ListActive()
+
+	// Snapshot generating set once to avoid locking per-task
+	generatingMu.Lock()
+	genSnapshot := make(map[int]bool, len(generatingSet))
+	for id := range generatingSet {
+		genSnapshot[id] = true
+	}
+	generatingMu.Unlock()
 
 	webTasks := make([]WebTask, len(activeTasks))
 	for i, t := range activeTasks {
 		effState := string(queue.EffectiveState(t))
 		isRunning := s.engineMgr.IsRunning(t.ID)
-		// Show "generating" if plan generation is in progress
-		generatingMu.Lock()
-		if effState == "pending" {
-			if _, genOk := generatingSet[t.ID]; genOk {
-				effState = "generating"
-			}
+		if effState == "pending" && genSnapshot[t.ID] {
+			effState = "generating"
 		}
-		generatingMu.Unlock()
 		// Engine is authoritative: if running, override stale JSON state
 		if isRunning && (effState == "pending" || effState == "planned") {
 			effState = "running"

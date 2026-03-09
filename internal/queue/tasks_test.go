@@ -18,6 +18,9 @@ func setupTestEnv(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	// Reset in-memory cache so each test starts fresh
+	cached = nil
+	dirty = false
 	dir := filepath.Join(tmp, ".config", "teamoon")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -289,8 +292,9 @@ func TestSetFailReason(t *testing.T) {
 	if all[0].FailReason != "build failed" {
 		t.Errorf("expected 'build failed', got %s", all[0].FailReason)
 	}
+	// SetFailReason no longer changes state (forward-only state machine)
 	if all[0].State != StatePending {
-		t.Errorf("expected state pending, got %s", all[0].State)
+		t.Errorf("expected state unchanged (pending), got %s", all[0].State)
 	}
 }
 
@@ -442,6 +446,7 @@ func TestPersistence_WriteReadCycle(t *testing.T) {
 
 	Add("proj1", "desc1", "high")
 	Add("proj2", "desc2", "low")
+	FlushIfDirty()
 
 	data, err := os.ReadFile(filepath.Join(cfgDir, "tasks.json"))
 	if err != nil {
@@ -559,6 +564,7 @@ func TestNoFileYet_AddCreatesFile(t *testing.T) {
 	if _, err := Add("proj", "first task", "med"); err != nil {
 		t.Fatal(err)
 	}
+	FlushIfDirty()
 
 	if _, err := os.Stat(fp); err != nil {
 		t.Errorf("tasks.json should exist after Add, got error: %v", err)

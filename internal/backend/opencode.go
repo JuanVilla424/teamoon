@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // OpenCodeBackend implements Backend for the opencode CLI.
@@ -88,6 +89,13 @@ func (b *OpenCodeBackend) Execute(ctx context.Context, req SpawnRequest, events 
 
 	args := b.BuildArgs(req)
 	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 
 	if len(req.Env) > 0 {
 		cmd.Env = req.Env

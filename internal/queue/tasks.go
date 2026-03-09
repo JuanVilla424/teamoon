@@ -61,17 +61,53 @@ type TaskStore struct {
 	Tasks  []Task `json:"tasks"`
 }
 
-var storeMu sync.Mutex
+var (
+	storeMu sync.Mutex
+	cached  *TaskStore
+	dirty   bool
+)
 
 func tasksPath() string {
 	return filepath.Join(config.ConfigDir(), "tasks.json")
 }
 
+// InitStore loads the task store into memory at startup.
+func InitStore() error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	_, err := loadStore()
+	return err
+}
+
+// FlushIfDirty writes the in-memory store to disk if it has been modified.
+func FlushIfDirty() {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	if !dirty || cached == nil {
+		return
+	}
+	dir := config.ConfigDir()
+	os.MkdirAll(dir, 0755)
+	data, err := json.MarshalIndent(cached, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(tasksPath(), data, 0644); err != nil {
+		log.Printf("[queue] flush error: %v", err)
+		return
+	}
+	dirty = false
+}
+
 func loadStore() (TaskStore, error) {
+	if cached != nil {
+		return *cached, nil
+	}
 	store := TaskStore{NextID: 1}
 	data, err := os.ReadFile(tasksPath())
 	if err != nil {
 		if os.IsNotExist(err) {
+			cached = &store
 			return store, nil
 		}
 		return store, err
@@ -83,19 +119,17 @@ func loadStore() (TaskStore, error) {
 	data = bytes.ReplaceAll(data, []byte(`"state":"failed"`), []byte(`"state":"pending"`))
 	data = bytes.ReplaceAll(data, []byte(`"block_reason"`), []byte(`"fail_reason"`))
 	err = json.Unmarshal(data, &store)
+	if err == nil {
+		cached = &store
+	}
 	return store, err
 }
 
 func saveStore(store TaskStore) error {
-	dir := config.ConfigDir()
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(tasksPath(), data, 0644)
+	s := store
+	cached = &s
+	dirty = true
+	return nil
 }
 
 func Add(project, description, priority string) (Task, error) {
@@ -213,6 +247,37 @@ func Archive(id int) error {
 	return fmt.Errorf("task #%d not found", id)
 }
 
+func BulkArchive(ids []int) (int, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return 0, err
+	}
+	idSet := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	count := 0
+	for i := range store.Tasks {
+		if idSet[store.Tasks[i].ID] {
+			store.Tasks[i].State = StateArchived
+			store.Tasks[i].Done = true
+			store.Tasks[i].SessionID = ""
+			store.Tasks[i].CurrentStep = 0
+			log.Printf("[queue] task #%d archived (bulk)", store.Tasks[i].ID)
+			count++
+		}
+	}
+	if count > 0 {
+		if err := saveStore(store); err != nil {
+			return 0, err
+		}
+	}
+	return count, nil
+}
+
 func ListAll() ([]Task, error) {
 	storeMu.Lock()
 	defer storeMu.Unlock()
@@ -224,6 +289,19 @@ func ListAll() ([]Task, error) {
 	return store.Tasks, nil
 }
 
+// stateRank defines the forward-only ordering of task states.
+// UpdateState only allows transitions to equal or higher rank.
+var stateRank = map[TaskState]int{
+	StatePending:  0,
+	StatePlanned:  1,
+	StateRunning:  2,
+	StateDone:     3,
+	StateArchived: 4,
+}
+
+// UpdateState transitions a task to a new state.
+// Forward-only: transitions to a lower-ranked state are silently refused.
+// Use ForceUpdateState for explicit user actions or crash recovery.
 func UpdateState(id int, state TaskState) error {
 	storeMu.Lock()
 	defer storeMu.Unlock()
@@ -234,11 +312,40 @@ func UpdateState(id int, state TaskState) error {
 	}
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
+			current := EffectiveState(store.Tasks[i])
+			if stateRank[state] < stateRank[current] {
+				log.Printf("[queue] task #%d REFUSED backward state %s -> %s", id, current, state)
+				return nil
+			}
 			store.Tasks[i].State = state
 			if state == StateDone {
 				store.Tasks[i].Done = true
 			}
 			log.Printf("[queue] task #%d state -> %s", id, state)
+			return saveStore(store)
+		}
+	}
+	return fmt.Errorf("task #%d not found", id)
+}
+
+// ForceUpdateState transitions a task to any state, bypassing forward-only guard.
+// Use ONLY for explicit user actions (Reset button, Stop button) or crash recovery.
+func ForceUpdateState(id int, state TaskState) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	store, err := loadStore()
+	if err != nil {
+		return err
+	}
+	for i := range store.Tasks {
+		if store.Tasks[i].ID == id {
+			old := store.Tasks[i].State
+			store.Tasks[i].State = state
+			if state == StateDone {
+				store.Tasks[i].Done = true
+			}
+			log.Printf("[queue] task #%d state FORCE %s -> %s", id, old, state)
 			return saveStore(store)
 		}
 	}
@@ -311,6 +418,8 @@ func IncrementPlanAttempts(id int) (int, error) {
 	return 0, fmt.Errorf("task #%d not found", id)
 }
 
+// SetFailReason stores a failure reason WITHOUT changing the task state.
+// The task stays in its current state (forward-only guarantee).
 func SetFailReason(id int, reason string) error {
 	storeMu.Lock()
 	defer storeMu.Unlock()
@@ -322,14 +431,11 @@ func SetFailReason(id int, reason string) error {
 	for i := range store.Tasks {
 		if store.Tasks[i].ID == id {
 			store.Tasks[i].FailReason = reason
-			store.Tasks[i].State = StatePending
-			store.Tasks[i].SessionID = ""
-			store.Tasks[i].CurrentStep = 0
 			if err := saveStore(store); err != nil {
 				return err
 			}
-			log.Printf("[queue] task #%d back to pending: %s", id, reason)
-			notifyWebhook("task_retry", store.Tasks[i])
+			log.Printf("[queue] task #%d fail_reason: %s", id, reason)
+			notifyWebhook("task_failed", store.Tasks[i])
 			return nil
 		}
 	}
@@ -485,6 +591,8 @@ func priorityRank(p string) int {
 // RecoverRunning resets tasks stuck in "running" state after a service restart.
 // Only resets tasks WITHOUT a SessionID (those can't be resumed).
 // Tasks with SessionID are left in running state for RecoverAndResume to handle.
+// NOTE: This is a crash-recovery function — it intentionally bypasses the
+// forward-only guard since the service crashed and the running state is stale.
 func RecoverRunning() ([]Task, error) {
 	storeMu.Lock()
 	defer storeMu.Unlock()

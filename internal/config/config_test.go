@@ -390,3 +390,19 @@ func TestDefaultSkeleton(t *testing.T) {
 		t.Error("Config.Skeleton.WebSearch should default to true")
 	}
 }
+
+func TestKnownSkeletonSteps_PencilExists(t *testing.T) {
+	step, ok := KnownSkeletonSteps["pencil"]
+	if !ok {
+		t.Fatal("pencil not found in KnownSkeletonSteps")
+	}
+	if step.Label != "UI Design" {
+		t.Errorf("expected label 'UI Design', got %q", step.Label)
+	}
+	if step.PromptVersion < 1 {
+		t.Error("pencil PromptVersion should be >= 1")
+	}
+	if step.ReadOnly {
+		t.Error("pencil step should not be read-only")
+	}
+}

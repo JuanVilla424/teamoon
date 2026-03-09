@@ -187,7 +187,7 @@ func StartUsageFetcher(projectDir string) {
 					log.Printf("[usage] fetch failed: %v", err)
 				}
 				usageMu.Unlock()
-				time.Sleep(2 * time.Minute)
+				time.Sleep(5 * time.Minute)
 			}
 		}()
 	})

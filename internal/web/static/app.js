@@ -208,6 +208,7 @@ var mcpCatalogTab = "all"; // "trending" | "all" | "installed"
 var mcpCatalogCursor = "";
 var mcpCatalogHasMore = false;
 var mcpCatalogVersion = 0;
+var mcpCatalogError = false;
 var marketplaceSubTab = "mcp";
 var skillsData = null;
 var skillsCatalogResults = null;
@@ -217,6 +218,8 @@ var skillsCatalogTab = "all"; // "trending" | "all" | "installed"
 var skillsCatalogVersion = 0;
 var skillsShowCount = 100;
 var pluginsData = null;
+var pluginsCatalogTab = "all"; // "all" | "installed"
+var pluginsCatalogSearch = "";
 var projectAutopilots = [];
 var updateCheckResult = null;
 var updateRunning = false;
@@ -454,12 +457,20 @@ function api(method, path, body, cb){
 }
 
 /* ── MCP Catalog helpers ── */
-function loadMCPCatalog(query, cursor){
+function loadMCPCatalog(query, cursor, onDone){
   if(!cursor && !mcpCatalogLoaded){ mcpCatalogResults = "loading"; render(); }
+  mcpCatalogError = false;
   var url = "/api/mcp/catalog?limit=100";
   if(query) url += "&search=" + encodeURIComponent(query);
   if(cursor) url += "&cursor=" + encodeURIComponent(cursor);
-  api("GET", url, null, function(d){
+  api("GET", url, null, function(d, ok){
+    if(!ok || d.error){
+      mcpCatalogError = true;
+      mcpCatalogLoaded = true;
+      if(onDone) onDone(false);
+      render();
+      return;
+    }
     var items = d.servers || [];
     if(cursor && mcpCatalogResults && mcpCatalogResults !== "loading"){
       mcpCatalogResults = mcpCatalogResults.concat(items);
@@ -470,6 +481,7 @@ function loadMCPCatalog(query, cursor){
     mcpCatalogHasMore = !!d.next_cursor;
     mcpCatalogLoaded = true;
     mcpCatalogVersion++;
+    if(onDone) onDone(true);
     render();
   });
 }
@@ -490,17 +502,18 @@ function loadSkillsCatalog(query){
 var mcpSearchTimer = null;
 var skillsSearchTimer = null;
 
-function doInstall(name, pkg, regType, envVars, btn){
+function doInstall(name, pkg, regType, envVars, btn, onSuccess){
   var restore = btnLoading(btn, t("mkt.catalog.installing"));
   api("POST", "/api/mcp/install", {name: name, package: pkg, registry_type: regType || "npm", env_vars: envVars}, function(d){
     if(restore) restore();
     if(d.ok){
       mcpData = null;
+      configData = null;
       mcpCatalogLoaded = false;
       mcpCatalogResults = null;
-      mcpCatalogSearch = "";
       toast(t("mkt.catalog.installed_toast",{name:name}), "success");
-      render();
+      if(onSuccess) onSuccess();
+      loadConfig(function(){ render(); });
     } else {
       toast(t("common.error_unknown",{error:d.error||"unknown"}), "error");
     }
@@ -658,7 +671,7 @@ function computeContentKey(v){
       for(var i=0;i<jbs.length;i++) jk += jbs[i].id + "," + jbs[i].status + "," + jbs[i].enabled + ";";
       return lp + "j:" + jk;
     case "config":
-      return lp + "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + (templatesCache ? templatesCache.length : 0) + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "") + ":" + (pluginsData ? "1" : "0");
+      return lp + "cfg:" + configLoaded + ":" + configTab + ":" + configSubTab + ":" + configSetupSubTab + ":" + (configEditing || "") + ":" + (templatesCache ? templatesCache.length : 0) + ":" + (cfgEditingTemplate ? cfgEditingTemplate.id : "") + ":" + (mcpData ? "1" : "0") + ":" + mcpCatalogLoaded + ":" + mcpCatalogTab + ":" + mcpCatalogVersion + ":" + marketplaceSubTab + ":" + (skillsData ? skillsData.length : "n") + ":" + skillsCatalogLoaded + ":" + skillsCatalogTab + ":" + skillsCatalogVersion + ":" + skillsShowCount + ":" + updateRunning + ":" + (selectedMktItem ? selectedMktItem.name : "") + ":" + (pluginsData ? "1" : "0") + ":" + pluginsCatalogTab + ":" + pluginsCatalogSearch;
     case "login":
       return lp + "login:1";
     case "setup":
@@ -4636,6 +4649,62 @@ function renderSetupMCP(content){
   };
   content.appendChild(btn);
   content.appendChild(prog);
+
+  // Optional MCPs section
+  var optSection = div("setup-section");
+  optSection.appendChild(el("h4","setup-subtitle",["Optional MCPs"]));
+  var optList = div("setup-progress");
+  var optBtn = el("button","btn btn-primary btn-sm",["Install Selected"]);
+  optBtn.style.display = "none";
+  var optChecks = {};
+
+  api("GET","/api/mcp/optional",null,function(items){
+    if(!items || !items.length) return;
+    items.forEach(function(m){
+      var row = div("mcp-toggle");
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = false;
+      cb.disabled = m.installed;
+      optChecks[m.name] = cb;
+      cb.onchange = function(){
+        var any = false;
+        for(var k in optChecks) if(optChecks[k].checked) any = true;
+        optBtn.style.display = any ? "" : "none";
+      };
+      row.appendChild(cb);
+      row.appendChild(span("label", m.name));
+      row.appendChild(span("version", m.description));
+      if(m.installed) row.appendChild(span("skeleton-tag mcp", "installed"));
+      optList.appendChild(row);
+    });
+    optBtn.style.display = "none";
+  });
+
+  optBtn.onclick = function(){
+    var selected = [];
+    for(var k in optChecks) if(optChecks[k].checked) selected.push(k);
+    if(!selected.length) return;
+    var optProg = div("setup-progress");
+    optSection.appendChild(optProg);
+    var restore = btnLoading(optBtn, "Installing...");
+    streamStep("/api/onboarding/mcp/optional", {selected:selected}, optProg, function(p, evt){
+      var cls = evt.status === "done" ? "ok" : (evt.status === "skipped" ? "skip" : "running");
+      var iconText = evt.status === "done" ? "\u2713" : (evt.status === "skipped" ? "~" : "\u2022");
+      var item = div("setup-progress-item "+cls);
+      item.appendChild(span("icon", iconText));
+      item.appendChild(span("label", evt.name));
+      p.appendChild(item);
+    }, function(status){
+      if(restore) restore();
+      if(status === "success") optProg.appendChild(div("setup-status ok",["Optional MCPs installed"]));
+      else optProg.appendChild(div("setup-status err",["Installation failed"]));
+    });
+  };
+
+  optSection.appendChild(optList);
+  optSection.appendChild(optBtn);
+  content.appendChild(optSection);
 }
 
 /* ── Configuration View ── */
@@ -5165,7 +5234,7 @@ function mkLeaderboardRow(item, rank, type){
     img.alt = item.name;
     img.onerror = function(){ iconWrap.textContent = "\u2699"; img.remove(); };
     iconWrap.appendChild(img);
-  } else if(type === "mcp"){
+  } else if(type === "mcp" || type === "plugin"){
     iconWrap.textContent = "\u2699";
   } else {
     iconWrap.textContent = "\u26A1";
@@ -5175,7 +5244,7 @@ function mkLeaderboardRow(item, rank, type){
   // Info column
   var info = div("mkt-info");
   info.appendChild(span("mkt-name", item.name));
-  var source = type === "mcp" ? (item.package || "") : (item.source || "");
+  var source = type === "mcp" ? (item.package || "") : type === "plugin" ? (item.marketplace || "") : (item.source || "");
   if(source) info.appendChild(span("mkt-source", source));
   if(item.description) info.appendChild(span("mkt-desc", item.description));
   row.appendChild(info);
@@ -5185,6 +5254,7 @@ function mkLeaderboardRow(item, rank, type){
   if(type === "mcp" && item.registry_type) meta.appendChild(span("mkt-version", item.registry_type));
   if(type === "mcp" && item.version) meta.appendChild(span("mkt-version", "v" + item.version));
   if(type === "skill" && item.installs > 0) meta.appendChild(span("mkt-installs", formatInstalls(item.installs)));
+  if(type === "plugin" && item.installed) meta.appendChild(span("badge badge-" + (item.enabled !== false ? "success" : "muted"), item.enabled !== false ? t("plugins.enabled") : t("plugins.disabled")));
   if(item.env_vars && item.env_vars.length > 0){
     var envNames = item.env_vars.map(function(v){ return v.name + (v.is_required ? "*" : ""); }).join(", ");
     meta.appendChild(span("mkt-env-hint", t("mkt.catalog.env_hint", {names: envNames})));
@@ -5207,6 +5277,23 @@ function mkLeaderboardRow(item, rank, type){
             return;
           }
           doInstall(s.name, s.package, s.registry_type, {}, btn);
+        };
+      })(item, installBtn);
+    } else if(type === "plugin"){
+      installBtn.onclick = (function(plug, btn){
+        return function(e){
+          e.stopPropagation();
+          var restore = btnLoading(btn, t("plugins.installing"));
+          api("POST","/api/plugins/install",{name:plug.name, marketplace:plug.marketplace},function(d){
+            if(restore) restore();
+            if(d.ok){
+              pluginsData = null; configData = null;
+              toast(t("plugins.installed_toast",{name:plug.name}),"success");
+              loadConfig(function(){ render(); });
+            } else {
+              toast(t("common.error",{error:d.error||"unknown"}),"error");
+            }
+          });
         };
       })(item, installBtn);
     } else {
@@ -5392,6 +5479,24 @@ function renderMktDetail(root, item, type){
   // Actions
   var actSec = div("mkt-detail-actions");
   if(item.installed){
+    // Enable/disable toggle for MCP items
+    if(type === "mcp" && !mcpData.using_global){
+      var toggleRow = div("mcp-toggle");
+      toggleRow.style.marginBottom = "12px";
+      var toggleCb = el("input","");
+      toggleCb.type = "checkbox";
+      toggleCb.checked = item.enabled !== false;
+      toggleCb.setAttribute("aria-label", t("mkt.manage.toggle_aria", {name: item.name}));
+      toggleCb.onchange = function(){
+        api("POST","/api/mcp/toggle",{name: item.name, enabled: toggleCb.checked},function(d){
+          if(d.ok){ mcpData = null; configData = null; toast(t("mkt.manage.saved"),"success"); loadConfig(function(){ render(); }); }
+          else { toast(t("common.error",{error:d.error||"unknown"}),"error"); toggleCb.checked = !toggleCb.checked; }
+        });
+      };
+      toggleRow.appendChild(toggleCb);
+      toggleRow.appendChild(span("mcp-server-name", item.enabled !== false ? t("plugins.enabled") : t("plugins.disabled")));
+      actSec.appendChild(toggleRow);
+    }
     var unBtn = el("button","btn btn-danger",[t("common.uninstall")]);
     unBtn.onclick = (function(itm, tp, btn){
       return function(){
@@ -5402,16 +5507,17 @@ function renderMktDetail(root, item, type){
         api("POST", endpoint, payload, function(d){
           if(restore) restore();
           if(d.ok){
+            configData = null;
             if(tp === "mcp"){
               mcpData = null; mcpCatalogLoaded = false;
             } else if(tp === "plugin"){
               pluginsData = null;
             } else {
-              skillsData = null; skillsCatalogLoaded = false; skillsCatalogResults = null; skillsCatalogSearch = "";
+              skillsData = null; skillsCatalogLoaded = false; skillsCatalogResults = null;
             }
             selectedMktItem = null; selectedMktType = "";
             toast(t("mkt.catalog.uninstalled", {name: itm.name}), "success");
-            render();
+            loadConfig(function(){ render(); });
           } else {
             toast(t("common.error", {error: d.error || "unknown"}), "error");
           }
@@ -5451,8 +5557,7 @@ function renderMktDetail(root, item, type){
               toast(t("mkt.catalog.required_hint", {fields: missing.join(", ")}), "error");
               return;
             }
-            doInstall(itm.name, itm.package, itm.registry_type, envVars, btn);
-            selectedMktItem = null; selectedMktType = "";
+            doInstall(itm.name, itm.package, itm.registry_type, envVars, btn, function(){ selectedMktItem = null; selectedMktType = ""; });
           };
         })(item, inputs, instBtn);
         actSec.appendChild(instBtn);
@@ -5460,8 +5565,7 @@ function renderMktDetail(root, item, type){
         var instBtn = el("button","btn btn-success",[t("mkt.catalog.install")]);
         instBtn.onclick = (function(itm, btn){
           return function(){
-            doInstall(itm.name, itm.package, itm.registry_type, {}, btn);
-            selectedMktItem = null; selectedMktType = "";
+            doInstall(itm.name, itm.package, itm.registry_type, {}, btn, function(){ selectedMktItem = null; selectedMktType = ""; });
           };
         })(item, instBtn);
         actSec.appendChild(instBtn);
@@ -5474,10 +5578,10 @@ function renderMktDetail(root, item, type){
           api("POST","/api/plugins/install",{name: plug.name, marketplace: plug.marketplace},function(d){
             if(restore) restore();
             if(d.ok){
-              pluginsData = null;
+              pluginsData = null; configData = null;
               selectedMktItem = null; selectedMktType = "";
               toast(t("plugins.installed_toast", {name: plug.name}), "success");
-              render();
+              loadConfig(function(){ render(); });
             } else {
               toast(t("common.error", {error: d.error || "unknown"}), "error");
             }
@@ -5575,7 +5679,21 @@ function renderMarketplaceMCP(root){
   // Filter items by tab
   var items = mcpCatalogResults || [];
   if(mcpCatalogTab === "installed"){
-    items = items.filter(function(i){ return i.installed; });
+    // Merge local-config MCPs that aren't in the catalog
+    var catalogInstalled = items.filter(function(i){ return i.installed; });
+    var catalogNames = {};
+    catalogInstalled.forEach(function(i){ catalogNames[i.name] = true; });
+    var localServers = mcpData.custom || mcpData.global || {};
+    Object.keys(localServers).forEach(function(name){
+      if(catalogNames[name]) return;
+      var sv = localServers[name];
+      catalogInstalled.push({
+        name: name, title: name, package: sv.command + " " + (sv.args||[]).join(" "),
+        installed: true, localOnly: true, enabled: sv.enabled !== false,
+        description: sv.command + " " + (sv.args||[]).join(" ")
+      });
+    });
+    items = catalogInstalled;
   } else if(mcpCatalogTab === "trending"){
     items = items.slice().sort(function(a,b){
       if(a.updated_at && b.updated_at) return b.updated_at.localeCompare(a.updated_at);
@@ -5592,76 +5710,29 @@ function renderMarketplaceMCP(root){
     root.appendChild(list);
   }
 
+  // Error state
+  if(mcpCatalogError){
+    var errWrap = div("mkt-empty");
+    errWrap.textContent = t("mkt.catalog.error_loading");
+    var retryBtn = el("button","btn btn-sm btn-primary",[t("common.retry")]);
+    retryBtn.style.marginTop = "8px";
+    retryBtn.onclick = function(){ mcpCatalogError = false; mcpCatalogLoaded = false; render(); };
+    errWrap.appendChild(document.createElement("br"));
+    errWrap.appendChild(retryBtn);
+    root.appendChild(errWrap);
+  }
+
   // Load More
-  if(mcpCatalogHasMore && mcpCatalogTab !== "installed"){
+  if(mcpCatalogHasMore && mcpCatalogTab !== "installed" && !mcpCatalogError){
     var moreWrap = div("mkt-load-more");
     var moreBtn = el("button","btn btn-sm",[t("mkt.catalog.load_more")]);
-    moreBtn.onclick = function(){ btnLoading(moreBtn, t("mkt.catalog.loading")); loadMCPCatalog(mcpCatalogSearch, mcpCatalogCursor); };
+    moreBtn.onclick = function(){
+      var restore = btnLoading(moreBtn, t("mkt.catalog.loading"));
+      loadMCPCatalog(mcpCatalogSearch, mcpCatalogCursor, function(ok){ if(!ok && restore) restore(); });
+    };
     moreWrap.appendChild(moreBtn);
     root.appendChild(moreWrap);
   }
-
-  // Separator + Manage section
-  var sep = document.createElement("hr");
-  sep.className = "mkt-separator";
-  root.appendChild(sep);
-
-  var manageSec = div("config-section");
-  manageSec.appendChild(el("h3","config-section-title",[t("mkt.manage.title")]));
-
-  if(mcpData.using_global){
-    manageSec.appendChild(span("config-empty", t("mkt.manage.global_notice")));
-    if(mcpData.global){
-      var gList = div("config-grid");
-      Object.keys(mcpData.global).forEach(function(name){
-        var gs = mcpData.global[name];
-        var row = div("mcp-toggle");
-        row.appendChild(span("mcp-server-name", name));
-        row.appendChild(span("mcp-server-cmd", gs.command + " " + (gs.args||[]).join(" ")));
-        gList.appendChild(row);
-      });
-      manageSec.appendChild(gList);
-    }
-    var initBtn = el("button","btn btn-primary btn-sm",[t("mkt.manage.custom_config")]);
-    initBtn.style.marginTop = "12px";
-    initBtn.onclick = function(){
-      var restore = btnLoading(initBtn, t("mkt.manage.initializing"));
-      api("POST","/api/mcp/init",{},function(d){
-        if(restore) restore();
-        if(d.ok){ mcpData = null; toast(t("mkt.manage.initialized"),"success"); render(); }
-        else { toast(t("common.error", {error: d.error||"unknown"}),"error"); }
-      });
-    };
-    manageSec.appendChild(initBtn);
-  } else {
-    var servers = mcpData.custom || {};
-    var names = Object.keys(servers);
-    if(names.length === 0){
-      manageSec.appendChild(span("config-empty", t("mkt.manage.no_servers")));
-    } else {
-      var toggleList = div("config-grid");
-      names.forEach(function(name){
-        var sv = servers[name];
-        var row = div("mcp-toggle");
-        var cb = el("input","");
-        cb.type = "checkbox";
-        cb.checked = sv.enabled;
-        cb.setAttribute("aria-label", t("mkt.manage.toggle_aria", {name: name}));
-        cb.onchange = function(){
-          api("POST","/api/mcp/toggle",{name:name, enabled:cb.checked},function(d){
-            if(d.ok){ mcpData = null; toast(t("mkt.manage.saved"),"success"); render(); }
-            else { toast(t("common.error", {error: d.error||"unknown"}),"error"); cb.checked = !cb.checked; }
-          });
-        };
-        row.appendChild(cb);
-        row.appendChild(span("mcp-server-name", name));
-        row.appendChild(span("mcp-server-cmd", sv.command + " " + (sv.args||[]).join(" ")));
-        toggleList.appendChild(row);
-      });
-      manageSec.appendChild(toggleList);
-    }
-  }
-  root.appendChild(manageSec);
 }
 
 function renderMarketplaceSkills(root){
@@ -5756,112 +5827,55 @@ function renderMarketplacePlugins(root){
   var installedNames = {};
   installed.forEach(function(p){ installedNames[p.name] = true; });
 
-  // Installed plugins section
-  var instSec = div("config-section");
-  instSec.appendChild(el("h3","config-section-title",[t("plugins.installed") + " (" + installed.length + ")"]));
+  // Header: search + tabs
+  var tabs = [{id:"all",label:t("mkt.catalog.tab.all")},{id:"installed",label:t("mkt.catalog.tab.installed")}];
+  root.appendChild(mkMarketplaceHeader(
+    pluginsCatalogSearch,
+    function(val){ pluginsCatalogSearch = val; render(); },
+    tabs, pluginsCatalogTab,
+    function(tab){ pluginsCatalogTab = tab; render(); }
+  ));
 
-  if(installed.length === 0){
-    instSec.appendChild(span("mkt-empty", t("plugins.no_plugins")));
-  } else {
-    var list = div("mkt-list");
+  // Build unified items list
+  var items = [];
+  if(pluginsCatalogTab === "installed"){
     installed.forEach(function(p){
-      var plugDesc = "";
+      var desc = "";
       for(var ri = 0; ri < recommended.length; ri++){
-        if(recommended[ri].name === p.name){ plugDesc = recommended[ri].description || ""; break; }
+        if(recommended[ri].name === p.name){ desc = recommended[ri].description || ""; break; }
       }
-      var detailItem = {name: p.name, marketplace: p.marketplace, enabled: p.enabled, installed: true, description: plugDesc};
-      var row = div("mkt-row");
-      row.style.cursor = "pointer";
-      row.onclick = (function(itm){ return function(){
-        selectedMktItem = itm; selectedMktType = "plugin"; render();
-      }; })(detailItem);
-      var iconWrap = div("mkt-icon");
-      iconWrap.textContent = "\u2699";
-      row.appendChild(iconWrap);
-      var info = div("mkt-info");
-      info.appendChild(span("mkt-name", p.name));
-      if(p.marketplace) info.appendChild(span("mkt-source", p.marketplace));
-      row.appendChild(info);
-      var meta = div("mkt-meta");
-      meta.appendChild(span("badge badge-" + (p.enabled ? "success" : "muted"), p.enabled ? t("plugins.enabled") : t("plugins.disabled")));
-      row.appendChild(meta);
-      var action = div("mkt-action");
-      var unBtn = el("button","btn btn-sm btn-danger",[t("plugins.uninstall")]);
-      unBtn.onclick = (function(plug, btn){ return function(e){
-        e.stopPropagation();
-        if(!confirm(t("plugins.confirm_uninstall",{name:plug.name}))) return;
-        var restore = btnLoading(btn, t("plugins.uninstalling"));
-        api("POST","/api/plugins/uninstall",{name:plug.name},function(d){
-          if(restore) restore();
-          if(d.ok){
-            pluginsData = null;
-            toast(t("plugins.uninstalled_toast",{name:plug.name}),"success");
-            render();
-          } else {
-            toast(t("common.error_unknown",{error:d.error||"unknown"}),"error");
-          }
-        });
-      }; })(p, unBtn);
-      action.appendChild(unBtn);
-      row.appendChild(action);
-      list.appendChild(row);
+      items.push({name: p.name, marketplace: p.marketplace, enabled: p.enabled, installed: true, description: desc});
     });
-    instSec.appendChild(list);
-  }
-  root.appendChild(instSec);
-
-  // Recommended section
-  if(recommended.length > 0){
-    var sep = document.createElement("hr");
-    sep.className = "mkt-separator";
-    root.appendChild(sep);
-
-    var recSec = div("config-section");
-    recSec.appendChild(el("h3","config-section-title",[t("plugins.recommended")]));
-
-    var recList = div("mkt-list");
+  } else {
     recommended.forEach(function(r){
       var isInst = !!installedNames[r.name];
-      var detailItem = {name: r.name, marketplace: r.marketplace, enabled: isInst, installed: isInst, description: r.description || ""};
-      var row = div("mkt-row");
-      row.style.cursor = "pointer";
-      row.onclick = (function(itm){ return function(){
-        selectedMktItem = itm; selectedMktType = "plugin"; render();
-      }; })(detailItem);
-      var iconWrap = div("mkt-icon");
-      iconWrap.textContent = "\u2699";
-      row.appendChild(iconWrap);
-      var info = div("mkt-info");
-      info.appendChild(span("mkt-name", r.name));
-      info.appendChild(span("mkt-source", r.marketplace));
-      if(r.description) info.appendChild(span("mkt-desc", r.description));
-      row.appendChild(info);
-      var action = div("mkt-action");
+      var enabledState = true;
       if(isInst){
-        action.appendChild(span("mkt-installed-badge", t("plugins.installed")));
-      } else {
-        var installBtn = el("button","btn btn-success btn-sm",[t("plugins.install")]);
-        installBtn.onclick = (function(rec, btn){ return function(e){
-          e.stopPropagation();
-          var restore = btnLoading(btn, t("plugins.installing"));
-          api("POST","/api/plugins/install",{name:rec.name, marketplace:rec.marketplace},function(d){
-            if(restore) restore();
-            if(d.ok){
-              pluginsData = null;
-              toast(t("plugins.installed_toast",{name:rec.name}),"success");
-              render();
-            } else {
-              toast(t("common.error_unknown",{error:d.error||"unknown"}),"error");
-            }
-          });
-        }; })(r, installBtn);
-        action.appendChild(installBtn);
+        for(var ii=0; ii<installed.length; ii++){
+          if(installed[ii].name === r.name){ enabledState = installed[ii].enabled; break; }
+        }
       }
-      row.appendChild(action);
-      recList.appendChild(row);
+      items.push({name: r.name, marketplace: r.marketplace, enabled: enabledState, installed: isInst, description: r.description || ""});
     });
-    recSec.appendChild(recList);
-    root.appendChild(recSec);
+  }
+
+  // Apply search filter
+  var search = pluginsCatalogSearch.toLowerCase();
+  if(search){
+    items = items.filter(function(i){
+      return i.name.toLowerCase().indexOf(search) !== -1 ||
+             (i.description && i.description.toLowerCase().indexOf(search) !== -1) ||
+             (i.marketplace && i.marketplace.toLowerCase().indexOf(search) !== -1);
+    });
+  }
+
+  // Leaderboard
+  if(items.length === 0){
+    root.appendChild(span("mkt-empty", pluginsCatalogTab === "installed" ? t("plugins.no_plugins") : t("mkt.catalog.no_plugins")));
+  } else {
+    var list = div("mkt-list");
+    items.forEach(function(item, i){ list.appendChild(mkLeaderboardRow(item, i + 1, "plugin")); });
+    root.appendChild(list);
   }
 }
 
@@ -6402,6 +6416,56 @@ function renderCfgSetupMCP(container){
   };
   container.appendChild(btn);
   container.appendChild(prog);
+
+  // Optional MCPs in config setup
+  var optDiv = div("config-section");
+  optDiv.appendChild(el("h4","config-section-title",["Optional MCPs"]));
+  optDiv.appendChild(el("p","config-section-desc",["Additional tools for specialized workflows."]));
+  var optList = div("setup-progress");
+  var optBtn = el("button","btn btn-primary btn-sm",["Install Selected"]);
+  optBtn.style.display = "none";
+  var optCbs = {};
+  api("GET","/api/mcp/optional",null,function(items){
+    if(!items || !items.length) return;
+    items.forEach(function(m){
+      var row = div("mcp-toggle");
+      var cb = document.createElement("input");
+      cb.type = "checkbox"; cb.disabled = m.installed;
+      optCbs[m.name] = cb;
+      cb.onchange = function(){
+        var any = false;
+        for(var k in optCbs) if(optCbs[k].checked) any = true;
+        optBtn.style.display = any ? "" : "none";
+      };
+      row.appendChild(cb);
+      row.appendChild(span("label", m.name));
+      row.appendChild(span("version", m.description));
+      if(m.installed) row.appendChild(span("skeleton-tag mcp", "installed"));
+      optList.appendChild(row);
+    });
+  });
+  optBtn.onclick = function(){
+    var sel = [];
+    for(var k in optCbs) if(optCbs[k].checked) sel.push(k);
+    if(!sel.length) return;
+    var optProg = div("setup-progress");
+    optDiv.appendChild(optProg);
+    var restore = btnLoading(optBtn, "Installing...");
+    streamStepStandalone("/api/onboarding/mcp/optional", {selected:sel}, optProg, function(p, evt){
+      var ok = evt.status === "done"; var skip = evt.status === "skipped";
+      var item = div("setup-progress-item " + (ok ? "ok" : skip ? "skip" : "error"));
+      item.appendChild(span("icon", ok ? "\u2713" : skip ? "~" : "\u2717"));
+      item.appendChild(span("label", evt.name));
+      p.appendChild(item);
+    }, function(status){
+      if(restore) restore();
+      if(status === "success") optProg.appendChild(div("setup-status ok",["Optional MCPs installed"]));
+      else optProg.appendChild(div("setup-status err",["Installation failed"]));
+    });
+  };
+  optDiv.appendChild(optList);
+  optDiv.appendChild(optBtn);
+  container.appendChild(optDiv);
 }
 
 function renderCfgSetupPlugins(container){

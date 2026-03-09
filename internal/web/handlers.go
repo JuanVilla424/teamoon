@@ -208,6 +208,33 @@ func (s *Server) handleTaskArchive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+func (s *Server) handleTaskBulkArchive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		IDs []int `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	for _, id := range req.IDs {
+		if s.store.engineMgr.IsRunning(id) {
+			s.store.engineMgr.Stop(id)
+		}
+		s.clearGenerating(id)
+	}
+	count, err := queue.BulkArchive(req.IDs)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	go s.refreshAndBroadcast()
+	writeJSON(w, map[string]any{"ok": true, "archived": count})
+}
+
 func (s *Server) handleTaskReplan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, 405, "method not allowed")
@@ -275,10 +302,12 @@ func (s *Server) handleTaskStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.store.engineMgr.IsRunning(req.ID) {
-		s.store.engineMgr.Stop(req.ID)
+		go func() {
+			s.store.engineMgr.Stop(req.ID)
+			s.refreshAndBroadcast()
+		}()
 	}
 	s.clearGenerating(req.ID)
-	s.refreshAndBroadcast()
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -390,6 +419,9 @@ func (s *Server) webSend(taskID int) func(tea.Msg) {
 				s.setGenerating(m.TaskID, nil) // autopilot path — cancel managed by engine
 			} else if m.State == queue.StatePlanned || m.State == queue.StatePending {
 				s.clearGenerating(m.TaskID)
+			}
+			if m.State == queue.StateDone {
+				s.store.logBuf.CloseTaskFile(m.TaskID)
 			}
 			s.store.logBuf.Add(logs.LogEntry{
 				Time:    time.Now(),
@@ -899,11 +931,11 @@ func (s *Server) handleProjectAutopilotStart(w http.ResponseWriter, r *http.Requ
 	}
 	send := s.webSend(0)
 
-	ok := s.store.engineMgr.StartProject(req.Project, cfg.MaxConcurrent, func(ctx context.Context) {
+	ok := s.store.engineMgr.StartProject(req.Project, func(ctx context.Context) {
 		engine.RunProjectLoop(ctx, req.Project, cfg, planFn, send, s.store.engineMgr)
 	})
 	if !ok {
-		writeErr(w, 409, "autopilot already running or max_concurrent reached")
+		writeErr(w, 409, "autopilot already running for this project")
 		return
 	}
 	s.refreshAndBroadcast()
@@ -926,8 +958,10 @@ func (s *Server) handleProjectAutopilotStop(w http.ResponseWriter, r *http.Reque
 		writeErr(w, 400, "project required")
 		return
 	}
-	s.store.engineMgr.StopProject(req.Project)
-	s.refreshAndBroadcast()
+	go func() {
+		s.store.engineMgr.StopProject(req.Project)
+		s.refreshAndBroadcast()
+	}()
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -1095,16 +1129,9 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 		promptBuf.WriteString(req.Message)
 	} else {
-	promptBuf.WriteString("You are a project assistant for teamoon. You can:\n")
-	promptBuf.WriteString("1. CONVERSE naturally about the project — answer questions, discuss architecture, debug problems, explain code, brainstorm ideas.\n")
-	promptBuf.WriteString("2. CREATE TASKS when the user asks you to plan work, implement features, or fix bugs — use [TASK_CREATE] directives.\n")
-	promptBuf.WriteString("3. CREATE JOBS when the user asks to schedule recurring work — use [JOB_CREATE] directives.\n")
-	promptBuf.WriteString("4. INITIALIZE PROJECTS when the user asks to create a new project — use [PROJECT_INIT] + [TASK_CREATE].\n\n")
-	promptBuf.WriteString("Default behavior: Have a helpful conversation. Only emit [TASK_CREATE]/[JOB_CREATE]/[PROJECT_INIT] directives when the user explicitly asks to create tasks, plan work, schedule jobs, or start a new project.\n")
-	promptBuf.WriteString("Do NOT use Skill tool. Do NOT load workflows. Go straight to work.\n\n")
-	promptBuf.WriteString("When creating a NEW project, complete ALL research steps FIRST (WebSearch, name validation), then emit [PROJECT_INIT] + [TASK_CREATE] directives at the end.\n")
-	promptBuf.WriteString("When emitting directives: emit ONLY ONCE per request. If hooks fire after, do NOT emit additional directives.\n")
-	promptBuf.WriteString("NEVER create Noop/placeholder directives. Only create meaningful directives that directly address the user's request.\n\n")
+	promptBuf.WriteString("You are a project assistant for the selected project. You can have natural conversations — answer questions about the project, discuss architecture, help debug issues, explain code, and provide guidance. You can ALSO create tasks and jobs when the user asks you to plan, build, or schedule something. Adapt to what the user needs: conversation or action.\n\n")
+	promptBuf.WriteString("## DIRECTIVE USAGE\n\n")
+	promptBuf.WriteString("When the user asks you to create tasks, plan work, build features, or schedule jobs, emit [TASK_CREATE] or [JOB_CREATE] directives as appropriate. When the user is just chatting, asking questions, or discussing ideas, respond conversationally WITHOUT emitting directives. Match the user intent.\n\n")
 	promptBuf.WriteString("## Capabilities\n\n")
 	promptBuf.WriteString("### Creating Tasks\n")
 	promptBuf.WriteString("Format:\n")
@@ -2333,20 +2360,31 @@ func (s *Server) handleMCPInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Also add to teamoon config if custom config exists
+	// Extract short name for KnownSkeletonSteps lookup and config key
+	shortName := req.Name
+	if idx := strings.LastIndex(req.Name, "/"); idx >= 0 {
+		shortName = req.Name[idx+1:]
+	}
+
+	// Also add to teamoon config (auto-init if needed)
 	cfg, err := config.Load()
-	if err == nil && cfg.MCPServers != nil {
-		mcp := config.MCPServer{
-			Command: command,
-			Args:    args,
-			Enabled: true,
+	if err == nil {
+		if cfg.MCPServers == nil {
+			config.InitMCPFromGlobal(&cfg)
 		}
-		if step, ok := config.KnownSkeletonSteps[req.Name]; ok {
-			mcp.SkeletonStep = &step
+		if cfg.MCPServers != nil {
+			mcp := config.MCPServer{
+				Command: command,
+				Args:    args,
+				Enabled: true,
+			}
+			if step, ok := config.KnownSkeletonSteps[shortName]; ok {
+				mcp.SkeletonStep = &step
+			}
+			cfg.MCPServers[shortName] = mcp
+			config.Save(cfg)
+			s.cfg = cfg
 		}
-		cfg.MCPServers[req.Name] = mcp
-		config.Save(cfg)
-		s.cfg = cfg
 	}
 
 	writeJSON(w, map[string]bool{"ok": true})
@@ -2369,17 +2407,23 @@ func (s *Server) handleMCPUninstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := config.RemoveMCPFromGlobal(req.Name); err != nil {
-		writeErr(w, 500, "uninstall failed: "+err.Error())
-		return
-	}
+	globalErr := config.RemoveMCPFromGlobal(req.Name)
 
 	// Also remove from teamoon config if present
+	var localRemoved bool
 	cfg, err := config.Load()
 	if err == nil && cfg.MCPServers != nil {
-		delete(cfg.MCPServers, req.Name)
-		config.Save(cfg)
-		s.cfg = cfg
+		if _, exists := cfg.MCPServers[req.Name]; exists {
+			delete(cfg.MCPServers, req.Name)
+			config.Save(cfg)
+			s.cfg = cfg
+			localRemoved = true
+		}
+	}
+
+	if globalErr != nil && !localRemoved {
+		writeErr(w, 500, "uninstall failed: "+globalErr.Error())
+		return
 	}
 
 	writeJSON(w, map[string]bool{"ok": true})
@@ -2737,6 +2781,35 @@ func (s *Server) handleOnboardingHooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOnboardingMCP(w http.ResponseWriter, r *http.Request) {
 	s.sseOnboarding(w, r, onboarding.StreamMCP)
+}
+
+func (s *Server) handleMCPOptionalList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, onboarding.ListOptionalMCP())
+}
+
+func (s *Server) handleOnboardingMCPOptional(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Selected []string `json:"selected"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	s.sseOnboarding(w, r, func(progress onboarding.ProgressFunc) error {
+		return onboarding.StreamOptionalMCP(body.Selected, progress)
+	})
+	// Reload config after optional MCP install writes to disk
+	if freshCfg, err := config.Load(); err == nil {
+		s.cfg = freshCfg
+	}
 }
 
 func resolveSourceDir(configured string) string {

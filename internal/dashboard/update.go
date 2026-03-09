@@ -260,7 +260,7 @@ func (m Model) handleAutopilotKey() (tea.Model, tea.Cmd) {
 
 	case queue.StateRunning:
 		m.engineMgr.Stop(t.ID)
-		queue.UpdateState(t.ID, queue.StatePlanned)
+		queue.ForceUpdateState(t.ID, queue.StatePlanned)
 		return m, fetchData(m.cfg)
 
 	}

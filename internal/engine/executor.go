@@ -20,6 +20,40 @@ import (
 
 const maxRetries = 3
 
+type contextCache map[string]string
+
+var contextFileList = []struct {
+	file  string
+	title string
+	limit int
+}{
+	{"CLAUDE.md", "Project Guidelines (from CLAUDE.md)", 2000},
+	{"README.md", "Project README (from README.md)", 1000},
+	{"INSTALL.md", "Project Install Guide (from INSTALL.md)", 800},
+	{"MEMORY.md", "Project Memory (from MEMORY.md)", 1500},
+	{"CONTEXT.md", "Project Context (from CONTEXT.md)", 1500},
+	{"ARCHITECT.md", "Project Architecture (from ARCHITECT.md)", 1500},
+	{"AGENTS.md", "Project Agents (from AGENTS.md)", 1000},
+	{"CHANGELOG.md", "Recent Changes (from CHANGELOG.md)", 800},
+	{"VERSIONING.md", "Versioning Strategy (from VERSIONING.md)", 800},
+	{"CONTRIBUTING.md", "Contributing Guidelines (from CONTRIBUTING.md)", 800},
+}
+
+func loadContextFiles(projectPath string) contextCache {
+	cache := make(contextCache)
+	for _, cf := range contextFileList {
+		path := filepath.Join(projectPath, cf.file)
+		if data, err := os.ReadFile(path); err == nil {
+			content := string(data)
+			if len(content) > cf.limit {
+				content = content[:cf.limit] + "\n[truncated]"
+			}
+			cache[cf.file] = content
+		}
+	}
+	return cache
+}
+
 func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg), b backend.Backend) {
 	emit := func(level logs.LogLevel, msg string, agent string) {
 		send(LogMsg{Entry: logs.LogEntry{
@@ -48,6 +82,8 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 	var stepSummaries []string
 	var sessionID string
 
+	ctxFiles := loadContextFiles(filepath.Join(cfg.ProjectsDir, task.Project))
+
 	total := len(p.Steps)
 	queue.SetTotalSteps(task.ID, total)
 	for _, step := range p.Steps {
@@ -61,13 +97,14 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 
 		if ctx.Err() != nil {
 			emit(logs.LevelWarn, "Autopilot stopped by user", agent)
-			queue.UpdateState(task.ID, queue.StatePlanned)
+			queue.ForceUpdateState(task.ID, queue.StatePlanned)
 			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned, Message: "stopped"})
 			return
 		}
 
 		for reason := CheckGuardrails(); reason != ""; reason = CheckGuardrails() {
 			emit(logs.LevelWarn, "Guardrail: "+reason+", waiting 2m...", agent)
+			send(TaskStateMsg{TaskID: task.ID, State: queue.StateRunning, Message: "guardrail_paused"})
 			select {
 			case <-ctx.Done():
 				queue.UpdateState(task.ID, queue.StatePlanned)
@@ -88,14 +125,13 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 				return
 			}
 
-			queue.SetCurrentStep(task.ID, step.Number)
 			if retry == 0 {
 				emit(logs.LevelInfo, fmt.Sprintf("Step %d/%d: %s", step.Number, total, step.Title), agent)
 			} else {
 				emit(logs.LevelWarn, fmt.Sprintf("Step %d/%d: retry %d/%d", step.Number, total, retry, maxRetries-1), agent)
 			}
 
-			prompt := buildStepPrompt(task, p, step, retry, recoveryCtx, strings.Join(stepSummaries, "\n"), cfg)
+			prompt := buildStepPrompt(task, p, step, retry, recoveryCtx, strings.Join(stepSummaries, "\n"), cfg, ctxFiles)
 			res, err := spawnBackend(ctx, b, task.Project, prompt, send, task.ID, addDirs, agent, cfg, sessionID)
 			lastRes = res
 
@@ -176,11 +212,12 @@ func runTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Confi
 		}
 
 		if !success {
-			// Layer 3: Meta-cognitive — fail task
+			// Layer 3: Meta-cognitive — fail task (forward to done with fail reason)
 			reason := fmt.Sprintf("Step %d '%s' failed after %d attempts", step.Number, step.Title, maxRetries)
 			emit(logs.LevelError, "FAILED: "+reason, agent)
 			queue.SetFailReason(task.ID, reason)
-			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: reason})
+			queue.UpdateState(task.ID, queue.StateDone)
+			send(TaskStateMsg{TaskID: task.ID, State: queue.StateDone, Message: reason})
 			return
 		}
 	}
@@ -267,13 +304,19 @@ func spawnBackend(ctx context.Context, b backend.Backend, project, prompt string
 		req.AllowedTools = allowed
 	}
 
-	// Execute via backend
+	// Execute via backend — use a channel to synchronize result
+	// to avoid a data race between the Execute goroutine and the
+	// event-draining loop (close(events) fires before return).
+	type spawnOut struct {
+		res backend.SpawnResult
+		err error
+	}
 	events := make(chan backend.Event, 64)
-	var result backend.SpawnResult
-	var execErr error
+	done := make(chan spawnOut, 1)
 
 	go func() {
-		result, execErr = b.Execute(spawnCtx, req, events)
+		r, err := b.Execute(spawnCtx, req, events)
+		done <- spawnOut{r, err}
 	}()
 
 	for ev := range events {
@@ -293,6 +336,8 @@ func spawnBackend(ctx context.Context, b backend.Backend, project, prompt string
 		}
 	}
 
+	out := <-done
+
 	// Detect step timeout
 	if spawnCtx.Err() != nil && ctx.Err() == nil {
 		send(LogMsg{Entry: logs.LogEntry{
@@ -303,13 +348,13 @@ func spawnBackend(ctx context.Context, b backend.Backend, project, prompt string
 			Level:   logs.LevelError,
 			Agent:   agent,
 		}})
-		return backend.SpawnResult{ExitCode: 124, Output: result.Output}, fmt.Errorf("step timeout after %d min", cfg.Spawn.StepTimeoutMin)
+		return backend.SpawnResult{ExitCode: 124, Output: out.res.Output}, fmt.Errorf("step timeout after %d min", cfg.Spawn.StepTimeoutMin)
 	}
 
-	return result, execErr
+	return out.res, out.err
 }
 
-func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string, cfg config.Config) string {
+func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, recoveryCtx, prevSteps string, cfg config.Config, ctxFiles contextCache) string {
 	if task.Assignee == "system" {
 		return buildSystemStepPrompt(task, p, step, retry, recoveryCtx, prevSteps, cfg)
 	}
@@ -322,29 +367,9 @@ func buildStepPrompt(task queue.Task, p plan.Plan, step plan.Step, retry int, re
 	sb.WriteString(fmt.Sprintf("Working directory: %s\n", projectPath))
 	sb.WriteString(fmt.Sprintf("Projects root: %s\n\n", cfg.ProjectsDir))
 
-	// Inject project context files if present
-	for _, cf := range []struct {
-		file  string
-		title string
-		limit int
-	}{
-		{"CLAUDE.md", "Project Guidelines (from CLAUDE.md)", 2000},
-		{"README.md", "Project README (from README.md)", 1000},
-		{"INSTALL.md", "Project Install Guide (from INSTALL.md)", 800},
-		{"MEMORY.md", "Project Memory (from MEMORY.md)", 1500},
-		{"CONTEXT.md", "Project Context (from CONTEXT.md)", 1500},
-		{"ARCHITECT.md", "Project Architecture (from ARCHITECT.md)", 1500},
-		{"AGENTS.md", "Project Agents (from AGENTS.md)", 1000},
-		{"CHANGELOG.md", "Recent Changes (from CHANGELOG.md)", 800},
-		{"VERSIONING.md", "Versioning Strategy (from VERSIONING.md)", 800},
-		{"CONTRIBUTING.md", "Contributing Guidelines (from CONTRIBUTING.md)", 800},
-	} {
-		cfPath := filepath.Join(projectPath, cf.file)
-		if data, err := os.ReadFile(cfPath); err == nil {
-			content := string(data)
-			if len(content) > cf.limit {
-				content = content[:cf.limit] + "\n[truncated]"
-			}
+	// Inject cached project context files
+	for _, cf := range contextFileList {
+		if content, ok := ctxFiles[cf.file]; ok {
 			sb.WriteString(fmt.Sprintf("## %s:\n", cf.title))
 			sb.WriteString(content + "\n\n")
 		}

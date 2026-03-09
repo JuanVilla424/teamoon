@@ -117,7 +117,8 @@ func (m *Manager) Start(task queue.Task, p plan.Plan, cfg config.Config, send fu
 			Level:   logs.LevelError,
 		}})
 		queue.SetFailReason(task.ID, msg)
-		send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: msg})
+		queue.UpdateState(task.ID, queue.StateDone)
+		send(TaskStateMsg{TaskID: task.ID, State: queue.StateDone, Message: msg})
 		close(r.done)
 		return
 	}
@@ -182,15 +183,13 @@ func (m *Manager) StopAll() {
 
 // StartProject launches an autopilot loop for the given project.
 // runLoop is called in a goroutine with the loop context.
-// Returns false if already running or max_concurrent reached.
-func (m *Manager) StartProject(project string, maxConcurrent int, runLoop func(ctx context.Context)) bool {
+// Returns false if already running for this project.
+// No project-loop limit — taskSem controls real task concurrency.
+func (m *Manager) StartProject(project string, runLoop func(ctx context.Context)) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, exists := m.projectLoops[project]; exists {
-		return false
-	}
-	if maxConcurrent > 0 && len(m.projectLoops) >= maxConcurrent {
 		return false
 	}
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -99,6 +100,19 @@ type SessionContext struct {
 	SessionFile    string  `json:"session_file"`
 }
 
+// fileCacheEntry stores parsed usage data for a single JSONL file.
+type fileCacheEntry struct {
+	modTime time.Time
+	tier    string
+	usage   Usage
+	model   string
+}
+
+var (
+	scanCacheMu sync.Mutex
+	scanCache   = make(map[string]fileCacheEntry)
+)
+
 // collectJSONL finds all *.jsonl files recursively under a directory.
 func collectJSONL(root string) []string {
 	var files []string
@@ -129,15 +143,20 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 	var latestModTime time.Time
 	var latestModel string
 
+	scanCacheMu.Lock()
+	defer scanCacheMu.Unlock()
+
+	seen := make(map[string]bool)
+
 	for _, d := range dirs {
 		if !d.IsDir() {
 			continue
 		}
 		sessionDir := filepath.Join(projectsDir, d.Name())
-		// Recursively find all jsonl files (including subagents/)
 		files := collectJSONL(sessionDir)
 
 		for _, f := range files {
+			seen[f] = true
 			info, err := os.Stat(f)
 			if err != nil {
 				continue
@@ -150,30 +169,50 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 
 			var fileModel string
 			var fileTier string
-			entries := parseJSONL(f)
-			for _, e := range entries {
-				if e.Message == nil || e.Message.Usage.InputTokens == 0 {
-					continue
-				}
 
-				u := e.Message.Usage
-				if e.Message.Model != "" {
-					fileModel = e.Message.Model
-					fileTier = modelTier(e.Message.Model)
+			// Use cached data if file hasn't changed
+			if ce, ok := scanCache[f]; ok && ce.modTime.Equal(modTime) {
+				fileTier = ce.tier
+				fileModel = ce.model
+				month.addUsage(ce.usage, fileTier)
+				if modTime.After(weekStart) || modTime.Equal(weekStart) {
+					week.addUsage(ce.usage, fileTier)
+				}
+				if modTime.After(todayStart) || modTime.Equal(todayStart) {
+					today.addUsage(ce.usage, fileTier)
+				}
+			} else {
+				// Parse and cache
+				var totalUsage Usage
+				entries := parseJSONL(f)
+				for _, e := range entries {
+					if e.Message == nil || e.Message.Usage.InputTokens == 0 {
+						continue
+					}
+					u := e.Message.Usage
+					if e.Message.Model != "" {
+						fileModel = e.Message.Model
+						fileTier = modelTier(e.Message.Model)
+					}
+					totalUsage.InputTokens += u.InputTokens
+					totalUsage.OutputTokens += u.OutputTokens
+					totalUsage.CacheReadInputTokens += u.CacheReadInputTokens
+					totalUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
 				}
 				tier := fileTier
 				if tier == "" {
 					tier = "sonnet-4-6"
 				}
+				fileTier = tier
 
-				month.addUsage(u, tier)
+				scanCache[f] = fileCacheEntry{modTime: modTime, tier: tier, usage: totalUsage, model: fileModel}
 
+				month.addUsage(totalUsage, tier)
 				if modTime.After(weekStart) || modTime.Equal(weekStart) {
-					week.addUsage(u, tier)
+					week.addUsage(totalUsage, tier)
 				}
-
 				if modTime.After(todayStart) || modTime.Equal(todayStart) {
-					today.addUsage(u, tier)
+					today.addUsage(totalUsage, tier)
 				}
 			}
 
@@ -191,6 +230,13 @@ func ScanTokens(claudeDir string) (today TokenSummary, week TokenSummary, month 
 			if modTime.After(todayStart) {
 				today.SessionCount++
 			}
+		}
+	}
+
+	// Evict stale cache entries
+	for k := range scanCache {
+		if !seen[k] {
+			delete(scanCache, k)
 		}
 	}
 

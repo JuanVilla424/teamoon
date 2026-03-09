@@ -50,12 +50,30 @@ func RunHarvester(cfg config.Config) string {
 		}
 	}
 
-	// Phase 2: create security tasks for projects without pending ones
+	// Phase 2: ensure one security task per project — recycle existing or create new
+	tasksRecycled := 0
 	for _, p := range projs {
 		if !p.HasGit {
 			continue
 		}
-		if hasSecurityTask(p.Name) {
+		existing := findSecurityTask(p.Name)
+		if existing != nil {
+			// Task already exists — if done, recycle it (replan)
+			state := queue.EffectiveState(*existing)
+			if state == queue.StateDone || state == queue.StateArchived {
+				queue.ResetPlan(existing.ID)
+				queue.ForceUpdateState(existing.ID, queue.StatePending)
+				queue.SetFailReason(existing.ID, "")
+				if !existing.AutoPilot {
+					queue.ToggleAutoPilot(existing.ID)
+				}
+				tasksRecycled++
+				log.Printf("[harvester] %s: recycled security task #%d", p.Name, existing.ID)
+			} else if !existing.AutoPilot {
+				// Pending/planned/running but autopilot off — enable it so it executes
+				queue.ToggleAutoPilot(existing.ID)
+				log.Printf("[harvester] %s: enabled autopilot on security task #%d", p.Name, existing.ID)
+			}
 			continue
 		}
 		t, err := queue.Add(p.Name, securityInstruction, "med")
@@ -68,19 +86,19 @@ func RunHarvester(cfg config.Config) string {
 		log.Printf("[harvester] %s: created security task #%d", p.Name, t.ID)
 	}
 
-	return fmt.Sprintf("Merged %d dependabot PRs (%d failed), created %d security tasks", totalMerged, totalFailed, tasksCreated)
+	return fmt.Sprintf("Merged %d dependabot PRs (%d failed), created %d / recycled %d security tasks", totalMerged, totalFailed, tasksCreated, tasksRecycled)
 }
 
-// hasSecurityTask checks if the project already has a non-done security harvest task.
-func hasSecurityTask(project string) bool {
-	pending, err := queue.ListPending()
+// findSecurityTask finds the existing security harvest task for a project (any state).
+func findSecurityTask(project string) *queue.Task {
+	all, err := queue.ListAll()
 	if err != nil {
-		return false
+		return nil
 	}
-	for _, t := range pending {
-		if t.Project == project && strings.Contains(t.Description, "Security Harvest") {
-			return true
+	for i := range all {
+		if all[i].Project == project && strings.Contains(all[i].Description, "Security Harvest") {
+			return &all[i]
 		}
 	}
-	return false
+	return nil
 }

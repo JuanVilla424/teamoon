@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/JuanVilla424/teamoon/internal/config"
 )
@@ -126,6 +127,16 @@ func (b *ClaudeBackend) Execute(ctx context.Context, req SpawnRequest, events ch
 	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
+
+	// Create a new process group so we can kill all children on stop
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Kill the entire process group (negative PID)
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 
 	// Set environment
 	if len(req.Env) > 0 {

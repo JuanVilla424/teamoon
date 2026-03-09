@@ -40,13 +40,14 @@ type LogEntry struct {
 }
 
 type RingBuffer struct {
-	mu      sync.Mutex
-	entries []LogEntry
-	head    int
-	size    int
-	cap     int
-	file    *os.File
-	debug   bool
+	mu        sync.Mutex
+	entries   []LogEntry
+	head      int
+	size      int
+	cap       int
+	file      *os.File
+	debug     bool
+	taskFiles map[int]*os.File
 }
 
 func (r *RingBuffer) SetDebug(on bool) {
@@ -61,7 +62,8 @@ func NewRingBuffer(retentionDays int) *RingBuffer {
 	}
 	f, _ := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	rb := &RingBuffer{
-		file: f,
+		file:      f,
+		taskFiles: make(map[int]*os.File),
 	}
 	rb.loadFromFileRetention(retentionDays)
 	return rb
@@ -132,12 +134,18 @@ func (r *RingBuffer) Add(e LogEntry) {
 		r.file.WriteString(line)
 	}
 	if e.TaskID > 0 {
-		dir := taskLogDir()
-		os.MkdirAll(dir, 0755)
-		f, err := os.OpenFile(taskLogPath(e.TaskID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err == nil {
-			f.WriteString(line)
-			f.Close()
+		tf, ok := r.taskFiles[e.TaskID]
+		if !ok {
+			dir := taskLogDir()
+			os.MkdirAll(dir, 0755)
+			var err error
+			tf, err = os.OpenFile(taskLogPath(e.TaskID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err == nil {
+				r.taskFiles[e.TaskID] = tf
+			}
+		}
+		if tf != nil {
+			tf.WriteString(line)
 		}
 	}
 }
@@ -146,7 +154,21 @@ func (r *RingBuffer) File() *os.File {
 	return r.file
 }
 
+// CloseTaskFile closes and removes the cached file handle for a task.
+func (r *RingBuffer) CloseTaskFile(taskID int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if f, ok := r.taskFiles[taskID]; ok {
+		f.Close()
+		delete(r.taskFiles, taskID)
+	}
+}
+
 func (r *RingBuffer) Close() {
+	for _, f := range r.taskFiles {
+		f.Close()
+	}
+	r.taskFiles = nil
 	if r.file != nil {
 		r.file.Close()
 	}

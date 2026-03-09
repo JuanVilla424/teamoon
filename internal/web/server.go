@@ -69,14 +69,32 @@ func NewServer(cfg config.Config, mgr *engine.Manager, logBuf *logs.RingBuffer) 
 }
 
 func (s *Server) RecoverAndResume() {
-	// Phase 1: Reset tasks without session (legacy behavior)
+	noopEmit := func(level logs.LogLevel, msg string) {
+		log.Printf("[recovery] %s", msg)
+	}
+
+	// Phase 1: Reset tasks without session, then direct-resume those with a plan
 	recovered, err := queue.RecoverRunning()
 	if err != nil {
 		log.Printf("[recovery] error: %v", err)
 		return
 	}
 	for _, t := range recovered {
-		log.Printf("[recovery] task #%d (%s) reset to %s", t.ID, t.Project, t.State)
+		log.Printf("[recovery] task #%d (%s) reset to %s (step %d)", t.ID, t.Project, t.State, t.CurrentStep)
+		if t.PlanFile != "" {
+			p, parseErr := plan.ParsePlan(plan.PlanPath(t.ID))
+			if parseErr != nil {
+				log.Printf("[recovery] task #%d plan parse failed, staying %s: %v", t.ID, t.State, parseErr)
+				continue
+			}
+			// Acquire slot in goroutine so recovery doesn't bypass concurrency limits
+			go func(task queue.Task, p plan.Plan) {
+				s.store.engineMgr.AcquireSlot()
+				defer s.store.engineMgr.ReleaseSlot()
+				engine.StartAndWaitTask(context.Background(), task, p, s.cfg, s.webSend(task.ID), s.store.engineMgr, noopEmit)
+			}(t, p)
+			log.Printf("[recovery] direct resume task #%d (%s) from step %d (slot-gated)", t.ID, t.Project, t.CurrentStep)
+		}
 	}
 
 	// Phase 2: Resume tasks with session_id (can continue where they left off)
@@ -88,12 +106,21 @@ func (s *Server) RecoverAndResume() {
 		p, parseErr := plan.ParsePlan(plan.PlanPath(t.ID))
 		if parseErr != nil {
 			log.Printf("[recovery] task #%d plan parse failed, falling back to planned: %v", t.ID, parseErr)
-			queue.UpdateState(t.ID, queue.StatePlanned)
+			queue.ForceUpdateState(t.ID, queue.StatePlanned)
 			continue
 		}
-		s.store.engineMgr.Start(t, p, s.cfg, s.webSend(t.ID))
-		log.Printf("[recovery] resuming task #%d (%s) from step %d with session %s",
-			t.ID, t.Project, t.CurrentStep, t.SessionID[:min(8, len(t.SessionID))]+"...")
+		// Clear stale session ID — runTask already skips completed steps
+		// via step.Number <= task.CurrentStep, so session resume is unnecessary
+		// and can hang if the session expired.
+		queue.SetSessionID(t.ID, "")
+		// Acquire slot in goroutine so recovery doesn't bypass concurrency limits
+		go func(task queue.Task, p plan.Plan) {
+			s.store.engineMgr.AcquireSlot()
+			defer s.store.engineMgr.ReleaseSlot()
+			engine.StartAndWaitTask(context.Background(), task, p, s.cfg, s.webSend(task.ID), s.store.engineMgr, noopEmit)
+		}(t, p)
+		log.Printf("[recovery] resuming task #%d (%s) from step %d (slot-gated, session cleared)",
+			t.ID, t.Project, t.CurrentStep)
 	}
 
 	if !s.cfg.AutopilotAutostart {
@@ -110,7 +137,7 @@ func (s *Server) RecoverAndResume() {
 	for _, project := range projects {
 		cfg := s.cfg
 		send := s.webSend(0)
-		ok := s.store.engineMgr.StartProject(project, cfg.MaxConcurrent, func(ctx context.Context) {
+		ok := s.store.engineMgr.StartProject(project, func(ctx context.Context) {
 			engine.RunProjectLoop(ctx, project, cfg, func(t queue.Task, sk config.SkeletonConfig, logFn func(string)) (plan.Plan, error) {
 				return plangen.GeneratePlan(t, sk, cfg, logFn)
 			}, send, s.store.engineMgr)
@@ -126,10 +153,32 @@ func (s *Server) RecoverAndResume() {
 	}
 }
 
+// startAutopilotForNewProjects starts autopilot loops for projects that have
+// autopilot-eligible tasks but no running loop (e.g. after harvester creates tasks).
+func (s *Server) startAutopilotForNewProjects(ctx context.Context) {
+	projects, err := queue.AutopilotProjects()
+	if err != nil {
+		return
+	}
+	cfg := s.cfg
+	send := s.webSend(0)
+	for _, project := range projects {
+		if s.store.engineMgr.IsProjectRunning(project) {
+			continue
+		}
+		s.store.engineMgr.StartProject(project, func(ctx context.Context) {
+			engine.RunProjectLoop(ctx, project, cfg, func(t queue.Task, sk config.SkeletonConfig, logFn func(string)) (plan.Plan, error) {
+				return plangen.GeneratePlan(t, sk, cfg, logFn)
+			}, send, s.store.engineMgr)
+		})
+		log.Printf("[harvester] auto-started autopilot for project: %s", project)
+	}
+}
+
 func (s *Server) startSystemLoop() {
 	cfg := s.cfg
 	send := s.webSend(0)
-	s.store.engineMgr.StartProject("_system", cfg.MaxConcurrent, func(ctx context.Context) {
+	s.store.engineMgr.StartProject("_system", func(ctx context.Context) {
 		engine.RunSystemLoop(ctx, cfg, func(t queue.Task, sk config.SkeletonConfig, logFn func(string)) (plan.Plan, error) {
 			return plangen.GeneratePlan(t, sk, cfg, logFn)
 		}, send, s.store.engineMgr)
@@ -140,12 +189,17 @@ func (s *Server) Start(ctx context.Context) {
 	metrics.StartUsageFetcher(s.cfg.ProjectsDir)
 	s.store.Refresh()
 	s.RecoverAndResume()
+	s.startAutopilotForNewProjects(ctx)
 
 	// Seed default jobs (harvester, etc.) and start scheduler
 	jobs.SeedDefaults()
 	jobCfg := s.cfg
 	jobs.StartScheduler(ctx, func(j jobs.Job) {
 		jobs.RunJob(ctx, j, jobCfg)
+		// After harvester creates security tasks, start autopilot loops for new projects
+		if j.Instruction == "__harvester__" {
+			s.startAutopilotForNewProjects(ctx)
+		}
 		s.refreshAndBroadcast()
 	})
 
@@ -184,6 +238,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/onboarding/bmad", s.logRequest(s.handleOnboardingBMAD))
 	mux.HandleFunc("/api/onboarding/hooks", s.logRequest(s.handleOnboardingHooks))
 	mux.HandleFunc("/api/onboarding/mcp", s.logRequest(s.handleOnboardingMCP))
+	mux.HandleFunc("/api/onboarding/mcp/optional", s.logRequest(s.handleOnboardingMCPOptional))
 	mux.HandleFunc("/api/onboarding/plugins", s.logRequest(s.handleOnboardingPlugins))
 
 	mux.HandleFunc("/api/auth/login", s.logRequest(s.handleLogin))
@@ -195,6 +250,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/tasks/add", s.logRequest(s.authWrap(s.handleTaskAdd)))
 	mux.HandleFunc("/api/tasks/done", s.logRequest(s.authWrap(s.handleTaskDone)))
 	mux.HandleFunc("/api/tasks/archive", s.logRequest(s.authWrap(s.handleTaskArchive)))
+	mux.HandleFunc("/api/tasks/bulk-archive", s.logRequest(s.authWrap(s.handleTaskBulkArchive)))
 	mux.HandleFunc("/api/tasks/replan", s.logRequest(s.authWrap(s.handleTaskReplan)))
 	mux.HandleFunc("/api/tasks/autopilot", s.logRequest(s.authWrap(s.handleTaskAutopilot)))
 	mux.HandleFunc("/api/tasks/stop", s.logRequest(s.authWrap(s.handleTaskStop)))
@@ -220,6 +276,7 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("/api/projects/init", s.logRequest(s.authWrap(s.handleProjectInit)))
 	mux.HandleFunc("/api/config", s.logRequest(s.authWrap(s.handleConfigGet)))
 	mux.HandleFunc("/api/config/save", s.logRequest(s.authWrap(s.handleConfigSave)))
+	mux.HandleFunc("/api/mcp/optional", s.logRequest(s.authWrap(s.handleMCPOptionalList)))
 	mux.HandleFunc("/api/mcp/list", s.logRequest(s.authWrap(s.handleMCPList)))
 	mux.HandleFunc("/api/mcp/toggle", s.logRequest(s.authWrap(s.handleMCPToggle)))
 	mux.HandleFunc("/api/mcp/init", s.logRequest(s.authWrap(s.handleMCPInit)))
@@ -345,6 +402,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) refreshAndBroadcast() {
+	queue.FlushIfDirty()
 	s.store.Refresh()
 	snap := s.store.Get()
 	data, err := json.Marshal(snap)

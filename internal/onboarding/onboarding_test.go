@@ -118,6 +118,87 @@ func TestMergeHooksIntoSettings_NewFile(t *testing.T) {
 	}
 }
 
+func TestOptionalMCPServers_PencilExists(t *testing.T) {
+	found := false
+	for _, m := range optionalMCPServers {
+		if m.name == "pencil" {
+			found = true
+			if m.command != "pencil-mcp" {
+				t.Fatalf("expected pencil command 'pencil-mcp', got %q", m.command)
+			}
+			if m.setupFunc == nil {
+				t.Fatal("pencil setupFunc should not be nil")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pencil not found in optionalMCPServers")
+	}
+}
+
+func TestListOptionalMCP(t *testing.T) {
+	items := ListOptionalMCP()
+	if len(items) == 0 {
+		t.Fatal("expected at least one optional MCP")
+	}
+	found := false
+	for _, item := range items {
+		if item.Name == "pencil" {
+			found = true
+			if item.Description == "" {
+				t.Fatal("pencil description should not be empty")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pencil not found in ListOptionalMCP result")
+	}
+}
+
+func TestInstallPencilWrapper(t *testing.T) {
+	origHome := os.Getenv("HOME")
+	tmpDir := t.TempDir()
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	err := installPencilWrapper()
+	if err != nil {
+		t.Fatalf("installPencilWrapper failed: %v", err)
+	}
+
+	wrapperPath := filepath.Join(tmpDir, ".local", "bin", "pencil-mcp")
+	data, err := os.ReadFile(wrapperPath)
+	if err != nil {
+		t.Fatalf("wrapper not created: %v", err)
+	}
+	content := string(data)
+	if len(content) < 50 {
+		t.Fatal("wrapper script too short")
+	}
+	// Verify it contains the find command for Pencil
+	if !contains(content, "mcp-server-linux-x64") {
+		t.Fatal("wrapper missing mcp-server-linux-x64 reference")
+	}
+	// Verify executable
+	info, _ := os.Stat(wrapperPath)
+	if info.Mode()&0111 == 0 {
+		t.Fatal("wrapper is not executable")
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestMergeHooksIdempotent(t *testing.T) {
 	tmpDir := t.TempDir()
 	settingsPath := filepath.Join(tmpDir, "settings.json")

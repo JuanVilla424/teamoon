@@ -17,7 +17,7 @@ func TestBuildStepPrompt_AgentIdentity(t *testing.T) {
 	p := plan.Plan{Steps: []plan.Step{{Number: 1, Title: "Do stuff", Body: "body", Agent: "analyst"}}}
 	step := p.Steps[0]
 
-	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig(), nil)
 	if !strings.Contains(prompt, "executing step 1 of 1") {
 		t.Error("prompt should mention step execution")
 	}
@@ -31,7 +31,7 @@ func TestBuildStepPrompt_WithAgent(t *testing.T) {
 	step := plan.Step{Number: 1, Title: "Step", Body: "body", Agent: "architect"}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
-	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig(), nil)
 	if !strings.Contains(prompt, "architect agent") {
 		t.Error("prompt should mention agent name")
 	}
@@ -49,7 +49,7 @@ func TestBuildStepPrompt_CLAUDEMDInjection(t *testing.T) {
 
 	// The function reads from ~/Projects/<project>/CLAUDE.md
 	// We can't easily mock HOME, so just verify the mechanism works by checking rules are present
-	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig(), nil)
 	if !strings.Contains(prompt, "RULES:") {
 		t.Error("prompt should contain RULES section")
 	}
@@ -60,7 +60,7 @@ func TestBuildStepPrompt_RetryContext(t *testing.T) {
 	step := plan.Step{Number: 1, Title: "Step", Body: "body"}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
-	prompt := buildStepPrompt(task, p, step, 1, "Previous error: something broke", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 1, "Previous error: something broke", "", config.DefaultConfig(), nil)
 	if !strings.Contains(prompt, "Previous attempt context") {
 		t.Error("prompt should include recovery context on retry")
 	}
@@ -74,7 +74,7 @@ func TestBuildStepPrompt_AllRules(t *testing.T) {
 	step := plan.Step{Number: 1, Title: "Step", Body: "body"}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
-	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig(), nil)
 	expectedRules := []string{
 		"create, edit or modify source code",
 		"FULL permissions",
@@ -92,7 +92,7 @@ func TestBuildStepPrompt_AllRules(t *testing.T) {
 
 	// ReadOnly step should have different rules
 	roStep := plan.Step{Number: 1, Title: "Step", Body: "body", ReadOnly: true}
-	roPrompt := buildStepPrompt(task, p, roStep, 0, "", "", config.DefaultConfig())
+	roPrompt := buildStepPrompt(task, p, roStep, 0, "", "", config.DefaultConfig(), nil)
 	roExpected := []string{
 		"READ-ONLY step",
 		"Summarize your findings",
@@ -113,7 +113,7 @@ func TestBuildStepPrompt_PrevSteps(t *testing.T) {
 	step := plan.Step{Number: 2, Title: "Step 2", Body: "body"}
 	p := plan.Plan{Steps: []plan.Step{{Number: 1, Title: "Step 1"}, step}}
 
-	prompt := buildStepPrompt(task, p, step, 0, "", "Step 1: did things", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "Step 1: did things", config.DefaultConfig(), nil)
 	if !strings.Contains(prompt, "Previous steps completed") {
 		t.Error("prompt should include previous steps section")
 	}
@@ -231,7 +231,7 @@ func TestBuildStepPrompt_ReadOnlyRules(t *testing.T) {
 	step := plan.Step{Number: 1, Title: "Investigate", Body: "Read files", ReadOnly: true}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
-	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig(), nil)
 	if !strings.Contains(prompt, "READ-ONLY step") {
 		t.Error("ReadOnly step prompt should contain READ-ONLY instruction")
 	}
@@ -245,7 +245,7 @@ func TestBuildStepPrompt_NonReadOnlyRules(t *testing.T) {
 	step := plan.Step{Number: 1, Title: "Implement", Body: "Write code", ReadOnly: false}
 	p := plan.Plan{Steps: []plan.Step{step}}
 
-	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig())
+	prompt := buildStepPrompt(task, p, step, 0, "", "", config.DefaultConfig(), nil)
 	if strings.Contains(prompt, "READ-ONLY step") {
 		t.Error("Non-ReadOnly step should NOT contain READ-ONLY instruction")
 	}

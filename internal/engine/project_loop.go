@@ -132,7 +132,7 @@ func planOneTask(ctx context.Context, task queue.Task, cfg config.Config, planFn
 		reason := fmt.Sprintf("plan generation failed (attempt %d/%d): %v", attempts, maxAttempts, planErr)
 		emit(logs.LevelError, fmt.Sprintf("Plan failed for task #%d: %v", task.ID, planErr))
 		queue.SetFailReason(task.ID, reason)
-		send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: "plan_failed"})
+		send(TaskStateMsg{TaskID: task.ID, State: queue.EffectiveState(task), Message: "plan_failed"})
 		return plan.Plan{}, false
 	}
 	emit(logs.LevelSuccess, fmt.Sprintf("Plan ready for task #%d", task.ID))
@@ -212,16 +212,19 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 		}
 
 		if len(wave) == 1 {
-			// Single task — same sequential behavior as before
+			// Single task — acquire slot for entire lifecycle (plan + execute)
 			task := wave[0]
 			if cfg.Debug {
 				log.Printf("[debug][autopilot] selected task #%d (wave %d) state=%s", task.ID, task.Wave, queue.EffectiveState(task))
 			}
 
+			mgr.AcquireSlot()
+
 			state := queue.EffectiveState(task)
 			if state == queue.StatePending {
 				p, ok := planOneTask(ctx, task, cfg, planFn, send, emit)
 				if !ok {
+					mgr.ReleaseSlot()
 					if ctx.Err() != nil {
 						return
 					}
@@ -229,18 +232,24 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 				}
 				select {
 				case <-ctx.Done():
+					mgr.ReleaseSlot()
 					return
 				case <-time.After(2 * time.Second):
 				}
-				runOneTask(ctx, task, p, cfg, send, mgr, emit)
+				StartAndWaitTask(ctx, task, p, cfg, send, mgr, emit)
+				mgr.ReleaseSlot()
 			} else if state == queue.StatePlanned {
 				p, parseErr := plan.ParsePlan(plan.PlanPath(task.ID))
 				if parseErr != nil {
+					mgr.ReleaseSlot()
 					emit(logs.LevelError, fmt.Sprintf("Plan parse failed for task #%d: %v", task.ID, parseErr))
 					queue.SetFailReason(task.ID, "plan parse failed: "+parseErr.Error())
 					continue
 				}
-				runOneTask(ctx, task, p, cfg, send, mgr, emit)
+				StartAndWaitTask(ctx, task, p, cfg, send, mgr, emit)
+				mgr.ReleaseSlot()
+			} else {
+				mgr.ReleaseSlot()
 			}
 		} else {
 			// Multi-task wave — plan sequentially, then run in parallel
@@ -261,14 +270,18 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 				if ctx.Err() != nil {
 					return
 				}
+				// Acquire slot for planning (released after plan, re-acquired for execution)
+				mgr.AcquireSlot()
 				state := queue.EffectiveState(task)
 				if state == queue.StatePending {
 					p, ok := planOneTask(ctx, task, cfg, planFn, send, emit)
+					mgr.ReleaseSlot()
 					if !ok {
 						continue // skip failed plans, run the rest
 					}
 					planned = append(planned, taskPlan{task: task, plan: p})
 				} else if state == queue.StatePlanned {
+					mgr.ReleaseSlot()
 					p, parseErr := plan.ParsePlan(plan.PlanPath(task.ID))
 					if parseErr != nil {
 						emit(logs.LevelError, fmt.Sprintf("Plan parse failed for task #%d: %v", task.ID, parseErr))
@@ -276,6 +289,8 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 						continue
 					}
 					planned = append(planned, taskPlan{task: task, plan: p})
+				} else {
+					mgr.ReleaseSlot()
 				}
 			}
 
@@ -291,12 +306,14 @@ func RunProjectLoop(ctx context.Context, project string, cfg config.Config, plan
 				wg.Add(1)
 				go func(t queue.Task, p plan.Plan) {
 					defer wg.Done()
+					mgr.AcquireSlot()
+					defer mgr.ReleaseSlot()
 					select {
 					case <-ctx.Done():
 						return
 					case <-time.After(2 * time.Second):
 					}
-					runOneTask(ctx, t, p, cfg, send, mgr, emit)
+					StartAndWaitTask(ctx, t, p, cfg, send, mgr, emit)
 				}(tp.task, tp.plan)
 			}
 			wg.Wait()
@@ -364,6 +381,9 @@ func RunSystemLoop(ctx context.Context, cfg config.Config, planFn PlanFunc, send
 
 		skeleton := cfg.Skeleton
 
+		// Acquire slot for entire lifecycle (plan + execute)
+		mgr.AcquireSlot()
+
 		if state == queue.StatePending {
 			// Apply backoff based on previous failures
 			backoff := planBackoff(task.PlanAttempts)
@@ -375,6 +395,7 @@ func RunSystemLoop(ctx context.Context, cfg config.Config, planFn PlanFunc, send
 				select {
 				case <-ctx.Done():
 					emit(logs.LevelWarn, "System executor stopped")
+					mgr.ReleaseSlot()
 					return
 				case <-time.After(backoff):
 				}
@@ -394,29 +415,36 @@ func RunSystemLoop(ctx context.Context, cfg config.Config, planFn PlanFunc, send
 			}
 			p, planErr := planFn(task, skeleton, sysLogFn)
 			if planErr != nil {
+				mgr.ReleaseSlot()
 				attempts, _ := queue.IncrementPlanAttempts(task.ID)
 				reason := fmt.Sprintf("plan generation failed (attempt %d/%d): %v", attempts, maxAttempts, planErr)
 				emit(logs.LevelError, fmt.Sprintf("Plan failed for system task #%d: %v", task.ID, planErr))
 				queue.SetFailReason(task.ID, reason)
-				send(TaskStateMsg{TaskID: task.ID, State: queue.StatePending, Message: "plan_failed"})
+				send(TaskStateMsg{TaskID: task.ID, State: queue.EffectiveState(task), Message: "plan_failed"})
 				continue
 			}
 			emit(logs.LevelSuccess, fmt.Sprintf("Plan ready for system task #%d", task.ID))
 			send(TaskStateMsg{TaskID: task.ID, State: queue.StatePlanned})
 			select {
 			case <-ctx.Done():
+				mgr.ReleaseSlot()
 				return
 			case <-time.After(2 * time.Second):
 			}
-			runOneTask(ctx, task, p, cfg, send, mgr, emit)
+			StartAndWaitTask(ctx, task, p, cfg, send, mgr, emit)
+			mgr.ReleaseSlot()
 		} else if state == queue.StatePlanned {
 			p, parseErr := plan.ParsePlan(plan.PlanPath(task.ID))
 			if parseErr != nil {
+				mgr.ReleaseSlot()
 				emit(logs.LevelError, fmt.Sprintf("Plan parse failed for system task #%d: %v", task.ID, parseErr))
 				queue.SetFailReason(task.ID, "plan parse failed: "+parseErr.Error())
 				continue
 			}
-			runOneTask(ctx, task, p, cfg, send, mgr, emit)
+			StartAndWaitTask(ctx, task, p, cfg, send, mgr, emit)
+			mgr.ReleaseSlot()
+		} else {
+			mgr.ReleaseSlot()
 		}
 
 		select {
@@ -428,12 +456,9 @@ func RunSystemLoop(ctx context.Context, cfg config.Config, planFn PlanFunc, send
 	}
 }
 
-// runOneTask starts a single task via the engine manager and waits for completion or cancellation.
-func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg), mgr *Manager, emit func(logs.LogLevel, string)) {
-	// Acquire concurrency slot (blocks if max concurrent reached)
-	mgr.AcquireSlot()
-	defer mgr.ReleaseSlot()
-
+// StartAndWaitTask starts a task and waits for completion or cancellation.
+// Caller is responsible for AcquireSlot/ReleaseSlot.
+func StartAndWaitTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg), mgr *Manager, emit func(logs.LogLevel, string)) {
 	taskDone := make(chan struct{})
 
 	// Wrap send to detect task completion
@@ -459,6 +484,13 @@ func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Co
 	case <-taskDone:
 		// Task finished (done or back to pending), continue loop
 	}
+}
+
+// runOneTask acquires a concurrency slot, starts a task, waits, and releases the slot.
+func runOneTask(ctx context.Context, task queue.Task, p plan.Plan, cfg config.Config, send func(tea.Msg), mgr *Manager, emit func(logs.LogLevel, string)) {
+	mgr.AcquireSlot()
+	defer mgr.ReleaseSlot()
+	StartAndWaitTask(ctx, task, p, cfg, send, mgr, emit)
 }
 
 // stabilizeProject creates test/prod branches and protects main after all autopilot tasks complete.

@@ -144,6 +144,8 @@ func main() {
 				cfg.Debug = true
 			}
 
+			queue.InitStore()
+
 			engineMgr := engine.NewManager(backend.Resolve(config.BackendFor(cfg, "")))
 			engineMgr.SetMaxConcurrentTasks(cfg.MaxConcurrent)
 			logs.CleanupLogs(cfg.LogRetentionDays)
@@ -162,6 +164,7 @@ func main() {
 
 			log.Printf("[serve] v%s #%s on :%d", version, buildNum, cfg.WebPort)
 			<-ctx.Done()
+			queue.FlushIfDirty()
 			log.Println("[serve] shutting down")
 			return nil
 		},

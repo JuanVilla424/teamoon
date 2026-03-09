@@ -41,7 +41,7 @@ func refreshCache() guardrailSnapshot {
 func CheckGuardrails() string {
 	snap := refreshCache()
 
-	if snap.usage.WeekAll.Utilization >= 90 {
+	if snap.usage.WeekAll.Utilization >= 95 {
 		return fmt.Sprintf("Claude weekly usage at %.0f%% — pausing", snap.usage.WeekAll.Utilization)
 	}
 

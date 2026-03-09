@@ -56,18 +56,31 @@ func Scan(projectsDir string) []Project {
 		gitDir := filepath.Join(path, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
 			p.HasGit = true
-			p.Branch = gitCmd(path, "branch", "--show-current")
-			p.LastCommit = gitCmd(path, "log", "-1", "--format=%cr")
+
+			// Combined: branch + commit time + relative time + remote in one call
+			combined := gitCmd(path, "log", "-1", "--format=%D%n%cI%n%cr")
+			if lines := strings.SplitN(combined, "\n", 3); len(lines) >= 3 {
+				// Parse branch from HEAD -> refs
+				for _, ref := range strings.Split(lines[0], ", ") {
+					ref = strings.TrimSpace(ref)
+					if strings.HasPrefix(ref, "HEAD -> ") {
+						p.Branch = strings.TrimPrefix(ref, "HEAD -> ")
+						break
+					}
+				}
+				if p.Branch == "" {
+					p.Branch = gitCmd(path, "branch", "--show-current")
+				}
+				if t, err := time.Parse(time.RFC3339, strings.TrimSpace(lines[1])); err == nil {
+					p.CommitTime = t
+					p.Active = time.Since(t) < 7*24*time.Hour
+					p.Stale = time.Since(t) >= 60*24*time.Hour
+				}
+				p.LastCommit = strings.TrimSpace(lines[2])
+			}
 
 			remote := gitCmd(path, "remote", "get-url", "origin")
 			p.GitHubRepo = parseGitHubRepo(remote)
-
-			commitISO := gitCmd(path, "log", "-1", "--format=%cI")
-			if t, err := time.Parse(time.RFC3339, commitISO); err == nil {
-				p.CommitTime = t
-				p.Active = time.Since(t) < 7*24*time.Hour
-				p.Stale = time.Since(t) >= 60*24*time.Hour
-			}
 
 			status := gitCmd(path, "status", "--porcelain")
 			if status != "" {
